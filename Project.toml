@@ -1,0 +1,32 @@
+name = "Riemann35"
+uuid = "ef841222-879f-4f48-b9ef-62e4b8485d01"
+authors = ["Spencer <shb@gatech.edu>"]
+version = "0.1.0"
+
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
+MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[compat]
+GLMakie = "0.8, 0.9, 0.10"
+JLD2 = "0.4"
+MAT = "0.10"
+MPI = "0.20"
+MPIPreferences = "0.1.12"
+StaticArrays = "1"
+julia = "1.9, 1.10, 1.11"
+
+[extras]
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+MAT = "23992714-dd62-5051-b70f-ba57cb901cac"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "MAT", "GLMakie", "Random"]

@@ -1,0 +1,25 @@
+# Julia
+Manifest.toml
+**/Manifest.toml
+LocalPreferences.toml            # machine-specific MPI/CUDA binding — configure per-machine
+docs/build/
+docs/Manifest.toml
+
+# Generated GPU reference data (regenerate via gpu/dump_*.jl; the committed test
+# fixtures live in test/goldenfiles/ and are NOT ignored).
+/data/
+
+# Editor / OS
+.DS_Store
+.cursor/
+.cursorrules
+.vscode/
+.idea/
+
+# Logs / scratch outputs
+*.log
+nohup.out
+slurm-*.out
+snapshots_*.jld2
+snapshot_*.png
+snapshot_*.pdf
