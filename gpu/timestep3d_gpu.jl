@@ -114,7 +114,7 @@ neighbors). If `dts` is given those dt are used verbatim; else local CFL each st
 Returns the dt vector used.
 """
 function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
-                      dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128)
+                      dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2, threads::Int=128)
     @assert size(M_dev, 1) == 35 "M_dev must be (35,nx,ny,nz)"
     nx = size(M_dev, 2); ny = size(M_dev, 3); nz = size(M_dev, 4)
     dxf = Float64(dx); Maf = Float64(Ma); vacf = Float64(vacuum_floor)
@@ -127,7 +127,7 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
     M = M_dev
     L! = (Rint, st) -> residual3d_box_gpu!(Rint, st, nx, ny, nz, dxf, Maf;
                                            vacuum_floor=vacf, project_faces=true,
-                                           threads=threads, flat=flat)
+                                           order=order, threads=threads, flat=flat)
 
     used = Vector{Float64}(undef, nstep)
     for s in 1:nstep
@@ -147,7 +147,7 @@ steps. Halo planes are host-staged for `MPI.Sendrecv!`; global CFL via `Allreduc
 unless `dts` is supplied. Returns the dt vector used.
 """
 function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
-                           halo::Int=2, dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT,
+                           halo::Int=2, dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2,
                            threads::Int=128)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(M, 1) == 35
@@ -188,7 +188,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
             copyto!(@view(Mext[:, :, :, gtop:nz_ext]), reshape(hrT, 35, n, n, halo))
         end
         residual3d_box_gpu!(Rext, Mext, n, n, nz_ext, dxf, Maf;
-                            vacuum_floor=vacf, project_faces=true, threads=threads, flat=flat)
+                            vacuum_floor=vacf, project_faces=true, order=order, threads=threads, flat=flat)
         @inbounds Rout .= @view Rext[:, :, :, halo+1:halo+nzloc]
         return nothing
     end
