@@ -49,7 +49,8 @@ CPU validator and the GPU kernel module.
 module ReconDev
 
 export to_recon_vars_dev, from_recon_vars_dev, minmod,
-       to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup
+       to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup,
+       muscl_right_face_tup, muscl_left_face_tup
 
 const _EPSF = 2.220446049250313e-16   # eps(Float64)
 
@@ -57,6 +58,24 @@ const _EPSF = 2.220446049250313e-16   # eps(Float64)
 @inline function minmod(a, b)
     (a*b <= 0.0) ? 0.0 : (abs(a) < abs(b) ? Float64(a) : Float64(b))
 end
+
+# Single-source MUSCL face composition (recon vars, device/NTuple). The RIGHT face of
+# cell V0 (between V0 and Vp1) is V0 + 0.5*theta*minmod(V0-Vm1, Vp1-V0); the LEFT face of
+# cell Vp1 (between V0 and Vp1) is Vp1 - 0.5*theta*minmod(Vp1-V0, Vp2-Vp1). theta=1 is the
+# plain order-2 MUSCL face; theta<1 is the realizability scaling-limited face. Both the
+# GPU residual's order-2 and limiter branches build their faces through these, so the
+# slope+face formula lives in ONE place (the host `muscl_faces` uses the same minmod).
+@inline muscl_right_face_tup(Vm1::NTuple{35,Float64}, V0::NTuple{35,Float64},
+                             Vp1::NTuple{35,Float64}, θ::Float64) =
+    ntuple(Val(35)) do k
+        v0 = V0[k]; v0 + 0.5 * θ * minmod(v0 - Vm1[k], Vp1[k] - v0)
+    end
+
+@inline muscl_left_face_tup(V0::NTuple{35,Float64}, Vp1::NTuple{35,Float64},
+                            Vp2::NTuple{35,Float64}, θ::Float64) =
+    ntuple(Val(35)) do k
+        v0 = Vp1[k]; v0 - 0.5 * θ * minmod(v0 - V0[k], Vp2[k] - v0)
+    end
 
 # ---------------------------------------------------------------------------
 # Central moments from raw (verbatim @fastmath subset of autogen M4toC4_3D,

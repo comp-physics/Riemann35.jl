@@ -18,53 +18,31 @@ function residual_line(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
     # spanning g..Ntot-g. Compute Fhat at every interface that bounds an interior cell.
     # Interior cells are rows g+1 .. g+Ni; their bounding interfaces are g+1/2 .. g+Ni+1/2.
     Fhat = Vector{Vector{Float64}}(undef, g + Ni)
-    function face_states(iL)  # interface between cell iL and iL+1
-        if order == 1
-            return Mext[iL, :], Mext[iL+1, :]
-        else
-            Vl = muscl_faces(to_recon_vars(Mext[iL-1,:]), to_recon_vars(Mext[iL,:]), to_recon_vars(Mext[iL+1,:]))[2]
-            Vr = muscl_faces(to_recon_vars(Mext[iL,:]),   to_recon_vars(Mext[iL+1,:]), to_recon_vars(Mext[iL+2,:]))[1]
-            recon_face_pair(Vl, Vr, Mext[iL,:], Mext[iL+1,:])
+    # recon vars cached for all interior-bounding stencil rows (g >= 2 keeps iL-1..iL+2 in range).
+    Vc = order >= 2 ? [to_recon_vars(@view Mext[i, :]) for i in axes(Mext, 1)] : Vector{Vector{Float64}}()
+    if order == 1
+        for iface in g:(g+Ni)            # interface between cell iface and iface+1
+            Fhat[iface] = face_flux_1d(Mext[iface, :], Mext[iface+1, :], axis, Ma)
         end
-    end
-    if use_proj_recon && order == 2
-        # Rodney's projection-triggered control: a cell whose mean is flagged for
-        # the realizability projection (smallest Delta_2 eigenvalue < 0, i.e.
-        # `realizability_margin < 0`) reconstructs FIRST-ORDER (its face = cell mean);
-        # all other cells get full MUSCL. recon_face_pair still guards the MUSCL
-        # faces against nonpositive reconstructed density. Per-cell, local, and uses
-        # the same realizability signal as the projection itself.
-        Vc = [to_recon_vars(@view Mext[i, :]) for i in axes(Mext, 1)]
+    elseif use_proj_recon
+        # Rodney's projection-triggered control: a cell flagged for the realizability
+        # projection (`realizability_margin < 0`) reconstructs FIRST-ORDER (face = cell mean);
+        # all others get full MUSCL. Same realizability signal as the projection itself.
         flagged = [realizability_margin(@view Mext[i, :]) < 0 for i in axes(Mext, 1)]
-        function face_states_proj(iL)   # interface between cell iL and iL+1
-            VplusL  = flagged[iL]   ? Vc[iL]   : muscl_faces(Vc[iL-1], Vc[iL],   Vc[iL+1])[2]
-            VminusR = flagged[iL+1] ? Vc[iL+1] : muscl_faces(Vc[iL],   Vc[iL+1], Vc[iL+2])[1]
-            return recon_face_pair(VplusL, VminusR, Mext[iL, :], Mext[iL+1, :])
+        for iL in g:(g+Ni)
+            ML, MR = recon_faces_proj(flagged[iL], flagged[iL+1],
+                                      Vc[iL-1], Vc[iL], Vc[iL+1], Vc[iL+2], Mext[iL, :], Mext[iL+1, :])
+            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma)
         end
-        for iface in g:(g+Ni)
-            ML, MR = face_states_proj(iface)
-            Fhat[iface] = face_flux_1d(ML, MR, axis, Ma)
-        end
-    elseif use_limiter && order == 2
-        # Realizability scaling limiter branch.
-        # Precompute reconstruction variables for all rows (g >= 2 guarantees
-        # indices iL-1 .. iL+2 are in range for iL in g:(g+Ni)).
-        Vc = [to_recon_vars(@view Mext[i, :]) for i in axes(Mext, 1)]
-        function face_states_lim(iL)   # interface between cell iL and iL+1
-            # right face of cell iL: Vplus = V0 + 0.5*theta*slope
-            _, VplusL, _  = scaling_limited_faces(Vc[iL-1], Vc[iL],   Vc[iL+1])
-            # left face of cell iL+1: Vminus = V0 - 0.5*theta*slope
-            VminusR, _, _ = scaling_limited_faces(Vc[iL],   Vc[iL+1], Vc[iL+2])
-            return from_recon_vars(VplusL), from_recon_vars(VminusR)
-        end
-        for iface in g:(g+Ni)
-            ML, MR = face_states_lim(iface)
-            Fhat[iface] = face_flux_1d(ML, MR, axis, Ma)
+    elseif use_limiter
+        for iL in g:(g+Ni)
+            ML, MR = recon_faces_limited(Vc[iL-1], Vc[iL], Vc[iL+1], Vc[iL+2])
+            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma)
         end
     else
-        for iface in g:(g+Ni)            # interfaces bounding interior cells
-            ML, MR = face_states(iface)
-            Fhat[iface] = face_flux_1d(ML, MR, axis, Ma)
+        for iL in g:(g+Ni)
+            ML, MR = recon_faces_default(Vc[iL-1], Vc[iL], Vc[iL+1], Vc[iL+2], Mext[iL, :], Mext[iL+1, :])
+            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma)
         end
     end
     R = zeros(Ni, 35)

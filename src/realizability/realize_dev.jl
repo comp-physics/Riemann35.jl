@@ -44,10 +44,12 @@ using StaticArrays
 # this file (HyQMOM in src/, plus the GPU modules RealizeGPU / Residual2GPU /
 # Residual3DGPU) `include`s `recon_dev.jl` as a sibling module FIRST, so `..ReconDev`
 # always resolves.
-using ..ReconDev: to_recon_vars_dev, from_recon_vars_dev
+using ..ReconDev: to_recon_vars_dev, from_recon_vars_dev,
+       to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod
 
 export realizable_3D_M4_dev, realizable_3D_M4_corr_dev, projection35_dev,
-       delta2star_mineig_dev, sym6_mineig, realizability_S2_dev, realizability_S220_dev
+       delta2star_mineig_dev, sym6_mineig, realizability_S2_dev, realizability_S220_dev,
+       is_realizable_recon_dev, scaling_theta_dev, scaling_limited_faces_dev
 
 # ---------------------------------------------------------------------------
 # realizability_S2  (port of src/realizability/realizability_S2.jl, NOT @fastmath)
@@ -664,6 +666,73 @@ end
         c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12],
         c[13], c[14], c[15], c[16], c[17], c[18], c[19], c[20], c[21], c[22], c[23],
         c[24], c[25], c[26], c[27], c[28], c[29], c[30], c[31], c[32], c[33], c[34], c[35])
+end
+
+# ---------------------------------------------------------------------------
+# Realizability scaling limiter (Zhang--Shu / Fan--Huang--Wu), device version.
+# SHARED single source for the CPU `scaling_limited_faces` (reconstruction.jl)
+# limiter math; the GPU residual's `ho_realizability_limiter` path uses these.
+# (The per-platform realizability ORACLE eig solver still differs — LAPACK on
+# the CPU, the analytic `delta2star_mineig_dev` here — so CPU/GPU agree only to
+# the wave-speed/eig floor, like the rest of the high-order path.)
+# ---------------------------------------------------------------------------
+# Realizability test of a candidate face given in recon variables `V`
+# (V[1]=rho, V[5..7]=directional variances, V[8..35]=standardized moments).
+# Mirrors CPU `recon_vars_ok(V) && is_realizable(from_recon_vars(V); lam_min=0)`:
+# round-trips through raw moments so the standardized moments tested match the
+# oracle's `M2CS4_35`. `lam_min` is 0 (the residual path's default).
+# @noinline: contains the large `delta2star_mineig_dev`; the limiter calls it ~42x
+# per face, so inlining it into the already-huge residual kernel blows the device
+# compiler's inlining budget (-> spurious dynamic dispatch). Compiled once, called.
+@noinline function is_realizable_recon_dev(V::NTuple{35,Float64})
+    recon_vars_ok_tup(V) || return false
+    C  = from_recon_vars_tup(V)
+    Vt = to_recon_vars_tup(C)
+    (Vt[1] > 0.0 && Vt[5] > 0.0 && Vt[6] > 0.0 && Vt[7] > 0.0) || return false
+    m = delta2star_mineig_dev(
+        Vt[8],  Vt[9],  Vt[10], Vt[11], Vt[12], Vt[13], Vt[14], Vt[15], Vt[16], Vt[17],
+        Vt[18], Vt[19], Vt[20], Vt[21], Vt[22], Vt[23], Vt[24], Vt[25], Vt[26], Vt[27],
+        Vt[28], Vt[29], Vt[30], Vt[31], Vt[32], Vt[33], Vt[34], Vt[35])
+    return isfinite(m) && m >= 0.0
+end
+
+# Both faces of a cell, shrunk by the largest theta in [0,1] for which BOTH map
+# to realizable states (recon vars in, recon vars out). theta=1 unlimited;
+# theta=0 collapses to the cell mean. 20-iteration bisection == CPU `nbisect`.
+@inline function _faces_realizable_dev(V0::NTuple{35,Float64}, s::NTuple{35,Float64}, θ::Float64)
+    Vminus = ntuple(Val(35)) do k; V0[k] - 0.5 * θ * s[k]; end
+    Vplus  = ntuple(Val(35)) do k; V0[k] + 0.5 * θ * s[k]; end
+    return is_realizable_recon_dev(Vminus) && is_realizable_recon_dev(Vplus)
+end
+
+# Core shared primitive: the largest theta in [0,1] for which BOTH of cell V0's
+# faces are realizable. Returns a plain Float64 — the residual kernel calls THIS
+# (not the full-face wrapper below) so its inference never sees the 71-element
+# Tuple{NTuple35,NTuple35,Float64} return type, which overflows the device
+# compiler's tuple-complexity heuristic inside the already-large flux kernel.
+# @noinline: holds the bisection loop over the large realizability check.
+@noinline function scaling_theta_dev(Vm1::NTuple{35,Float64}, V0::NTuple{35,Float64},
+                                     Vp1::NTuple{35,Float64})
+    s = ntuple(Val(35)) do k
+        minmod(V0[k] - Vm1[k], Vp1[k] - V0[k])
+    end
+    _faces_realizable_dev(V0, s, 1.0) && return 1.0   # common path: unlimited
+    lo = 0.0; hi = 1.0                                 # bisect for the largest feasible theta
+    for _ in 1:20
+        mid = 0.5 * (lo + hi)
+        if _faces_realizable_dev(V0, s, mid); lo = mid; else; hi = mid; end
+    end
+    return lo
+end
+
+# Full (both faces + theta) wrapper — the single source matching CPU
+# `scaling_limited_faces`. Returns recon-var faces (Vminus, Vplus, theta).
+@inline function scaling_limited_faces_dev(Vm1::NTuple{35,Float64}, V0::NTuple{35,Float64},
+                                           Vp1::NTuple{35,Float64})
+    θ = scaling_theta_dev(Vm1, V0, Vp1)
+    Vminus = ntuple(Val(35)) do k; V0[k] - 0.5 * θ * (minmod(V0[k] - Vm1[k], Vp1[k] - V0[k])); end
+    Vplus  = ntuple(Val(35)) do k; V0[k] + 0.5 * θ * (minmod(V0[k] - Vm1[k], Vp1[k] - V0[k])); end
+    return (Vminus, Vplus, θ)
 end
 
 end # module

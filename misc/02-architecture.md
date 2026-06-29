@@ -25,7 +25,17 @@ its public signatures) and the GPU kernels (which inline them). No duplicated ma
 |---|---|---|
 | flux closure | `src/numerics/flux_closure_dev.jl` (`FluxClosureDev.flux_closure35_dev`) | `Flux_closure35_3D` |
 | reconstruction | `src/numerics/recon_dev.jl` (`ReconDev.to_recon_vars_dev`/`from_recon_vars_dev`) | `to_recon_vars` / `from_recon_vars` |
+| MUSCL faces | `src/numerics/recon_dev.jl` (`ReconDev.muscl_{right,left}_face_tup`, `minmod`) | `muscl_faces` / `muscl_slopes` (same `minmod`) |
 | realizability | `src/realizability/realize_dev.jl` (`RealizeDev.realizable_3D_M4_dev`, `…_corr_dev`) | `realizable_3D_M4` |
+| realizability limiter | `src/realizability/realize_dev.jl` (`RealizeDev.scaling_theta_dev`, `is_realizable_recon_dev`) | `scaling_limited_faces` |
+
+The GPU residual's order-2 default and limiter branches both build their faces through
+`muscl_{right,left}_face_tup` (one slope+face formula, `θ=1` = plain MUSCL, `θ<1` =
+scaling-limited), so there is no duplicated reconstruction math inside `_face_flux_core`.
+The **limiter** shares the slope + bisection structure with the CPU `scaling_limited_faces`,
+but the realizability ORACLE inside the bisection differs by platform (CPU LAPACK eig vs GPU
+analytic `delta2star_mineig_dev`) — the same eigensolver separation noted below; the θ logic
+is verified equal to the CPU to the 2⁻²⁰ bisection quantum.
 
 These are golden-clean: the CPU output is byte-identical (or matches the autogen to
 machine precision) — see the golden battery `debug/golden_kernels.jl`. The

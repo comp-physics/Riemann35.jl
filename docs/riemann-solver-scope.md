@@ -10,6 +10,14 @@ realizability-preserving Riemann solver for this system would look like, grounde
 **Everything here is planned as OPT-IN** (a `riemann_solver` selector defaulting to `:hll`, the
 current behavior, byte-identical and golden-gated; see [[optin-and-documented-features]]).
 
+> **Status (2026-06):** the `riemann_solver` selector ships with **`:hll` (default)** and
+> **`:rusanov`** only. Prototype **HLLC**, **HLLEM**, and a realizable **kinetic** flux were
+> implemented and evaluated; for the *nonlinear* 35-moment HyQMOM closure none gave a net benefit
+> over HLL (HLLC/HLLEM star/anti-diffusion states leave the realizable cone and fall back to HLL on
+> the hard high-Ma cases; the kinetic flux perturbs the truncated high-order cross moments). They
+> were **removed** to keep the flux layer minimal — the bottleneck is the closure layer, not the
+> Riemann solver. The literature scoping below is retained as the record of what was tried and why.
+
 ---
 
 ## 1. What the data says the flux is costing us
