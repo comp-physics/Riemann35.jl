@@ -201,3 +201,49 @@ function recon_face_pair(Vl::AbstractVector, Vr::AbstractVector,
     end
     return collect(ML0), collect(MR0)
 end
+
+# ---------------------------------------------------------------------------
+# Per-interface face reconstruction (order-2). SINGLE SOURCE shared by the 1D
+# `residual_1d` (src/numerics/highorder_flux.jl) and the 3D-line `residual_line`
+# (src/numerics/highorder_3d.jl) so the three reconstruction modes are written once.
+# Each takes the four stencil cells' recon vars (Vm1,V0,Vp1,Vp2) for the interface
+# between the V0 cell and the Vp1 cell; the caller supplies the BC-correct stencil
+# (clamped / wrapped / ghost). The DEVICE analogue of this composition is the GPU
+# `_face_flux_core` (NTuple, separate by data layout + eigensolver — see misc/02).
+# ---------------------------------------------------------------------------
+
+"""
+    recon_faces_default(Vm1, V0, Vp1, Vp2, M0, Mp1) -> (ML, MR)
+
+Order-2 MUSCL faces at the V0|Vp1 interface, gated by `recon_face_pair` (vacuum floor +
+recon-validity first-order fallback). `M0,Mp1` are the two cells' raw 35-moment means.
+"""
+function recon_faces_default(Vm1, V0, Vp1, Vp2, M0, Mp1)
+    VplusL  = muscl_faces(Vm1, V0, Vp1)[2]    # right face of the V0 cell
+    VminusR = muscl_faces(V0, Vp1, Vp2)[1]    # left face of the Vp1 cell
+    return recon_face_pair(VplusL, VminusR, M0, Mp1)
+end
+
+"""
+    recon_faces_proj(flaggedL, flaggedR, Vm1, V0, Vp1, Vp2, M0, Mp1) -> (ML, MR)
+
+As [`recon_faces_default`](@ref) but a cell flagged for the realizability projection
+(`realizability_margin < 0`) reconstructs FIRST ORDER (its face = cell-mean recon vars).
+"""
+function recon_faces_proj(flaggedL::Bool, flaggedR::Bool, Vm1, V0, Vp1, Vp2, M0, Mp1)
+    VplusL  = flaggedL ? V0  : muscl_faces(Vm1, V0, Vp1)[2]
+    VminusR = flaggedR ? Vp1 : muscl_faces(V0, Vp1, Vp2)[1]
+    return recon_face_pair(VplusL, VminusR, M0, Mp1)
+end
+
+"""
+    recon_faces_limited(Vm1, V0, Vp1, Vp2) -> (ML, MR)
+
+Realizability scaling-limited faces ([`scaling_limited_faces`](@ref)). Faces are realizable
+by construction, so there is no `recon_face_pair` fallback.
+"""
+function recon_faces_limited(Vm1, V0, Vp1, Vp2)
+    _, VplusL, _  = scaling_limited_faces(Vm1, V0, Vp1)   # right face of the V0 cell
+    VminusR, _, _ = scaling_limited_faces(V0, Vp1, Vp2)   # left face of the Vp1 cell
+    return from_recon_vars(VplusL), from_recon_vars(VminusR)
+end

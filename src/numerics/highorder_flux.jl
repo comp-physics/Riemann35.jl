@@ -93,6 +93,9 @@ function residual_1d(Mline::AbstractMatrix, dx::Real, Ma::Real;
     axis = 1
     R = zeros(Nc, 35)
 
+    # order-2 face reconstruction uses the SHARED per-interface helpers
+    # (recon_faces_{default,limited}, src/numerics/reconstruction.jl) — same ones
+    # `residual_line` uses; only the BC-correct stencil (wrapped / clamped) differs here.
     if bc == :periodic
         wrap(i) = mod(i-1, Nc) + 1
         # Face states at interface i+1/2 for i=1..Nc (i+1 wraps)
@@ -102,24 +105,13 @@ function residual_1d(Mline::AbstractMatrix, dx::Real, Ma::Real;
             for i in 1:Nc
                 ML[i] = Mline[i, :]; MR[i] = Mline[wrap(i+1), :]
             end
-        elseif use_limiter
+        else
             Vc = [to_recon_vars(@view Mline[i, :]) for i in 1:Nc]
             for i in 1:Nc
-                ip1 = wrap(i+1)
-                _, Vplus_i, _     = scaling_limited_faces(Vc[wrap(i-1)], Vc[i],   Vc[ip1])
-                Vminus_ip1, _, _  = scaling_limited_faces(Vc[i],         Vc[ip1], Vc[wrap(i+2)])
-                ML[i] = from_recon_vars(Vplus_i)
-                MR[i] = from_recon_vars(Vminus_ip1)
-            end
-        else
-            V = [to_recon_vars(Mline[i, :]) for i in 1:Nc]
-            Vminus = [zeros(35) for _ in 1:Nc]; Vplus = [zeros(35) for _ in 1:Nc]
-            for i in 1:Nc
-                Vminus[i], Vplus[i] = muscl_faces(V[wrap(i-1)], V[i], V[wrap(i+1)])
-            end
-            for i in 1:Nc
-                ML[i], MR[i] = recon_face_pair(Vplus[i], Vminus[wrap(i+1)],
-                                               Mline[i, :], Mline[wrap(i+1), :])
+                vm1, v0, vp1, vp2 = Vc[wrap(i-1)], Vc[i], Vc[wrap(i+1)], Vc[wrap(i+2)]
+                ML[i], MR[i] = use_limiter ?
+                    recon_faces_limited(vm1, v0, vp1, vp2) :
+                    recon_faces_default(vm1, v0, vp1, vp2, Mline[i, :], Mline[wrap(i+1), :])
             end
         end
         Fhat = [face_flux_1d(ML[i], MR[i], axis, Ma) for i in 1:Nc]
@@ -134,27 +126,13 @@ function residual_1d(Mline::AbstractMatrix, dx::Real, Ma::Real;
             for i in 1:Nc-1
                 ML[i] = Mline[i, :]; MR[i] = Mline[i+1, :]
             end
-        elseif use_limiter
+        else
             Vc = [to_recon_vars(@view Mline[i, :]) for i in 1:Nc]
             for i in 1:Nc-1
-                _, Vplus_i, _     = scaling_limited_faces(Vc[max(i-1,1)], Vc[i],   Vc[min(i+1,Nc)])
-                Vminus_ip1, _, _  = scaling_limited_faces(Vc[i],          Vc[i+1], Vc[min(i+2,Nc)])
-                ML[i] = from_recon_vars(Vplus_i)
-                MR[i] = from_recon_vars(Vminus_ip1)
-            end
-        else
-            V = [to_recon_vars(Mline[i, :]) for i in 1:Nc]
-            # per-cell left/right face recon-vars with zero-gradient BC
-            Vminus = [zeros(35) for _ in 1:Nc]; Vplus = [zeros(35) for _ in 1:Nc]
-            for i in 1:Nc
-                vm = V[max(i-1,1)]; v0 = V[i]; vp = V[min(i+1,Nc)]
-                Vminus[i], Vplus[i] = muscl_faces(vm, v0, vp)
-            end
-            for i in 1:Nc-1
-                # local order degradation: fall back to 1st order if either face is
-                # unrealizable (bad density OR variance OR non-finite reconstruction)
-                ML[i], MR[i] = recon_face_pair(Vplus[i], Vminus[i+1],
-                                               Mline[i, :], Mline[i+1, :])
+                vm1, v0, vp1, vp2 = Vc[max(i-1,1)], Vc[i], Vc[i+1], Vc[min(i+2,Nc)]
+                ML[i], MR[i] = use_limiter ?
+                    recon_faces_limited(vm1, v0, vp1, vp2) :
+                    recon_faces_default(vm1, v0, vp1, vp2, Mline[i, :], Mline[i+1, :])
             end
         end
         Fhat = [face_flux_1d(ML[i], MR[i], axis, Ma) for i in 1:Nc-1]
