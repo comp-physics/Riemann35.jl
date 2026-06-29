@@ -54,7 +54,8 @@ include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
 using .WavespeedDev: realize_and_speed_Mr_dev
 using .FluxClosureDev: flux_closure35_dev
-using .ReconDev: to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod
+using .ReconDev: to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod,
+                 muscl_right_face_tup, muscl_left_face_tup
 using .RealizeDev: realizable_3D_M4_dev, delta2star_mineig_dev, scaling_theta_dev
 
 export residual3d_gpu!, residual3d_gpu
@@ -109,12 +110,8 @@ end
         Wp2 = to_recon_vars_tup(Cfp2)
         θL = scaling_theta_dev(Wm1, W0, Wp1)   # limiter coeff for cell f
         θR = scaling_theta_dev(W0, Wp1, Wp2)   # limiter coeff for cell f+1
-        Vlp = ntuple(Val(35)) do k         # right face of cell f   == Vplus(cell f)
-            v0 = W0[k]; s = minmod(v0 - Wm1[k], Wp1[k] - v0); v0 + 0.5 * θL * s
-        end
-        Vlm = ntuple(Val(35)) do k         # left face of cell f+1  == Vminus(cell f+1)
-            v0 = Wp1[k]; s = minmod(v0 - W0[k], Wp2[k] - v0); v0 - 0.5 * θR * s
-        end
+        Vlp = muscl_right_face_tup(Wm1, W0, Wp1, θL)   # right face of cell f   == Vplus(cell f)
+        Vlm = muscl_left_face_tup(W0, Wp1, Wp2, θR)    # left face of cell f+1  == Vminus(cell f+1)
         Li = from_recon_vars_tup(Vlp)
         Ri = from_recon_vars_tup(Vlm)
         use_recon = true
@@ -123,12 +120,8 @@ end
         Vf   = to_recon_vars_tup(Cf)
         Vfp1 = to_recon_vars_tup(Cfp1)
         Vfp2 = to_recon_vars_tup(Cfp2)
-        Vp = ntuple(Val(35)) do k          # MUSCL right face of cell f
-            v0 = Vf[k]; s = minmod(v0 - Vfm1[k], Vfp1[k] - v0); v0 + 0.5 * s
-        end
-        Vm = ntuple(Val(35)) do k          # MUSCL left face of cell f+1
-            v0 = Vfp1[k]; s = minmod(v0 - Vf[k], Vfp2[k] - v0); v0 - 0.5 * s
-        end
+        Vp = muscl_right_face_tup(Vfm1, Vf, Vfp1, 1.0)  # MUSCL right face of cell f
+        Vm = muscl_left_face_tup(Vf, Vfp1, Vfp2, 1.0)   # MUSCL left face of cell f+1
         # ho_proj_first_order (Rodney): a cell whose mean is flagged for the realizability
         # projection (smallest delta2star eigenvalue < 0) reconstructs FIRST-ORDER (face =
         # cell mean in recon vars). Same realizability signal the projection uses.
