@@ -42,7 +42,10 @@ from `01-environment.md` first; for MPI runs on PACE also export
 | `validate_schur4.jl` | 1 | custom 4×4 `schur4` vs LAPACK on real jacobian blocks | rel ≤1e-6 (note ~4.6e-8 on companion blocks) |
 | `validate_realize_gpu.jl` | 1 | batched realizability kernel vs CPU `realizable_3D_M4` | machine precision |
 | `validate_residual3d_box.jl` | 1 | box residual == cubic residual (n=16,24) | max abs **0.0** |
-| `validate_residual3d_gpu.jl` | 1 | GPU 3D residual vs CPU `residual_ho_3d!` (the MATLAB port) | rel ~5e-11, GATE PASS |
+| `validate_residual3d_gpu.jl` | 1 | GPU 3D residual (`order=2`, HLL) vs CPU `residual_ho_3d!` (the MATLAB port) | rel ~5e-11, GATE PASS |
+| `validate_order1_vs_cpu.jl` | 1 | GPU `order=1` residual vs CPU `residual_ho_3d!(order=1)` | rel ~3e-11, GATE PASS |
+| `validate_proj_first_order_vs_cpu.jl` | 1 | GPU `proj_first_order=true` vs CPU `use_proj_recon=true` | rel ~5.8e-11, GATE PASS |
+| `validate_rusanov_vs_cpu.jl` | 1 | GPU `riemann_solver=:rusanov` vs CPU `RIEMANN_SOLVER[]=:rusanov` | rel ~3.3e-10, GATE PASS |
 | `validate_timestep3d_gpu.jl` | 1 | single-GPU SSP-RK3 timestep vs CPU | dt EXACT; density rel ~1.9e-5; high-order moments conditioning-limited (see note) |
 | `validate_gpu_mpi_smoke.jl` | 2 | rank↔GPU binding, host-staged ring halo, `Allreduce` | PASS |
 | `validate_gpu_mpi_realize.jl` | 2 | realizability split across 2 GPUs vs CPU ref | rel 3.3e-15 |
