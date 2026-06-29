@@ -1,7 +1,9 @@
 # Julia
 Manifest.toml
 **/Manifest.toml
-LocalPreferences.toml            # machine-specific MPI/CUDA binding — configure per-machine
+# machine-specific MPI/CUDA binding — configure per-machine, never commit
+LocalPreferences.toml
+**/LocalPreferences.toml
 docs/build/
 docs/Manifest.toml
 
