@@ -10,6 +10,14 @@
   anyway; the halo data is tiny (`35·n·n·halo`).
 - **UCX init is flaky.** For multi-rank runs disable it:
   `OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader`. (Fine — host-staged needs no UCX.)
+- **GPU snapshots: keep `gpuenv2`'s JLD2 version matched to the main package's.**
+  The GPU dump (`gpu/gpu_run.jl`) writes JLD2 that the main-env readers/viz consume.
+  `Pkg.add("JLD2")` into gpuenv2 grabbed **0.6.x**, but the package pins **0.4** — a
+  major mismatch: plain arrays and `Dict`s still cross-read, but composite types
+  (e.g. a NamedTuple `meta/params`) fail to reconstruct (`jltype`/`read_attr_data`
+  error). Fix: pin gpuenv2 to match — `Pkg.add(PackageSpec(name="JLD2", version="0.4"))`
+  (now enforced via `[compat] JLD2 = "0.4"` in `gpu/gpuenv2/Project.toml`). Then GPU
+  files round-trip fully (params NamedTuple → `params.Nx`/`.Ma`/`.Kn` for the viz).
 - **Reading `.mat` (MAT.jl) clashes with the system-MPI binding.**
   `MAT → HDF5_jll → OpenMPI_jll` fails to load when the system OpenMPI is on
   `LD_LIBRARY_PATH`: `libmpi_mpifh.so: undefined symbol: ompi_instance_count`.

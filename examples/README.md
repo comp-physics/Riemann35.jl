@@ -272,3 +272,18 @@ Run any example with `--help` to see all available options:
 ```bash
 julia --project=. examples/run_3d_jets_timeseries.jl --help
 ```
+
+## GPU example
+
+`run_gpu_crossing_jets.jl` — end-to-end GPU run: builds a crossing-jet IC, advances it
+on the GPU, and streams snapshots to JLD2 in the canonical schema (so the existing
+analysis/visualization consume it unchanged). Runs under the GPU project:
+
+```bash
+srun --mpi=pmix -n 1 --gpus=1 julia --project=gpu/gpuenv2 examples/run_gpu_crossing_jets.jl
+# overrides: NX, NZ (=1 for 2D), MA, NSTEP, SNAP, OUT (env vars)
+```
+
+It prints the exact commands to analyze (`compute_standardized_field`) and visualize
+(`interactive_3d_timeseries_streaming`) the output in the main package env. See
+`misc/03-running-and-validation.md` and the JLD2-version note in `misc/04-gotchas.md`.
