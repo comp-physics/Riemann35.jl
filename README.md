@@ -85,8 +85,4 @@ harnesses (see [`misc/03-running-and-validation.md`](misc/03-running-and-validat
 
 ## License
 
-MIT — see [`license.md`](license.md). Copyright (c) 2025 Georgia Institute of Technology.
-
-This project implements the HyQMOM (hyperbolic quadrature method of moments) closure of
-R. O. Fox and collaborators; see [HyQMOM.jl](https://github.com/comp-physics/HyQMOM.jl)
-for the base method.
+MIT. See [`license.md`](license.md).
