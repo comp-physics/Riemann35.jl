@@ -2,8 +2,8 @@
 # Prereq: dump_r2d_cpu.jl in the MAIN project (CPU) writes r2d_M.f64 / r2d_R.f64. Expect rel <=1e-6 (GATE).
 # (the ~e-7 floor is schur4(GPU) vs LAPACK(CPU) in the wave-speed eig). CPU residual_ho_3d! is the MATLAB port.
 using CUDA, Printf
-include(joinpath(@__DIR__, "residual3d_gpu.jl")); using .Residual3DGPU
-DATA=get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+include(joinpath(joinpath(@__DIR__, ".."), "residual3d_gpu.jl")); using .Residual3DGPU
+DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 meta=split(strip(read("$DATA/r2d.meta",String)),'\n')
 n=parse(Int,meta[1]); dx=parse(Float64,meta[2]); Ma=parse(Float64,meta[3])
 M=reshape(collect(reinterpret(Float64,read("$DATA/r2d_M.f64"))),35,n,n,1)

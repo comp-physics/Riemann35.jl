@@ -2,8 +2,8 @@
 # nz=1 must equal the interior plane of a z-homogeneous 3D run (Lz=0). Needs proj_M.f64.
 # Run: srun --mpi=pmix -n1 --gpus=1 julia --project=gpu/gpuenv2 gpu/validate_2d_timestep.jl
 using CUDA, Printf
-include(joinpath(@__DIR__, "timestep3d_gpu.jl")); using .Timestep3DGPU
-DATA=get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+include(joinpath(joinpath(@__DIR__, ".."), "timestep3d_gpu.jl")); using .Timestep3DGPU
+DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 nb=parse(Int,strip(read(joinpath(DATA,"proj.meta"),String)))
 src=reshape(reinterpret(Float64,read(joinpath(DATA,"proj_M.f64"))),35,nb)
 n=24; dx=1.0/n; Ma=2.0; nstep=4

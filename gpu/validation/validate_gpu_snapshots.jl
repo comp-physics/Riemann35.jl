@@ -6,8 +6,8 @@
 #   srun --mpi=pmix -n 2 --gpus=2 julia --project=gpu/gpuenv2 gpu/validate_gpu_snapshots.jl
 # Needs proj_M.f64 in $RIEMANN35_DATA (default <repo>/data) for a realizable IC.
 using CUDA, MPI, JLD2, Printf
-include(joinpath(@__DIR__, "gpu_run.jl")); using .GPURun
-DATA = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+include(joinpath(joinpath(@__DIR__, ".."), "gpu_run.jl")); using .GPURun
+DATA = get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 
 MPI.Init(); comm = MPI.COMM_WORLD
 rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)

@@ -21,7 +21,7 @@ Schema written: `meta/{params,snapshot_interval,n_snapshots}`,
 `snapshots/NNNNNN/{M,t,step}` with **`M` as `(Nx,Ny,Nz,35)`** (moment last). `S`/`C`
 (standardized/central) are NOT written — derive them post-hoc in the main package env:
 `Riemann35.compute_standardized_field(M)` / `compute_central_field(M)`. Validate with
-`gpu/validate_gpu_snapshots.jl` (1 and 2 ranks); analyze/visualize with the existing
+`gpu/validation/validate_gpu_snapshots.jl` (1 and 2 ranks); analyze/visualize with the existing
 tooling. `JLD2` is a `gpuenv2` dependency for this.
 
 Commands below are written in the **PACE form** (`$JULIA` = your Julia 1.10+, launched
@@ -69,8 +69,8 @@ column-major.
 |---|---|---|
 | `proj_M.f64`, `proj_ref.f64`, `proj_Ma.f64`, `proj.meta` | realize, slab, 2D | CPU `realizable_3D_M4` dump (build_states) |
 | `r3d_M.f64`, `r3d_R.f64`, `r3d.meta` | `validate_residual3d_gpu` | CPU `residual_ho_3d!` (3D) dump |
-| `r2d_M.f64`, `r2d_R.f64`, `r2d.meta` | `validate_2d_residual_vs_cpu` | **`gpu/dump_cpu_2d_residual.jl`** (main project, CPU) |
-| `flxg_in.f64`, `flxg_out.f64` | `validate_2d_flux_vs_matlab` | **`gpu/dump_matlab_flux_golden.jl`** (MPI-free env w/ MAT) |
+| `r2d_M.f64`, `r2d_R.f64`, `r2d.meta` | `validate_2d_residual_vs_cpu` | **`gpu/validation/dump_cpu_2d_residual.jl`** (main project, CPU) |
+| `flxg_in.f64`, `flxg_out.f64` | `validate_2d_flux_vs_matlab` | **`gpu/validation/dump_matlab_flux_golden.jl`** (MPI-free env w/ MAT) |
 | `real_blocks.f64`, `real_lapack.f64` | `validate_schur4` | CPU jacobian-block + LAPACK dump |
 | `step3d_M0.f64`, `step3d_Mf.f64`, `step3d_dts.f64` | `validate_timestep3d_gpu` | CPU `march`/`residual_ho_3d!` dump |
 
@@ -79,11 +79,11 @@ The two dump scripts that are committed and may need re-running:
 ```bash
 # 2D CPU residual reference (MATLAB-ported CPU; run in the MAIN project, not gpuenv2)
 #   needs the system-OpenMPI LD_LIBRARY_PATH; uses the singleton env vars
-env <singleton vars> $JULIA --project=. gpu/dump_cpu_2d_residual.jl
+env <singleton vars> $JULIA --project=. gpu/validation/dump_cpu_2d_residual.jl
 
 # 2D MATLAB flux golden -> f64  (run in an MPI-FREE env that can load MAT/HDF5;
 #   do NOT put system OpenMPI on LD_LIBRARY_PATH — see 04-gotchas)
-$JULIA --project=/storage/scratch1/6/sbryngelson3/matenv gpu/dump_matlab_flux_golden.jl
+$JULIA --project=/storage/scratch1/6/sbryngelson3/matenv gpu/validation/dump_matlab_flux_golden.jl
 ```
 
 The MATLAB goldens themselves are in `legacy/3D_MATLAB/tests/goldenfiles/test_*_golden.mat`
@@ -93,8 +93,8 @@ The MATLAB goldens themselves are in `legacy/3D_MATLAB/tests/goldenfiles/test_*_
 
 ```bash
 # 1) dump the MATLAB flux golden (MPI-free env)
-$JULIA --project=/storage/scratch1/6/sbryngelson3/matenv gpu/dump_matlab_flux_golden.jl
+$JULIA --project=/storage/scratch1/6/sbryngelson3/matenv gpu/validation/dump_matlab_flux_golden.jl
 # 2) compare GPU device kernels to it
-srun --mpi=pmix -n 1 --gpus=1 $JULIA --project=gpu/gpuenv2 gpu/validate_2d_flux_vs_matlab.jl
+srun --mpi=pmix -n 1 --gpus=1 $JULIA --project=gpu/gpuenv2 gpu/validation/validate_2d_flux_vs_matlab.jl
 # expect: realizable + Fx/Fy/Fz -> max rel 4.4e-16  MATCHES MATLAB (<1e-10)
 ```

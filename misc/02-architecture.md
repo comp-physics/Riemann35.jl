@@ -1,5 +1,20 @@
 # GPU architecture
 
+## Directory layout
+
+```
+gpu/                 GPU source only — kernels/drivers + README + gpuenv2/ (the GPU project)
+  schur4.jl, wavespeed_dev.jl, residual3d_gpu.jl, realize_gpu.jl,
+  timestep3d_gpu.jl, gpu_run.jl
+gpu/validation/      correctness validators (validate_*.jl), CUDA sanity (test_cuda.jl),
+                     and reference-data generators (dump_*.jl)
+gpu/bench/           performance benchmarks (bench_*.jl)
+```
+
+Validators/benches `include` the source modules via `joinpath(@__DIR__, "..", "<mod>.jl")`
+(they live one level under `gpu/`). The per-cell physics itself is single-sourced from
+`src/` (next section).
+
 ## Single-source: device kernels live in `src/`, CPU delegates
 
 The per-cell physics is written **once** as allocation-free scalar/NTuple device

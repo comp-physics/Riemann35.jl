@@ -35,7 +35,7 @@ specific Julia/MPI/CUDA path or version, discover your own.
 ```bash
 cd <repo>            # HyQMOM.jl checkout; `julia` = your Julia 1.10+
 # one-time: julia --project=gpu/gpuenv2 -e 'using Pkg; Pkg.add(["CUDA","MPI","MPIPreferences","StaticArrays"])'
-julia --project=gpu/gpuenv2 -e 'using MPI; run(`$(mpiexec()) -n 2 julia --project=gpu/gpuenv2 gpu/validate_timestep3d_mpi.jl`)'
+julia --project=gpu/gpuenv2 -e 'using MPI; run(`$(mpiexec()) -n 2 julia --project=gpu/gpuenv2 gpu/validation/validate_timestep3d_mpi.jl`)'
 # expect: dt-sequence + final field max abs diff = 0.000e+00  BIT-IDENTICAL PASS
 ```
 
@@ -43,7 +43,7 @@ julia --project=gpu/gpuenv2 -e 'using MPI; run(`$(mpiexec()) -n 2 julia --projec
 ```bash
 # set the PACE env block from 01-environment.md (JULIA, OMPI, scratch depot, …), then:
 export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader        # host-staged halos, no UCX
-srun --mpi=pmix -n 2 --gpus=2 $JULIA --project=gpu/gpuenv2 gpu/validate_timestep3d_mpi.jl
+srun --mpi=pmix -n 2 --gpus=2 $JULIA --project=gpu/gpuenv2 gpu/validation/validate_timestep3d_mpi.jl
 ```
 
 ## What the GPU path can do today

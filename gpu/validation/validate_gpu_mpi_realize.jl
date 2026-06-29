@@ -1,7 +1,7 @@
 using MPI, CUDA, Printf
-const HERE = @__DIR__
+const HERE = joinpath(@__DIR__, "..")
 include(joinpath(HERE, "realize_gpu.jl"));  using .RealizeGPU
-const DATA = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+const DATA = get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 
 MPI.Init()
 comm = MPI.COMM_WORLD

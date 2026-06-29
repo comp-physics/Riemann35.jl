@@ -1,5 +1,5 @@
 using Riemann35
-DATA=get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 nb=parse(Int,strip(read("$DATA/proj.meta",String)))
 src=reshape(reinterpret(Float64,read("$DATA/proj_M.f64")),35,nb)
 n=24; dx=1.0/n; Ma=2.0; g=2; nz=1

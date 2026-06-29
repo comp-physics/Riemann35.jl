@@ -13,10 +13,10 @@ using Riemann35
 using JLD2
 using Printf
 
-include(joinpath(@__DIR__, "schur4.jl"))
+include(joinpath(joinpath(@__DIR__, ".."), "schur4.jl"))
 using .Schur4
 
-const DATA_DIR = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+const DATA_DIR = get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 const FILES = [
     ("Ma10",  joinpath(DATA_DIR, "ma100_np128_ma10_o2.jld2")),
     ("Ma50",  joinpath(DATA_DIR, "ma100_np128_ma50_o2.jld2")),
