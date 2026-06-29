@@ -55,7 +55,7 @@ include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
 using .WavespeedDev: realize_and_speed_Mr_dev
 using .FluxClosureDev: flux_closure35_dev
 using .ReconDev: to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod
-using .RealizeDev: realizable_3D_M4_dev, delta2star_mineig_dev
+using .RealizeDev: realizable_3D_M4_dev, delta2star_mineig_dev, scaling_theta_dev
 
 export residual3d_gpu!, residual3d_gpu
 
@@ -85,7 +85,7 @@ end
 @inline function _face_flux_core(Cfm1::NTuple{35,Float64}, Cf::NTuple{35,Float64},
                                  Cfp1::NTuple{35,Float64}, Cfp2::NTuple{35,Float64},
                                  axis::Int, Ma::Float64, vacf::Float64, project::Bool,
-                                 order::Int, proj::Bool, rs::Int)
+                                 order::Int, proj::Bool, rs::Int, lim::Int)
     ML0 = Cf[1]
     MR0 = Cfp1[1]
 
@@ -95,7 +95,30 @@ end
     # order==1: faces ARE the cell means (no MUSCL), matching CPU residual_line order=1.
     # order>=2: MUSCL reconstruction in recon variables, with the recon-validity +
     # vacuum-floor fallback to the cell mean (byte-identical to the prior default).
-    if order >= 2 && !(vacf > 0.0 && (ML0 < vacf || MR0 < vacf))
+    if lim == 1 && order >= 2
+        # ho_realizability_limiter (Zhang--Shu / Fan--Huang--Wu scaling limiter): the
+        # shared `scaling_limited_faces_dev` returns faces realizable by construction, so
+        # there is NO vacuum-floor / recon-validity fallback and NO proj override here
+        # (the limiter takes precedence) — matching CPU `face_states_lim`.
+        # distinct names from the MUSCL branch below: a local assigned in two
+        # if/elseif branches AND captured by closures in both gets boxed -> device
+        # dynamic dispatch. These names appear only in this branch.
+        Wm1 = to_recon_vars_tup(Cfm1)
+        W0  = to_recon_vars_tup(Cf)
+        Wp1 = to_recon_vars_tup(Cfp1)
+        Wp2 = to_recon_vars_tup(Cfp2)
+        θL = scaling_theta_dev(Wm1, W0, Wp1)   # limiter coeff for cell f
+        θR = scaling_theta_dev(W0, Wp1, Wp2)   # limiter coeff for cell f+1
+        Vlp = ntuple(Val(35)) do k         # right face of cell f   == Vplus(cell f)
+            v0 = W0[k]; s = minmod(v0 - Wm1[k], Wp1[k] - v0); v0 + 0.5 * θL * s
+        end
+        Vlm = ntuple(Val(35)) do k         # left face of cell f+1  == Vminus(cell f+1)
+            v0 = Wp1[k]; s = minmod(v0 - W0[k], Wp2[k] - v0); v0 - 0.5 * θR * s
+        end
+        Li = from_recon_vars_tup(Vlp)
+        Ri = from_recon_vars_tup(Vlm)
+        use_recon = true
+    elseif order >= 2 && !(vacf > 0.0 && (ML0 < vacf || MR0 < vacf))
         Vfm1 = to_recon_vars_tup(Cfm1)
         Vf   = to_recon_vars_tup(Cf)
         Vfp1 = to_recon_vars_tup(Cfp1)
@@ -214,7 +237,7 @@ Cubic grid (dx=dy=dz). project_faces=true matches the CPU 3D path.
 """
 function residual3d_gpu!(R::CuArray{Float64,4}, Fbuf::CuArray{Float64,4},
                          M::CuArray{Float64,4}, n::Int, dx::Real, Ma::Real;
-                         vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll,
+                         vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                          threads::Int=128)
     @assert size(Fbuf) == (35, n + 1, n, n) "Fbuf must be (35,n+1,n,n)"
     # The cubic residual is exactly the nx==ny==nz case of `residual3d_box_gpu!`
@@ -222,7 +245,7 @@ function residual3d_gpu!(R::CuArray{Float64,4}, Fbuf::CuArray{Float64,4},
     # count (n+1)*n*n equals the box `fmax` for a cube — so this stays alloc-free.
     flat = reshape(Fbuf, 35, (n + 1) * n * n)
     residual3d_box_gpu!(R, M, n, n, n, dx, Ma;
-                        vacuum_floor=vacuum_floor, project_faces=project_faces, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver,
+                        vacuum_floor=vacuum_floor, project_faces=project_faces, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
                         threads=threads, flat=flat)
     return nothing
 end
@@ -234,14 +257,14 @@ end
 Host convenience: upload (35,n,n,n), compute the 3D residual, return (35,n,n,n).
 """
 function residual3d_gpu(M_host::Array{Float64,4}, n::Int, dx::Real, Ma::Real;
-                        vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll,
+                        vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                         threads::Int=128)
     @assert size(M_host) == (35, n, n, n) "M_host must be (35,n,n,n)"
     Md   = CuArray(M_host)
     R    = CUDA.zeros(Float64, 35, n, n, n)
     Fbuf = CUDA.zeros(Float64, 35, n + 1, n, n)
     residual3d_gpu!(R, Fbuf, Md, n, dx, Ma;
-                    vacuum_floor=vacuum_floor, project_faces=project_faces, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, threads=threads)
+                    vacuum_floor=vacuum_floor, project_faces=project_faces, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter, threads=threads)
     CUDA.synchronize()
     return Array(R)
 end
@@ -257,7 +280,7 @@ end
 # full-domain result because every interior cell sees its real +/-2 neighbors.
 # Same `_face_flux_core` / `_cell` / `_clamp` as the cubic path -> bit parity.
 # ===========================================================================
-function _fhat_x_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int)
+function _fhat_x_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nx + 1
     if idx <= nf * ny * nz
@@ -267,14 +290,14 @@ function _fhat_x_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float
             f = t - 1
             cm1 = _cell(M, _clamp(f - 1, nx), j, k); c0  = _cell(M, _clamp(f, nx), j, k)
             cp1 = _cell(M, _clamp(f + 1, nx), j, k); cp2 = _cell(M, _clamp(f + 2, nx), j, k)
-            Fh = _face_flux_core(cm1, c0, cp1, cp2, 1, Ma, vacf, project, order, proj, rs)
+            Fh = _face_flux_core(cm1, c0, cp1, cp2, 1, Ma, vacf, project, order, proj, rs, lim)
             for m in 1:35; Fbuf[m, t, j, k] = Fh[m]; end
         end
     end
     return nothing
 end
 
-function _fhat_y_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int)
+function _fhat_y_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = ny + 1
     if idx <= nf * nx * nz
@@ -284,14 +307,14 @@ function _fhat_y_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float
             f = t - 1
             cm1 = _cell(M, i, _clamp(f - 1, ny), k); c0  = _cell(M, i, _clamp(f, ny), k)
             cp1 = _cell(M, i, _clamp(f + 1, ny), k); cp2 = _cell(M, i, _clamp(f + 2, ny), k)
-            Fh = _face_flux_core(cm1, c0, cp1, cp2, 2, Ma, vacf, project, order, proj, rs)
+            Fh = _face_flux_core(cm1, c0, cp1, cp2, 2, Ma, vacf, project, order, proj, rs, lim)
             for m in 1:35; Fbuf[m, t, i, k] = Fh[m]; end
         end
     end
     return nothing
 end
 
-function _fhat_z_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int)
+function _fhat_z_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nz + 1
     if idx <= nf * nx * ny
@@ -301,7 +324,7 @@ function _fhat_z_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float
             f = t - 1
             cm1 = _cell(M, i, j, _clamp(f - 1, nz)); c0  = _cell(M, i, j, _clamp(f, nz))
             cp1 = _cell(M, i, j, _clamp(f + 1, nz)); cp2 = _cell(M, i, j, _clamp(f + 2, nz))
-            Fh = _face_flux_core(cm1, c0, cp1, cp2, 3, Ma, vacf, project, order, proj, rs)
+            Fh = _face_flux_core(cm1, c0, cp1, cp2, 3, Ma, vacf, project, order, proj, rs, lim)
             for m in 1:35; Fbuf[m, t, i, j] = Fh[m]; end
         end
     end
@@ -355,13 +378,14 @@ nx==ny==nz this is bit-identical to `residual3d_gpu!`.
 """
 function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
                              nx::Int, ny::Int, nz::Int, dx::Real, Ma::Real;
-                             vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll,
+                             vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                              threads::Int=128, flat::Union{Nothing,CuMatrix{Float64}}=nothing)
     @assert size(M) == (35, nx, ny, nz) "M must be (35,nx,ny,nz)"
     @assert size(R) == (35, nx, ny, nz) "R must be (35,nx,ny,nz)"
     Maf = Float64(Ma); dxf = Float64(dx); vacf = Float64(vacuum_floor)
     rs = riemann_solver === :hll ? 0 : riemann_solver === :rusanov ? 1 :
          throw(ArgumentError("unknown riemann_solver=$riemann_solver; available :hll (default), :rusanov"))
+    lim = limiter ? 1 : 0
     fx = (nx + 1) * ny * nz; fy = (ny + 1) * nx * nz; fz = (nz + 1) * nx * ny
     fmax = max(fx, fy, fz)
     # reusable face buffer: caller may supply a (35, >=fmax) scratch to avoid per-call alloc
@@ -376,22 +400,22 @@ function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
     bc = cld(nx * ny * nz, threads)
 
     fill!(R, 0.0)
-    @cuda threads=threads blocks=cld(fx, threads) _fhat_x_g!(Bx, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs)
+    @cuda threads=threads blocks=cld(fx, threads) _fhat_x_g!(Bx, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
     @cuda threads=threads blocks=bc               _diff_x_g!(R, Bx, nx, ny, nz, dxf)
-    @cuda threads=threads blocks=cld(fy, threads) _fhat_y_g!(By, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs)
+    @cuda threads=threads blocks=cld(fy, threads) _fhat_y_g!(By, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
     @cuda threads=threads blocks=bc               _diff_y_g!(R, By, nx, ny, nz, dxf)
-    @cuda threads=threads blocks=cld(fz, threads) _fhat_z_g!(Bz, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs)
+    @cuda threads=threads blocks=cld(fz, threads) _fhat_z_g!(Bz, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
     @cuda threads=threads blocks=bc               _diff_z_g!(R, Bz, nx, ny, nz, dxf)
     return nothing
 end
 
 "Host convenience: upload `(35,nx,ny,nz)`, compute the box residual, return `(35,nx,ny,nz)`."
 function residual3d_box_gpu(M_host::Array{Float64,4}, nx::Int, ny::Int, nz::Int, dx::Real, Ma::Real;
-                            vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, threads::Int=128)
+                            vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false, threads::Int=128)
     @assert size(M_host) == (35, nx, ny, nz) "M_host must be (35,nx,ny,nz)"
     Md = CuArray(M_host); R = CUDA.zeros(Float64, 35, nx, ny, nz)
     residual3d_box_gpu!(R, Md, nx, ny, nz, dx, Ma;
-                        vacuum_floor=vacuum_floor, project_faces=project_faces, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, threads=threads)
+                        vacuum_floor=vacuum_floor, project_faces=project_faces, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter, threads=threads)
     CUDA.synchronize()
     return Array(R)
 end

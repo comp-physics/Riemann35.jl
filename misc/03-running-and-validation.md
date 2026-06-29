@@ -46,6 +46,9 @@ from `01-environment.md` first; for MPI runs on PACE also export
 | `validate_order1_vs_cpu.jl` | 1 | GPU `order=1` residual vs CPU `residual_ho_3d!(order=1)` | rel ~3e-11, GATE PASS |
 | `validate_proj_first_order_vs_cpu.jl` | 1 | GPU `proj_first_order=true` vs CPU `use_proj_recon=true` | rel ~5.8e-11, GATE PASS |
 | `validate_rusanov_vs_cpu.jl` | 1 | GPU `riemann_solver=:rusanov` vs CPU `RIEMANN_SOLVER[]=:rusanov` | rel ~3.3e-10, GATE PASS |
+| `validate_limiter_theta_vs_cpu.jl` | CPU | shared `scaling_theta_dev` vs CPU `scaling_limited_faces` θ (MAIN env) | max\|dθ\|=2⁻²⁰, 0 cells>1e-6, PASS |
+| `validate_limiter_vs_cpu.jl` | 1 | GPU `limiter=true` residual vs CPU `use_limiter=true` | bulk median ~1.5e-15 PASS; shock tail eig-floor (see note) |
+| `stress_limiter_{cpu,gpu}_march.jl` + `_compare.jl` | CPU+1 | Ma=100 jets, 20 steps, limiter CPU↔GPU **density** vs default-path baseline | density rel L2 2.8e-3 (< default 4.8e-3), mass rel 2e-7 |
 | `validate_timestep3d_gpu.jl` | 1 | single-GPU SSP-RK3 timestep vs CPU | dt EXACT; density rel ~1.9e-5; high-order moments conditioning-limited (see note) |
 | `validate_gpu_mpi_smoke.jl` | 2 | rank↔GPU binding, host-staged ring halo, `Allreduce` | PASS |
 | `validate_gpu_mpi_realize.jl` | 2 | realizability split across 2 GPUs vs CPU ref | rel 3.3e-15 |
@@ -61,6 +64,19 @@ from `01-environment.md` first; for MPI runs on PACE also export
 > self-perturbation of 1e-15 also diverges O(1). The meaningful gates are the EXACT dt
 > sequence and the density/low-order moments (rel ~1e-5). Don't chase the high-order
 > moment "GATE FAIL" — it is documented, expected physics-of-FP, not a bug.
+
+> **Limiter (`ho_realizability_limiter`) note:** the scaling limiter picks the largest θ∈[0,1]
+> keeping both faces realizable via a 20-iteration bisection on the realizability ORACLE — whose
+> eig differs CPU (LAPACK) vs GPU (analytic `delta2star`). The θ logic is verified exact to the
+> 2⁻²⁰ bisection quantum (`validate_limiter_theta_vs_cpu.jl`), and the GPU residual is
+> machine-exact wherever θ=1 (the bulk). At the shock cells where θ<1, the Ma=100 O(1e9) slopes
+> amplify the tiny θ-boundary difference into a large *pointwise* single-residual error — but this
+> does NOT compound: the `stress_limiter_*` test marches the real Ma=100 jets 20 steps with the
+> limiter HEAVILY engaged (it shifts the density solution 32% vs the default path) and finds the
+> limiter CPU↔GPU **density** divergence (rel L2 2.8e-3) is *smaller* than the default path's
+> (4.8e-3), with mass conserved to 2e-7. The per-stage realizability projection re-projects every
+> cell each stage, washing out the θ-boundary noise. The limiter adds no new meaningful CPU/GPU
+> disagreement beyond the documented eigensolver floor.
 
 ## Reference data files (`DATA`) and how to regenerate
 
