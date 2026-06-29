@@ -20,17 +20,17 @@
 # write nothing under home. Run with gpuenv2, depot on scratch.
 
 import Pkg
-Pkg.activate(joinpath(@__DIR__, "gpuenv2"))
+Pkg.activate(joinpath(joinpath(@__DIR__, ".."), "gpuenv2"))
 
 using CUDA, Printf, LinearAlgebra
-include(joinpath(@__DIR__, "realize_gpu.jl"))
+include(joinpath(joinpath(@__DIR__, ".."), "realize_gpu.jl"))
 using .RealizeGPU
 using .RealizeGPU.RealizeDev: realizable_3D_M4_dev
 
 @assert CUDA.functional() "CUDA not functional"
 println("GPU: ", CUDA.name(CUDA.device()))
 
-const DATA = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+const DATA = get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 
 # ---------------------------------------------------------------------------
 # 1. Load real battery (HEADLINE)

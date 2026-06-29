@@ -20,7 +20,7 @@ export TMPDIR=/storage/scratch1/6/sbryngelson3/tmp
 OMPI=/usr/local/pace-apps/spack/.../openmpi-4.1.8-iit4xaslnjxkchcc6n62b5kluzibl2v2
 export LD_LIBRARY_PATH=$OMPI/lib:$LD_LIBRARY_PATH
 export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader     # host-staged: no UCX/CUDA-aware needed
-srun --mpi=pmix -n 2 --gpus=2 julia --project=gpu/gpuenv2 gpu/validate_gpu_mpi_realize.jl
+srun --mpi=pmix -n 2 --gpus=2 julia --project=gpu/gpuenv2 gpu/validation/validate_gpu_mpi_realize.jl
 ```
 `gpu/gpuenv2` now carries `MPI` + `MPIPreferences` (bound `binary="system"`, `abi="OpenMPI"` via the
 project `LocalPreferences.toml`) alongside `CUDA`. Per-cell kernels (flux, realizability) decompose with
@@ -276,9 +276,9 @@ export CUDA_PATH=$CUH
 
 Run on a GPU node (`gpu-rtx6000`/`gpu-v100`):
 ```bash
-julia gpu/test_cuda.jl     # toolchain check: CUDA.functional() + trivial kernel
-NBATCH=2097152 julia gpu/bench_eig.jl   # batched-eig GPU vs CPU benchmark
+julia gpu/validation/test_cuda.jl     # toolchain check: CUDA.functional() + trivial kernel
+NBATCH=2097152 julia gpu/bench/bench_eig.jl   # batched-eig GPU vs CPU benchmark
 ```
 The scripts `Pkg.activate(@__DIR__)` — first run `Pkg.add("CUDA")` in this dir (writes to the scratch
-depot). `gpu/test_cuda.jl` also writes `LocalPreferences.toml` with `[CUDA_Runtime_jll] version="local"`
+depot). `gpu/validation/test_cuda.jl` also writes `LocalPreferences.toml` with `[CUDA_Runtime_jll] version="local"`
 if you want the system toolkit instead of artifacts.

@@ -3,10 +3,10 @@
 #   julia --project=<matenv> dump_golden.jl  (reads test/goldenfiles/test_flux_eigenvalues_golden.mat
 #   -> flxg_in.f64 / flxg_out.f64). Then run this under gpuenv2. Expect max rel ~4e-16 (machine precision).
 using CUDA, Printf
-H=@__DIR__
+H=joinpath(@__DIR__, "..")
 include(joinpath(H,"realize_gpu.jl")); using .RealizeGPU
 include(joinpath(H,"..","src","numerics","flux_closure_dev.jl")); using .FluxClosureDev
-DATA=get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 input=collect(reinterpret(Float64, read("$DATA/flxg_in.f64")))
 g=collect(reinterpret(Float64, read("$DATA/flxg_out.f64")))
 Fxm=g[1:35]; Fym=g[36:70]; Fzm=g[71:105]; Mrm=g[106:140]; Ma=0.5

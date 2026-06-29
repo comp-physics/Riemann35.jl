@@ -1,4 +1,4 @@
-import Pkg; Pkg.activate(@__DIR__)
+import Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using CUDA
 println("CUDA.functional() = ", CUDA.functional())
 CUDA.versioninfo()

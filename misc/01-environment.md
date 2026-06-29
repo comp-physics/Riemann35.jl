@@ -34,9 +34,9 @@ That's enough to run everything below. Then:
 
 ```bash
 # single-GPU
-julia --project=gpu/gpuenv2 gpu/validate_residual3d_gpu.jl
+julia --project=gpu/gpuenv2 gpu/validation/validate_residual3d_gpu.jl
 # multi-GPU (bundled MPI provides mpiexec)
-julia --project=gpu/gpuenv2 -e 'using MPI; run(`$(mpiexec()) -n 2 julia --project=gpu/gpuenv2 gpu/validate_timestep3d_mpi.jl`)'
+julia --project=gpu/gpuenv2 -e 'using MPI; run(`$(mpiexec()) -n 2 julia --project=gpu/gpuenv2 gpu/validation/validate_timestep3d_mpi.jl`)'
 ```
 
 Each rank binds its own GPU via `CUDA.device!(rank % CUDA.ndevices())`, so multiple
@@ -97,9 +97,9 @@ export LD_LIBRARY_PATH=$OMPI/lib:$LD_LIBRARY_PATH          # because gpuenv2 bin
 ```bash
 export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader            # disable flaky UCX; host-staged needs none
 # multi-GPU
-srun --mpi=pmix -n 2 --gpus=2 $JULIA --project=gpu/gpuenv2 gpu/validate_timestep3d_mpi.jl
+srun --mpi=pmix -n 2 --gpus=2 $JULIA --project=gpu/gpuenv2 gpu/validation/validate_timestep3d_mpi.jl
 # single-GPU
-srun --mpi=pmix -n 1 --gpus=1 $JULIA --project=gpu/gpuenv2 gpu/validate_residual3d_gpu.jl
+srun --mpi=pmix -n 1 --gpus=1 $JULIA --project=gpu/gpuenv2 gpu/validation/validate_residual3d_gpu.jl
 ```
 
 Singleton fallback (no SLURM step), and the MAT/HDF5 ABI caveat, are in

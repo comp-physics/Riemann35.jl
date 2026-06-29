@@ -1,6 +1,6 @@
 using CUDA, Printf
-include(joinpath(@__DIR__, "residual3d_gpu.jl")); using .Residual3DGPU
-DATA=get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+include(joinpath(joinpath(@__DIR__, ".."), "residual3d_gpu.jl")); using .Residual3DGPU
+DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 nb=parse(Int,strip(read(joinpath(DATA,"proj.meta"),String)))
 src=reshape(reinterpret(Float64,read(joinpath(DATA,"proj_M.f64"))),35,nb)
 for n in (16,24)

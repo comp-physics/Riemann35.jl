@@ -1,7 +1,7 @@
 using MPI, CUDA, Printf
-H=@__DIR__
+H=joinpath(@__DIR__, "..")
 include(joinpath(H,"timestep3d_gpu.jl")); using .Timestep3DGPU
-DATA=get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "data"))
+DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 
 MPI.Init(); comm=MPI.COMM_WORLD; rank=MPI.Comm_rank(comm); nranks=MPI.Comm_size(comm)
 CUDA.device!(rank % CUDA.ndevices())

@@ -1,5 +1,5 @@
 using MPI, CUDA, Printf
-include(joinpath(@__DIR__, "realize_gpu.jl")); using .RealizeGPU
+include(joinpath(joinpath(@__DIR__, ".."), "realize_gpu.jl")); using .RealizeGPU
 
 MPI.Init(); comm=MPI.COMM_WORLD; rank=MPI.Comm_rank(comm); nranks=MPI.Comm_size(comm)
 CUDA.device!(rank % CUDA.ndevices())
