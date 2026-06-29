@@ -1,5 +1,29 @@
 # Running & validation
 
+## Dumping data for post-run analysis / visualization
+
+The GPU march is pure compute; **`gpu/gpu_run.jl`** (`GPURun.run_gpu_3d`) wraps it and
+**streams snapshots to JLD2 in the exact schema** `simulation_runner` writes — so the
+existing readers / GLMakie viz (`src/visualization/interactive_3d_timeseries_streaming.jl`,
+`examples/run_3d_jets_timeseries.jl`) open GPU output unchanged. Snapshots are written one
+at a time (never all in host memory); the resident GPU field is host-staged only at
+snapshot times. Multi-GPU gathers the z-slabs to rank 0, which writes.
+
+```julia
+using .GPURun
+run_gpu_3d(M0, dx, Ma, nstep;                 # M0 :: (35,nx,ny,nz) host
+           snapshot_interval=10, snapshot_filename="run.jld2",
+           comm=nothing,                       # pass an MPI comm for multi-GPU (M0 = this rank's z-slab)
+           params=Dict("Nx"=>nx,"Ny"=>ny,"Nz"=>nz,"Ma"=>Ma))
+```
+
+Schema written: `meta/{params,snapshot_interval,n_snapshots}`,
+`snapshots/NNNNNN/{M,t,step}` with **`M` as `(Nx,Ny,Nz,35)`** (moment last). `S`/`C`
+(standardized/central) are NOT written — derive them post-hoc in the main package env:
+`Riemann35.compute_standardized_field(M)` / `compute_central_field(M)`. Validate with
+`gpu/validate_gpu_snapshots.jl` (1 and 2 ranks); analyze/visualize with the existing
+tooling. `JLD2` is a `gpuenv2` dependency for this.
+
 Commands below are written in the **PACE form** (`$JULIA` = your Julia 1.10+, launched
 with `srun --mpi=pmix` against a system MPI). On any other machine use the portable form
 from [`01-environment.md`](01-environment.md) instead: `julia --project=gpu/gpuenv2 <script>`
