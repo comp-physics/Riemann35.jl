@@ -299,17 +299,23 @@ recorded here as a recommendation rather than applied.
 
 ---
 
-## 5. Using the opt-in fast paths
+## 5. Using the opt-in fast paths (multiple dispatch)
 
-Both are compile-time constants (default-off → byte-identical). Flip and recompile:
+The solvers are selected by **multiple dispatch on singleton types** — set the relevant
+`const` and recompile (default values reproduce the validated paths byte-for-byte):
 
-- Realizability: `src/realizability/realize_dev.jl`
-  `const _REALIZ_SOLVER = :jacobi`  →  `:pivot`  (Bunch–Kaufman inertia)
-- Wave speeds: `gpu/wavespeed_dev.jl`
-  `const _WAVESPEED_SOLVER = :qr`  →  `:ferrari`  (closed-form quartic)
+- Wave speeds (`gpu/wavespeed_dev.jl`): `const WAVE4_SOLVER = QRWave()` →
+  `FerrariWave()` (closed-form companion quartic) or `TridiagWave()` (symmetric-tridiagonal
+  Q4 — the robust, principled form). Dispatched as
+  `_wave4_minmax(::QRWave|::FerrariWave|::TridiagWave, e84,e99,e114,e129, m00,m10,m20,m30,m40)`.
+- Realizability (`src/realizability/realize_dev.jl`): `const REALIZ_SOLVER = JacobiRealiz()`
+  → `PivotRealiz()` (Bunch–Kaufman inertia). Dispatched as
+  `_realiz_is_psd(::JacobiRealiz|::PivotRealiz, standardized..., shift)`.
 
-They are independent and can be combined: `:pivot` accelerates the limiter, `:ferrari` the
-default path. The §2.4 robustness fallback is always on (it is byte-identical).
+They are independent and combine freely: `PivotRealiz` accelerates the limiter (~2.86×),
+`FerrariWave`/`TridiagWave` the default path. The §2.4 robustness fallback (4×4 solver
+failure → Ferrari → Fujiwara) is always on and byte-identical. `b(3)` flooring (§7b) is
+always on (byte-identical; engages only on roundoff-unrealizable high-Ma cells).
 
 ---
 
@@ -339,22 +345,25 @@ references (see [`03-running-and-validation.md`](03-running-and-validation.md)).
 
 Two points from Rodney that bear directly on the wave-speed work above:
 
-**(a) The 4×4 should be a symmetric tridiagonal, not a companion.** The 4×4 wave-speed
-block `J(6:9,6:9)` has characteristic polynomial `Q4` (Houim 2011, Appendix B). The
-production code takes it as the **companion** submatrix of the 15×15 Jacobian — and that
-companion form is exactly what is ill-conditioned at high Ma (§2.4: `schur4` hits its
-sweep cap on a large fraction of Ma=100 blocks; §2.3: Ferrari loses ~3e-4 there from
-coefficient cancellation). Rodney points out that `Q4`'s four roots are equally the
-eigenvalues of the **symmetric tridiagonal Jacobi matrix** `[[a₀,√b₁],[√b₁,a₁,√b₂],…]`
-(the orthogonal-polynomial recurrence matrix — the same structure `closure5_dev` already
-uses for the 3×3 marginal). A symmetric tridiagonal has **guaranteed-real, well-conditioned**
-eigenvalues, so building it instead of the companion would *fix the conditioning at the
-source*: no spurious complex pairs, no QR sweep-cap failures, and a closed-form/symmetric
-solve that is both fast **and** accurate (Ferrari on the well-scaled `aₙ, √bₙ`
-coefficients, or a 2–3-sweep symmetric Jacobi). **Open item:** this needs the explicit
-moment → `Q4` Jacobi-matrix mapping (Houim 2011 Appendix B / Rodney's code); it is not in
-this repo. Once available it would likely *supersede* both the `:qr` and `:ferrari`
-4×4 paths and make the wave-speed result trajectory-stable.
+**(a) The 4×4 should be a symmetric tridiagonal, not a companion — IMPLEMENTED (`TridiagWave`).**
+The 4×4 wave-speed block `J(6:9,6:9)` has characteristic polynomial `Q4`. The production
+code takes it as the **companion** submatrix of the 15×15 Jacobian — and that companion form
+is exactly what is ill-conditioned at high Ma (§2.4: `schur4` hits its sweep cap on a large
+fraction of Ma=100 blocks; §2.3: Ferrari loses ~3e-4 there from coefficient cancellation).
+`Q4`'s four roots are equally the eigenvalues of the **symmetric tridiagonal Jacobi matrix**
+`diag[a₀,a₁,a₂,a₂]`, offdiag `[√b₁,√b₂,√(1.5·b₂)]` (the orthogonal-polynomial recurrence
+matrix). From the "Fourth-Order HyQMOM" paper (sec 2.3, `Q4 = (x−a₂)Q₃ − (3/2)b₂Q₂`, based
+on `(s30,s40)`) the coefficients are the 1D-marginal recurrence (`a₀`=mean, `b₁`=variance,
+`a₁`, `b₂ = s44/s33`) with the Q4 closure `a₂=a₃=(a₀+a₁)/2`, `b₃=(3/2)b₂` — the same Chebyshev
+algebra `closure5_dev` already uses, built from `(m₀₀,m₁₀,m₂₀,m₃₀,m₄₀)`. A symmetric tridiagonal
+has **guaranteed-real, well-conditioned** eigenvalues, fixing the conditioning at the source:
+no spurious complex pairs, no QR sweep-cap failures. It is solved by Ferrari on its *well-scaled*
+characteristic quartic (formed via the tridiagonal continuant recurrence). Host-validated:
+tridiagonal eigenvalues == companion `eig(J6(6:9,6:9))` to 2.5e-10; residual gate identical
+(5.119e-11). Speed (V100, n=96): default residual 282→259 ms (1.09×); the limiter is
+realizability-dominated so it is unchanged there. The gain is modest because the 3×3 P3 block
+still needs `jac15_blocks`, so only the 4×4 *solve* is replaced — but `TridiagWave` is the
+mathematically-principled, robust form (the `b(3)` floor from (b) is applied to its `b₂`).
 
 **(b) Floor unrealizable `b(3)` at large Ma** — *implemented* (`9cb412d`). In the 1D
 marginal closure (`closure_and_eigenvalues` / `closure5_dev`), roundoff in the
