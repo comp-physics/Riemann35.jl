@@ -335,7 +335,37 @@ references (see [`03-running-and-validation.md`](03-running-and-validation.md)).
 
 ---
 
-## 7. One-paragraph summary
+## 7. Input from Rodney Fox (2026-07) — the root-cause direction
+
+Two points from Rodney that bear directly on the wave-speed work above:
+
+**(a) The 4×4 should be a symmetric tridiagonal, not a companion.** The 4×4 wave-speed
+block `J(6:9,6:9)` has characteristic polynomial `Q4` (Houim 2011, Appendix B). The
+production code takes it as the **companion** submatrix of the 15×15 Jacobian — and that
+companion form is exactly what is ill-conditioned at high Ma (§2.4: `schur4` hits its
+sweep cap on a large fraction of Ma=100 blocks; §2.3: Ferrari loses ~3e-4 there from
+coefficient cancellation). Rodney points out that `Q4`'s four roots are equally the
+eigenvalues of the **symmetric tridiagonal Jacobi matrix** `[[a₀,√b₁],[√b₁,a₁,√b₂],…]`
+(the orthogonal-polynomial recurrence matrix — the same structure `closure5_dev` already
+uses for the 3×3 marginal). A symmetric tridiagonal has **guaranteed-real, well-conditioned**
+eigenvalues, so building it instead of the companion would *fix the conditioning at the
+source*: no spurious complex pairs, no QR sweep-cap failures, and a closed-form/symmetric
+solve that is both fast **and** accurate (Ferrari on the well-scaled `aₙ, √bₙ`
+coefficients, or a 2–3-sweep symmetric Jacobi). **Open item:** this needs the explicit
+moment → `Q4` Jacobi-matrix mapping (Houim 2011 Appendix B / Rodney's code); it is not in
+this repo. Once available it would likely *supersede* both the `:qr` and `:ferrari`
+4×4 paths and make the wave-speed result trajectory-stable.
+
+**(b) Floor unrealizable `b(3)` at large Ma** — *implemented* (`9cb412d`). In the 1D
+marginal closure (`closure_and_eigenvalues` / `closure5_dev`), roundoff in the
+`s_k → m_k` change of variables can make `b(3) = H₂` slightly negative at large Ma even
+though the density is order 1 — in exact arithmetic `b(3) ≥ 0`. `b(3) = 0` is the
+two-delta-function limit, so a negative `b(3)` is reset to `1e-10` (~QMOM) instead of
+producing spurious complex marginal abscissae. Matches Rodney's MATLAB (cleaner results at
+Ma=200). Byte-identical on the Ma=100 r3d state (`b(3) < 0` on 0/41472 marginals — a safety
+net for evolved / higher-Ma states), applied in both CPU and GPU for parity.
+
+## 8. One-paragraph summary
 
 The GPU residual is at a genuine register/latency wall set by the 5th-order HyQMOM
 closure — byte-exact micro-optimizations are exhausted. The real speedups come from
