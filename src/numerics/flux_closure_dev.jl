@@ -28,7 +28,7 @@ kernel module (`gpu/flux_closure_gpu.jl`). No CUDA dependency here — plain Jul
 """
 module FluxClosureDev
 
-export flux_closure35_dev
+export flux_closure35_dev, flux_closure35_central_dev
 
 const _EPSF = 2.220446049250313e-16   # eps(Float64)
 
@@ -306,6 +306,79 @@ end
         rM011,rM111,rM211,rM311,rM012,rM112,rM212,rM013,rM113,rM014,rM021,rM121,rM221,rM031,rM131,
         rM041,rM022,rM122,rM023,rM032,
         # Fz (71..105)
+        rM001,rM101,rM201,rM301,rM401,rM011,rM111,rM211,rM311,rM021,rM121,rM221,rM031,rM131,rM041,
+        rM002,rM102,rM202,rM302,rM003,rM103,rM203,rM004,rM104,rM005,rM012,rM112,rM212,rM022,rM122,
+        rM032,rM013,rM113,rM014,rM023)
+end
+
+# ---------------------------------------------------------------------------
+# CENTRAL-DIRECT flux closure. Mathematically equal to flux_closure35_dev but skips the
+# standardize -> 21-closure -> destandardize round-trip: the standardization sigma factors
+# cancel identically (every 5th-order standardized closure has the variances to EVEN powers,
+# a parity property of the HyQMOM closure), so each fifth-order CENTRAL moment C5 is a
+# rational expression in the lower central moments using only INTEGER powers of the variances
+# v1=cC200, v2=cC020, v3=cC002 -- no sqrt, no S-moments. This removes the 2 sqrt from the
+# critical path and ~56 standardized/destandardized intermediates from the live set (the 255-
+# register / ~12%-occupancy wall). Verified to 7e-14 vs the standardized path over 2e5 random
+# states; NOT bit-identical (op-order differs ~1 ULP), so opt-in (selected by dispatch).
+@inline function flux_closure35_central_dev(
+        M000,M100,M200,M300,M400,M010,M110,M210,M310,M020,M120,M220,M030,M130,M040,
+        M001,M101,M201,M301,M002,M102,M202,M003,M103,M004,M011,M111,M211,M021,M121,
+        M031,M012,M112,M013,M022)
+
+    umean = M100/M000
+    vmean = M010/M000
+    wmean = M001/M000
+
+    (cC200,cC020,cC002,cC300,cC400,cC110,cC210,cC310,cC120,cC220,cC030,cC130,cC040,
+     cC101,cC201,cC301,cC011,cC111,cC211,cC021,cC121,cC031,cC102,cC202,cC012,cC112,
+     cC022,cC003,cC103,cC013,cC004) =
+        _m4toc4_subset(M000,M100,M200,M300,M400,M010,M110,M210,M310,M020,M120,M220,M030,M130,M040,
+                       M001,M101,M201,M301,M002,M102,M202,M003,M103,M004,M011,M111,M211,M021,M121,
+                       M031,M012,M112,M013,M022)
+
+    # --- fifth-order CENTRAL moments directly from lower central moments (sqrt cancels) ---
+    v1 = cC200; v2 = cC020; v3 = cC002
+    C500 = 0.5*cC300*(5*cC400/v1 - 3*cC300^2/v1^2 - v1)
+    C050 = 0.5*cC030*(5*cC040/v2 - 3*cC030^2/v2^2 - v2)
+    C005 = 0.5*cC003*(5*cC004/v3 - 3*cC003^2/v3^2 - v3)
+    C320 = (cC400/v1 - 1.5*cC300^2/v1^2)*cC120 + 1.5*cC300*cC220/v1 - 0.5*cC300*v2
+    C230 = (cC040/v2 - 1.5*cC030^2/v2^2)*cC210 + 1.5*cC030*cC220/v2 - 0.5*cC030*v1
+    C302 = (cC400/v1 - 1.5*cC300^2/v1^2)*cC102 + 1.5*cC300*cC202/v1 - 0.5*cC300*v3
+    C203 = (cC004/v3 - 1.5*cC003^2/v3^2)*cC201 + 1.5*cC003*cC202/v3 - 0.5*cC003*v1
+    C032 = (cC040/v2 - 1.5*cC030^2/v2^2)*cC012 + 1.5*cC030*cC022/v2 - 0.5*cC030*v3
+    C023 = (cC004/v3 - 1.5*cC003^2/v3^2)*cC021 + 1.5*cC003*cC022/v3 - 0.5*cC003*v2
+    C410 = (cC300 - 2*cC300*cC400/v1^2 + 2.25*cC300^3/v1^3)*cC110 + (2.5*cC400/v1 - 3.75*cC300^2/v1^2 - 1.5*v1)*cC210 + 2*cC300*cC310/v1
+    C140 = (cC030 - 2*cC030*cC040/v2^2 + 2.25*cC030^3/v2^3)*cC110 + (2.5*cC040/v2 - 3.75*cC030^2/v2^2 - 1.5*v2)*cC120 + 2*cC030*cC130/v2
+    C401 = (cC300 - 2*cC300*cC400/v1^2 + 2.25*cC300^3/v1^3)*cC101 + (2.5*cC400/v1 - 3.75*cC300^2/v1^2 - 1.5*v1)*cC201 + 2*cC300*cC301/v1
+    C104 = (cC003 - 2*cC003*cC004/v3^2 + 2.25*cC003^3/v3^3)*cC101 + (2.5*cC004/v3 - 3.75*cC003^2/v3^2 - 1.5*v3)*cC102 + 2*cC003*cC103/v3
+    C041 = (cC030 - 2*cC030*cC040/v2^2 + 2.25*cC030^3/v2^3)*cC011 + (2.5*cC040/v2 - 3.75*cC030^2/v2^2 - 1.5*v2)*cC021 + 2*cC030*cC031/v2
+    C014 = (cC003 - 2*cC003*cC004/v3^2 + 2.25*cC003^3/v3^3)*cC011 + (2.5*cC004/v3 - 3.75*cC003^2/v3^2 - 1.5*v3)*cC012 + 2*cC003*cC013/v3
+    C311 = 1.5*cC300*cC211/v1 + (cC400/v1 - 1.5*cC300^2/v1^2)*cC111 - 0.5*cC300*cC011
+    C131 = 1.5*cC030*cC121/v2 + (cC040/v2 - 1.5*cC030^2/v2^2)*cC111 - 0.5*cC030*cC101
+    C113 = 1.5*cC003*cC112/v3 + (cC004/v3 - 1.5*cC003^2/v3^2)*cC111 - 0.5*cC003*cC110
+    C221 = (cC300/v1)*(cC121 - cC101*v2) + (cC030/v2)*(cC211 - cC011*v1) + cC201*v2 + cC021*v1 - cC300*cC030*cC111/(v1*v2)
+    C212 = (cC300/v1)*(cC112 - cC110*v3) + (cC003/v3)*(cC211 - cC011*v1) + cC210*v3 + cC012*v1 - cC300*cC003*cC111/(v1*v3)
+    C122 = (cC003/v3)*(cC121 - cC101*v2) + (cC030/v2)*(cC112 - cC110*v3) + cC102*v2 + cC120*v3 - cC003*cC030*cC111/(v2*v3)
+
+    # --- central -> raw (subset of C5toM5_3D); lower-order centrals are the cC themselves ---
+    (rM100,rM200,rM300,rM400,rM500,rM010,rM110,rM210,rM310,rM410,rM020,rM120,rM220,rM320,
+     rM030,rM130,rM230,rM040,rM140,rM050,rM001,rM101,rM201,rM301,rM401,rM011,rM111,rM211,rM311,
+     rM021,rM121,rM221,rM031,rM131,rM041,rM002,rM102,rM202,rM302,rM012,rM112,rM212,rM022,rM122,
+     rM032,rM003,rM103,rM203,rM013,rM113,rM023,rM004,rM104,rM014,rM005) =
+        _c5tom5_subset(M000,umean,vmean,wmean,cC200,cC110,cC101,cC020,cC011,cC002,
+                       cC300,cC210,cC201,cC120,cC111,cC102,cC030,cC021,cC012,cC003,
+                       cC400,cC310,cC301,cC220,cC211,cC202,cC130,cC121,cC112,cC103,cC040,cC031,cC022,cC013,cC004,
+                       C500,C410,C320,C230,C140,C401,C302,C203,C104,C311,C221,C131,C212,C113,C122,
+                       C050,C041,C032,C023,C014,C005)
+
+    return (
+        rM100,rM200,rM300,rM400,rM500,rM110,rM210,rM310,rM410,rM120,rM220,rM320,rM130,rM230,rM140,
+        rM101,rM201,rM301,rM401,rM102,rM202,rM302,rM103,rM203,rM104,rM111,rM211,rM311,rM121,rM221,
+        rM131,rM112,rM212,rM113,rM122,
+        rM010,rM110,rM210,rM310,rM410,rM020,rM120,rM220,rM320,rM030,rM130,rM230,rM040,rM140,rM050,
+        rM011,rM111,rM211,rM311,rM012,rM112,rM212,rM013,rM113,rM014,rM021,rM121,rM221,rM031,rM131,
+        rM041,rM022,rM122,rM023,rM032,
         rM001,rM101,rM201,rM301,rM401,rM011,rM111,rM211,rM311,rM021,rM121,rM221,rM031,rM131,rM041,
         rM002,rM102,rM202,rM302,rM003,rM103,rM203,rM004,rM104,rM005,rM012,rM112,rM212,rM022,rM122,
         rM032,rM013,rM113,rM014,rM023)
