@@ -597,20 +597,35 @@ end
     end
     # 3x3 block J[13:15,13:15] = [[0,1,0],[e194,e209,e224],[e195,e210,e225]]
     r3lo, _, r3hi, hc = eig3_realparts_dev(0.0, 1.0, 0.0, e194, e209, e224, e195, e210, e225)
-    # 4x4 companion block J[6:9,6:9]
+    # 4x4 companion block J[6:9,6:9]. Robustness (ISSUE 1): when the iterative QR hits its
+    # sweep cap it returns (Inf,-Inf), which silently DROPS the 4x4 block. On the Ma=100
+    # state the dropped block happens to match the CPU (its eigenvalues lie within the 3x3
+    # range), but in general a dropped block underestimates sR -> HLL too narrow -> CFL
+    # instability. The correct, NON-iterative fallback is the closed-form Ferrari quartic,
+    # which always returns the actual companion eigenvalue real-parts (no convergence cap).
     if _WAVESPEED_SOLVER === :ferrari
         e4lo, e4hi, st4 = ferrari_realpart_minmax(e84, e99, e114, e129)
-        if st4 != 0   # rare degenerate/non-finite block -> exact QR fallback
-            e4lo, e4hi, _ = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
-                                                   0.0, 0.0, 1.0, 0.0,
-                                                   0.0, 0.0, 0.0, 1.0,
-                                                   e84, e99, e114, e129)
+        if st4 != 0   # rare degenerate/non-finite block -> exact QR
+            e4lo, e4hi, st4 = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
+                                                     0.0, 0.0, 1.0, 0.0,
+                                                     0.0, 0.0, 0.0, 1.0,
+                                                     e84, e99, e114, e129)
         end
     else
-        e4lo, e4hi, _ = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
-                                               0.0, 0.0, 1.0, 0.0,
-                                               0.0, 0.0, 0.0, 1.0,
-                                               e84, e99, e114, e129)
+        e4lo, e4hi, st4 = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
+                                                 0.0, 0.0, 1.0, 0.0,
+                                                 0.0, 0.0, 0.0, 1.0,
+                                                 e84, e99, e114, e129)
+        if st4 != 0   # QR non-convergence -> closed-form Ferrari (real eigenvalue parts)
+            ef_lo, ef_hi, stf = ferrari_realpart_minmax(e84, e99, e114, e129)
+            if stf == 0
+                e4lo = ef_lo; e4hi = ef_hi
+            else
+                # both failed (degenerate): guaranteed Fujiwara magnitude bound, never NaN
+                B = 2.0 * max(abs(e129), max(sqrt(abs(e114)), max(cbrt(abs(e99)), sqrt(sqrt(abs(e84))))))
+                e4lo = -B; e4hi = B
+            end
+        end
     end
     vmin = min(r3lo, e4lo)
     vmax = max(r3hi, e4hi)
