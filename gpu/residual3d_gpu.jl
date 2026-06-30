@@ -53,7 +53,23 @@ include(joinpath(@__DIR__, "..", "src", "numerics", "flux_closure_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
 using .WavespeedDev: realize_and_speed_Mr_dev
-using .FluxClosureDev: flux_closure35_dev
+using .FluxClosureDev: flux_closure35_dev, flux_closure35_central_dev
+
+# Flux-closure path — SELECTED BY MULTIPLE DISPATCH on a singleton type.
+#   StdClosure()     -> the standardized closure (standardize -> 21 closures -> destandardize).
+#   CentralClosure() -> central-direct closure (same result, skips the sigma round-trip; the
+#                       variance powers cancel by parity, removing 2 sqrt + ~56 live values
+#                       from the per-face critical path). ~7e-14 vs StdClosure; opt-in.
+struct StdClosure end
+struct CentralClosure end
+const FLUX_CLOSURE = StdClosure()
+# 35 explicit args (NO tuple-splat on the device).
+@inline _flux35(::StdClosure,
+    a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai) =
+    flux_closure35_dev(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai)
+@inline _flux35(::CentralClosure,
+    a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai) =
+    flux_closure35_central_dev(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai)
 using .ReconDev: to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod,
                  muscl_right_face_tup, muscl_left_face_tup
 using .RealizeDev: realizable_3D_M4_dev, delta2star_mineig_dev, scaling_theta_dev
@@ -170,13 +186,13 @@ end
         MRf[29], MRf[30], MRf[31], MRf[32], MRf[33], MRf[34], MRf[35], axis, Ma)
 
     # physical flux: flux_closure35_dev returns (Fx|Fy|Fz) flattened (105); axis a -> block a
-    FLall = flux_closure35_dev(
+    FLall = _flux35(FLUX_CLOSURE,
         MLr[1],  MLr[2],  MLr[3],  MLr[4],  MLr[5],  MLr[6],  MLr[7],
         MLr[8],  MLr[9],  MLr[10], MLr[11], MLr[12], MLr[13], MLr[14],
         MLr[15], MLr[16], MLr[17], MLr[18], MLr[19], MLr[20], MLr[21],
         MLr[22], MLr[23], MLr[24], MLr[25], MLr[26], MLr[27], MLr[28],
         MLr[29], MLr[30], MLr[31], MLr[32], MLr[33], MLr[34], MLr[35])
-    FRall = flux_closure35_dev(
+    FRall = _flux35(FLUX_CLOSURE,
         MRr[1],  MRr[2],  MRr[3],  MRr[4],  MRr[5],  MRr[6],  MRr[7],
         MRr[8],  MRr[9],  MRr[10], MRr[11], MRr[12], MRr[13], MRr[14],
         MRr[15], MRr[16], MRr[17], MRr[18], MRr[19], MRr[20], MRr[21],
