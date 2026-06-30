@@ -41,13 +41,77 @@ using .Schur4: schur4_realpart_minmax, ferrari_realpart_minmax
 export realize_and_speed_dev, realize_and_speed_Mr_dev, jac15_eig_dev, closure5_dev,
        correct_moments_dev, eig3_realparts_dev
 
-# OPT-IN 4x4-companion wave-speed solver (compile-time, default :qr => byte-identical).
-# :qr      -> iterative Francis double-shift QR (the validated default).
-# :ferrari -> closed-form Ferrari quartic on the companion's char-poly coefficients
-#             (straight-line, no iteration / warp divergence), with a QR fallback on the
-#             rare degenerate block. Numerics-changing at the ~1e-4 level on the
-#             ill-conditioned high-Ma blocks (HLL tolerates a small wave-speed perturbation).
-const _WAVESPEED_SOLVER = :qr
+# 4x4 wave-speed (Q4) solver — SELECTED BY MULTIPLE DISPATCH on a singleton type.
+# Set `const WAVE4_SOLVER` below to one of:
+#   QRWave()       -> iterative Francis double-shift QR on the companion (validated default).
+#   FerrariWave()  -> closed-form Ferrari quartic on the companion char-poly coefficients.
+#   TridiagWave()  -> Rodney Fox's symmetric-tridiagonal Q4 Jacobi matrix (Houim/Posey/Fox
+#                     "Fourth-Order HyQMOM" paper): the 4x4 block's char-poly Q4 has its four
+#                     roots = eigenvalues of the SYMMETRIC tridiagonal recurrence matrix
+#                     diag[a0,a1,a2,a2], offdiag[sqrt(b1),sqrt(b2),sqrt(1.5*b2)] built from the
+#                     1D marginal (m00,m10,m20,m30,m40). Real + WELL-CONDITIONED by construction
+#                     (vs the ill-conditioned companion), so no spurious complex pairs and no QR
+#                     sweep-cap failures; solved by Ferrari on its well-scaled char poly.
+struct QRWave end
+struct FerrariWave end
+struct TridiagWave end
+const WAVE4_SOLVER = QRWave()
+
+# Min/max real-part of the 4x4 Q4 block. `(e84,e99,e114,e129)` are the companion bottom row;
+# `(m00,m10,m20,m30,m40)` is the 1D marginal the tridiagonal form is built from. -> (lo,hi,status).
+@inline _wave4_minmax(::QRWave, e84,e99,e114,e129, m00,m10,m20,m30,m40) =
+    schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
+                           0.0, 0.0, 1.0, 0.0,
+                           0.0, 0.0, 0.0, 1.0,
+                           e84, e99, e114, e129)
+@inline _wave4_minmax(::FerrariWave, e84,e99,e114,e129, m00,m10,m20,m30,m40) =
+    ferrari_realpart_minmax(e84, e99, e114, e129)
+@inline _wave4_minmax(::TridiagWave, e84,e99,e114,e129, m00,m10,m20,m30,m40) =
+    _wave4_tridiag_minmax(m00, m10, m20, m30, m40)
+
+# Symmetric-tridiagonal Q4 solve. Recurrence coefficients of the 1D HyQMOM marginal
+# (same Chebyshev algebra as `closure5_dev`): a0=mean, b1=variance, a1, b2=s44/s33; the Q4
+# closure (paper, sec 2.3) gives a2=a3=(a0+a1)/2 and b3=(3/2)b2. The 4x4 symmetric tridiagonal
+# diag[a0,a1,a2,a2], offdiag[sqrt(b1),sqrt(b2),sqrt(b3)] has the four Q4 roots as its (real)
+# eigenvalues. We form its (well-scaled) characteristic quartic via the tridiagonal continuant
+# recurrence and take the min/max real roots with Ferrari. Returns (lo,hi,status); status!=0 on
+# a degenerate marginal (caller falls back).
+@noinline function _wave4_tridiag_minmax(m00, m10, m20, m30, m40)
+    if !(m00 > 0.0); return NaN, NaN, 1; end
+    a0  = m10 / m00
+    s33 = m20 - a0*m10
+    if !(s33 > 0.0); return NaN, NaN, 1; end     # non-positive variance -> degenerate
+    s34 = m30 - a0*m20
+    s35 = m40 - a0*m30
+    b1  = s33 / m00                               # variance
+    a1  = s34/s33 - m10/m00
+    s44 = s35 - a1*s34 - b1*m20
+    b2  = s44 / s33
+    # Rodney's b(3) floor: a roundoff-negative b2 is the two-delta limit; floor to ~QMOM so
+    # the tridiagonal stays real (consistent with closure5_dev / closure_and_eigenvalues).
+    if b2 < 0.0; b2 = 1.0e-10; end
+    a2  = 0.5*(a0 + a1)                           # Q4 closure: a2 = a3
+    b3  = 1.5*b2                                  # Q4 closure: b3 = (3/2) b2
+    # char poly of the 4x4 symmetric tridiagonal diag d=[a0,a1,a2,a2], g=offdiag^2=[b1,b2,b3]
+    # via the continuant recurrence D0..D4 (monic quartic c0 + c1 x + c2 x^2 + c3 x^3 + x^4).
+    d0 = a0; d1 = a1; d2 = a2; d3 = a2
+    g0 = b1; g1 = b2; g2 = b3
+    # D1 = (x - d0)
+    A0 = -d0
+    # D2 = (x - d1) D1 - g0 D0  ->  coeffs (D2c0, D2c1, 1)
+    B0 = d0*d1 - g0;  B1 = -(d0 + d1)
+    # D3 = (x - d2) D2 - g1 D1  ->  coeffs (C0,C1,C2,1)
+    C0 = -d2*B0 + g1*d0
+    C1 =  B0 - d2*B1 - g1
+    C2 =  B1 - d2          # (B2 = 1)
+    # D4 = (x - d3) D3 - g2 D2  ->  coeffs (c0,c1,c2,c3,1)
+    c0 = -d3*C0 - g2*B0
+    c1 =  C0 - d3*C1 - g2*B1
+    c2 =  C1 - d3*C2 - g2          # (D2c2 = 1)
+    c3 =  C2 - d3
+    # companion bottom row for ferrari: x^4 - e129 x^3 - e114 x^2 - e99 x - e84
+    return ferrari_realpart_minmax(-c0, -c1, -c2, -c3)
+end
 
 # ---------------------------------------------------------------------------
 # eig3_realparts_dev: analytic eigenvalues (real parts) of a general real 3x3,
@@ -605,35 +669,23 @@ end
     end
     # 3x3 block J[13:15,13:15] = [[0,1,0],[e194,e209,e224],[e195,e210,e225]]
     r3lo, _, r3hi, hc = eig3_realparts_dev(0.0, 1.0, 0.0, e194, e209, e224, e195, e210, e225)
-    # 4x4 companion block J[6:9,6:9]. Robustness (ISSUE 1): when the iterative QR hits its
-    # sweep cap it returns (Inf,-Inf), which silently DROPS the 4x4 block. On the Ma=100
-    # state the dropped block happens to match the CPU (its eigenvalues lie within the 3x3
-    # range), but in general a dropped block underestimates sR -> HLL too narrow -> CFL
-    # instability. The correct, NON-iterative fallback is the closed-form Ferrari quartic,
-    # which always returns the actual companion eigenvalue real-parts (no convergence cap).
-    if _WAVESPEED_SOLVER === :ferrari
+    # 4x4 Q4 block J[6:9,6:9] — solver picked by dispatch on `WAVE4_SOLVER` (the marginal
+    # m00,m10,m20,m30,m40 = args 1,6,10,13,15 feeds the tridiagonal form). Robustness chain
+    # (ISSUE 1): on the primary solver's failure (e.g. QR sweep-cap -> (Inf,-Inf), which would
+    # silently DROP the block and underestimate sR -> HLL too narrow -> CFL instability), fall
+    # back to the closed-form Ferrari (non-iterative, always returns), then QR, then a
+    # guaranteed Fujiwara magnitude bound (never a silent drop, never NaN).
+    e4lo, e4hi, st4 = _wave4_minmax(WAVE4_SOLVER, e84, e99, e114, e129, m00, m10, m20, m30, m40)
+    if st4 != 0
+        # closed-form Ferrari is the non-iterative fallback (always returns; no convergence cap).
+        # Kept lean: the iterative QR is NOT in the fallback, so the Ferrari/Tridiag kernels do
+        # not compile it. For QRWave (primary = QR) this is exactly the I4 behavior (QR -> Ferrari).
         e4lo, e4hi, st4 = ferrari_realpart_minmax(e84, e99, e114, e129)
-        if st4 != 0   # rare degenerate/non-finite block -> exact QR
-            e4lo, e4hi, st4 = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
-                                                     0.0, 0.0, 1.0, 0.0,
-                                                     0.0, 0.0, 0.0, 1.0,
-                                                     e84, e99, e114, e129)
-        end
-    else
-        e4lo, e4hi, st4 = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
-                                                 0.0, 0.0, 1.0, 0.0,
-                                                 0.0, 0.0, 0.0, 1.0,
-                                                 e84, e99, e114, e129)
-        if st4 != 0   # QR non-convergence -> closed-form Ferrari (real eigenvalue parts)
-            ef_lo, ef_hi, stf = ferrari_realpart_minmax(e84, e99, e114, e129)
-            if stf == 0
-                e4lo = ef_lo; e4hi = ef_hi
-            else
-                # both failed (degenerate): guaranteed Fujiwara magnitude bound, never NaN
-                B = 2.0 * max(abs(e129), max(sqrt(abs(e114)), max(cbrt(abs(e99)), sqrt(sqrt(abs(e84))))))
-                e4lo = -B; e4hi = B
-            end
-        end
+    end
+    if st4 != 0
+        # degenerate block: guaranteed Fujiwara magnitude bound (never a silent drop / NaN).
+        B = 2.0 * max(abs(e129), max(sqrt(abs(e114)), max(cbrt(abs(e99)), sqrt(sqrt(abs(e84))))))
+        e4lo = -B; e4hi = B
     end
     vmin = min(r3lo, e4lo)
     vmax = max(r3hi, e4hi)

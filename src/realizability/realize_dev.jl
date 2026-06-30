@@ -438,14 +438,37 @@ end
     end
 end
 
-# OPT-IN realizability solver select (compile-time, default :jacobi => byte-identical).
-# :jacobi  -> cyclic-Jacobi smallest eigenvalue (the validated default).
-# :pivot   -> Bunch-Kaufman 6x6 INERTIA (the sign of min-eig, exact by Sylvester's law).
-# Consumers use ONLY the sign of min-eig, so the inertia decides realizability identically
-# to the eigenvalue — but in ONE pivoted factorization instead of iterative sweeps, and
-# (unlike a naive unpivoted LDL^T) it stays correct at the realizability boundary because
-# the 2x2 pivots engage exactly when a 1x1 pivot would be ~0.
-const _REALIZ_SOLVER = :jacobi
+# Realizability solver — SELECTED BY MULTIPLE DISPATCH on a singleton type.
+# Set `const REALIZ_SOLVER` to one of:
+#   JacobiRealiz() -> cyclic-Jacobi smallest eigenvalue, sign test (the validated default).
+#   PivotRealiz()  -> Bunch-Kaufman 6x6 INERTIA (the sign of min-eig, exact by Sylvester's law)
+#                     -> ONE pivoted factorization instead of iterative sweeps; correct at the
+#                     realizability boundary (2x2 pivots engage where a 1x1 pivot would be ~0).
+# Consumers use ONLY the sign, i.e. "is (delta2star + shift*I) PSD?", so both decide identically.
+struct JacobiRealiz end
+struct PivotRealiz end
+const REALIZ_SOLVER = JacobiRealiz()
+
+# Is (delta2star + shift*I) positive semidefinite? (the realizability predicate the 3 consumers
+# call). The Jacobi method's `isfinite(lam) && lam >= -shift` reproduces all three original
+# consumer comparisons byte-for-byte (lam is finite here): `lam>=0`, `lam2>-1e-6` (differ only
+# at the measure-zero point lam=-1e-6), and `isfinite(m) && m>=0`.
+@inline function _realiz_is_psd(::JacobiRealiz,
+        s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022, shift::Float64)
+    lam = delta2star_mineig_dev(s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022)
+    return isfinite(lam) && lam >= -shift
+end
+@inline _realiz_is_psd(::PivotRealiz,
+        s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022, shift::Float64) =
+    delta2star_psd_dev(s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022, shift)
 
 # Default smallest-eigenvalue path (unchanged behavior; @inline => byte-identical).
 @inline function delta2star_mineig_dev(
@@ -574,15 +597,10 @@ end
         S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
         S211, S021, S121, S031, S012, S112, S013, S022)
 
-    realizable = _REALIZ_SOLVER === :pivot ?
-        delta2star_psd_dev(
-            S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
-            S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
-            S211, S021, S121, S031, S012, S112, S013, S022, 0.0) :
-        (delta2star_mineig_dev(
-            S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
-            S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
-            S211, S021, S121, S031, S012, S112, S013, S022) >= 0)
+    realizable = _realiz_is_psd(REALIZ_SOLVER,
+        S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
+        S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
+        S211, S021, S121, S031, S012, S112, S013, S022, 0.0)
 
     if realizable
         return (S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
@@ -627,16 +645,11 @@ end
     nS202 = S4
     nS022 = S4
 
-    # min-eig > -1e-6  <=>  (A + 1e-6*I) positive (semi)definite -> shift = 1e-6 for pivot path.
-    realizable2 = _REALIZ_SOLVER === :pivot ?
-        delta2star_psd_dev(
-            nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
-            S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
-            nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022, 1.0e-6) :
-        (delta2star_mineig_dev(
-            nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
-            S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
-            nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022) > -1.0e-6)
+    # min-eig > -1e-6  <=>  (A + 1e-6*I) positive (semi)definite -> shift = 1e-6.
+    realizable2 = _realiz_is_psd(REALIZ_SOLVER,
+        nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
+        S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
+        nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022, 1.0e-6)
 
     if realizable2
         return (nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
@@ -828,18 +841,10 @@ end
     C  = from_recon_vars_tup(V)
     Vt = to_recon_vars_tup(C)
     (Vt[1] > 0.0 && Vt[5] > 0.0 && Vt[6] > 0.0 && Vt[7] > 0.0) || return false
-    if _REALIZ_SOLVER === :pivot
-        # Bunch-Kaufman rejects negative/non-finite pivots, folding in the isfinite guard.
-        return delta2star_psd_dev(
-            Vt[8],  Vt[9],  Vt[10], Vt[11], Vt[12], Vt[13], Vt[14], Vt[15], Vt[16], Vt[17],
-            Vt[18], Vt[19], Vt[20], Vt[21], Vt[22], Vt[23], Vt[24], Vt[25], Vt[26], Vt[27],
-            Vt[28], Vt[29], Vt[30], Vt[31], Vt[32], Vt[33], Vt[34], Vt[35], 0.0)
-    end
-    m = delta2star_mineig_dev(
+    return _realiz_is_psd(REALIZ_SOLVER,
         Vt[8],  Vt[9],  Vt[10], Vt[11], Vt[12], Vt[13], Vt[14], Vt[15], Vt[16], Vt[17],
         Vt[18], Vt[19], Vt[20], Vt[21], Vt[22], Vt[23], Vt[24], Vt[25], Vt[26], Vt[27],
-        Vt[28], Vt[29], Vt[30], Vt[31], Vt[32], Vt[33], Vt[34], Vt[35])
-    return isfinite(m) && m >= 0.0
+        Vt[28], Vt[29], Vt[30], Vt[31], Vt[32], Vt[33], Vt[34], Vt[35], 0.0)
 end
 
 # Both faces of a cell, shrunk by the largest theta in [0,1] for which BOTH map

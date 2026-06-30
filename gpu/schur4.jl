@@ -293,7 +293,10 @@ end
     return (A + B) - sh
 end
 
-@inline function ferrari_realpart_minmax(e84::Float64, e99::Float64, e114::Float64, e129::Float64)
+# @noinline: contains the resolvent-cubic acos/cos/cbrt chain; confine it out of the (huge)
+# per-face residual kernel exactly as `schur4`/`sym6_mineig` are confined. Not @fastmath, so
+# the @noinline boundary is byte-identical (no reassociation).
+@noinline function ferrari_realpart_minmax(e84::Float64, e99::Float64, e114::Float64, e129::Float64)
     # companion char poly -> monic λ^4 + bλ^3 + cλ^2 + dλ + e
     b = -e129; c = -e114; d = -e99; e = -e84
     if !(isfinite(b) && isfinite(c) && isfinite(d) && isfinite(e))
