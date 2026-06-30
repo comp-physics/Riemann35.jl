@@ -155,6 +155,44 @@ end
             M032,M003,M103,M203,M013,M113,M023,M004,M104,M014,M005)
 end
 
+# Reduced central->raw map: ONLY the 21 FIFTH-order raw moments (the ones absent from the
+# input state). The other 34 raw flux components are the input state's own moments with one
+# index raised (e.g. the x-flux of M000 is M100), so the assembly reads them straight from the
+# input instead of reconstructing them here -- removing 34 binomial-shift outputs from the
+# closure's live set. Same `@fastmath` arithmetic as `_c5tom5_subset` for these 21 lines.
+@inline @fastmath function _c5tom5_fifth(
+        M000,umean,vmean,wmean,C200,C110,C101,C020,C011,C002,
+        C300,C210,C201,C120,C111,C102,C030,C021,C012,C003,
+        C400,C310,C301,C220,C211,C202,C130,C121,C112,C103,C040,C031,C022,C013,C004,
+        C500,C410,C320,C230,C140,C401,C302,C203,C104,C311,C221,C131,C212,C113,C122,
+        C050,C041,C032,C023,C014,C005)
+    t2 = umean^2; t3 = umean^3; t5 = vmean^2; t6 = vmean^3; t8 = wmean^2; t9 = wmean^3
+    t4 = t2^2; t7 = t5^2; t10 = t8^2
+    M500 = M000*umean^5+C500*M000+C200*M000*t3*1.0e+1+C300*M000*t2*1.0e+1+C400*M000*umean*5.0
+    M410 = C410*M000+C110*M000*t3*4.0+C210*M000*t2*6.0+C310*M000*umean*4.0+C400*M000*vmean+M000*t4*vmean+C200*M000*t2*vmean*6.0+C300*M000*umean*vmean*4.0
+    M320 = C320*M000+C020*M000*t3+C120*M000*t2*3.0+C300*M000*t5+C220*M000*umean*3.0+C310*M000*vmean*2.0+M000*t3*t5+C200*M000*t5*umean*3.0+C110*M000*t2*vmean*6.0+C210*M000*umean*vmean*6.0
+    M230 = C230*M000+C030*M000*t2+C200*M000*t6+C210*M000*t5*3.0+C130*M000*umean*2.0+C220*M000*vmean*3.0+M000*t2*t6+C110*M000*t5*umean*6.0+C020*M000*t2*vmean*3.0+C120*M000*umean*vmean*6.0
+    M140 = C140*M000+C110*M000*t6*4.0+C120*M000*t5*6.0+C040*M000*umean+C130*M000*vmean*4.0+M000*t7*umean+C020*M000*t5*umean*6.0+C030*M000*umean*vmean*4.0
+    M050 = M000*vmean^5+C050*M000+C020*M000*t6*1.0e+1+C030*M000*t5*1.0e+1+C040*M000*vmean*5.0
+    M401 = C401*M000+C101*M000*t3*4.0+C201*M000*t2*6.0+C301*M000*umean*4.0+C400*M000*wmean+M000*t4*wmean+C200*M000*t2*wmean*6.0+C300*M000*umean*wmean*4.0
+    M311 = C311*M000+C011*M000*t3+C111*M000*t2*3.0+C211*M000*umean*3.0+C301*M000*vmean+C310*M000*wmean+M000*t3*vmean*wmean+C101*M000*t2*vmean*3.0+C110*M000*t2*wmean*3.0+C201*M000*umean*vmean*3.0+C210*M000*umean*wmean*3.0+C300*M000*vmean*wmean+C200*M000*umean*vmean*wmean*3.0
+    M221 = C221*M000+C021*M000*t2+C201*M000*t5+C121*M000*umean*2.0+C211*M000*vmean*2.0+C220*M000*wmean+M000*t2*t5*wmean+C101*M000*t5*umean*2.0+C011*M000*t2*vmean*2.0+C020*M000*t2*wmean+C200*M000*t5*wmean+C111*M000*umean*vmean*4.0+C120*M000*umean*wmean*2.0+C210*M000*vmean*wmean*2.0+C110*M000*umean*vmean*wmean*4.0
+    M131 = C131*M000+C101*M000*t6+C111*M000*t5*3.0+C031*M000*umean+C121*M000*vmean*3.0+C130*M000*wmean+M000*t6*umean*wmean+C011*M000*t5*umean*3.0+C110*M000*t5*wmean*3.0+C021*M000*umean*vmean*3.0+C030*M000*umean*wmean+C120*M000*vmean*wmean*3.0+C020*M000*umean*vmean*wmean*3.0
+    M041 = C041*M000+C011*M000*t6*4.0+C021*M000*t5*6.0+C031*M000*vmean*4.0+C040*M000*wmean+M000*t7*wmean+C020*M000*t5*wmean*6.0+C030*M000*vmean*wmean*4.0
+    M302 = C302*M000+C002*M000*t3+C102*M000*t2*3.0+C300*M000*t8+C202*M000*umean*3.0+C301*M000*wmean*2.0+M000*t3*t8+C200*M000*t8*umean*3.0+C101*M000*t2*wmean*6.0+C201*M000*umean*wmean*6.0
+    M212 = C212*M000+C012*M000*t2+C210*M000*t8+C112*M000*umean*2.0+C202*M000*vmean+C211*M000*wmean*2.0+M000*t2*t8*vmean+C110*M000*t8*umean*2.0+C002*M000*t2*vmean+C200*M000*t8*vmean+C011*M000*t2*wmean*2.0+C102*M000*umean*vmean*2.0+C111*M000*umean*wmean*4.0+C201*M000*vmean*wmean*2.0+C101*M000*umean*vmean*wmean*4.0
+    M122 = C122*M000+C102*M000*t5+C120*M000*t8+C022*M000*umean+C112*M000*vmean*2.0+C121*M000*wmean*2.0+M000*t5*t8*umean+C002*M000*t5*umean+C020*M000*t8*umean+C110*M000*t8*vmean*2.0+C101*M000*t5*wmean*2.0+C012*M000*umean*vmean*2.0+C021*M000*umean*wmean*2.0+C111*M000*vmean*wmean*4.0+C011*M000*umean*vmean*wmean*4.0
+    M032 = C032*M000+C002*M000*t6+C012*M000*t5*3.0+C030*M000*t8+C022*M000*vmean*3.0+C031*M000*wmean*2.0+M000*t6*t8+C020*M000*t8*vmean*3.0+C011*M000*t5*wmean*6.0+C021*M000*vmean*wmean*6.0
+    M203 = C203*M000+C003*M000*t2+C200*M000*t9+C201*M000*t8*3.0+C103*M000*umean*2.0+C202*M000*wmean*3.0+M000*t2*t9+C101*M000*t8*umean*6.0+C002*M000*t2*wmean*3.0+C102*M000*umean*wmean*6.0
+    M113 = C113*M000+C110*M000*t9+C111*M000*t8*3.0+C013*M000*umean+C103*M000*vmean+C112*M000*wmean*3.0+M000*t9*umean*vmean+C011*M000*t8*umean*3.0+C101*M000*t8*vmean*3.0+C003*M000*umean*vmean+C012*M000*umean*wmean*3.0+C102*M000*vmean*wmean*3.0+C002*M000*umean*vmean*wmean*3.0
+    M023 = C023*M000+C003*M000*t5+C020*M000*t9+C021*M000*t8*3.0+C013*M000*vmean*2.0+C022*M000*wmean*3.0+M000*t5*t9+C011*M000*t8*vmean*6.0+C002*M000*t5*wmean*3.0+C012*M000*vmean*wmean*6.0
+    M104 = C104*M000+C101*M000*t9*4.0+C102*M000*t8*6.0+C004*M000*umean+C103*M000*wmean*4.0+M000*t10*umean+C002*M000*t8*umean*6.0+C003*M000*umean*wmean*4.0
+    M014 = C014*M000+C011*M000*t9*4.0+C012*M000*t8*6.0+C004*M000*vmean+C013*M000*wmean*4.0+M000*t10*vmean+C002*M000*t8*vmean*6.0+C003*M000*vmean*wmean*4.0
+    M005 = M000*wmean^5+C005*M000+C002*M000*t9*1.0e+1+C003*M000*t8*1.0e+1+C004*M000*wmean*5.0
+    return (M500,M410,M320,M230,M140,M050,M401,M311,M221,M131,M041,M302,M212,M122,M032,
+            M203,M113,M023,M104,M014,M005)
+end
+
 # ---------------------------------------------------------------------------
 # Top-level device flux closure (alloc-free). 35 raw moment scalars in, 105 out.
 # ---------------------------------------------------------------------------
@@ -361,27 +399,27 @@ end
     C212 = (cC300/v1)*(cC112 - cC110*v3) + (cC003/v3)*(cC211 - cC011*v1) + cC210*v3 + cC012*v1 - cC300*cC003*cC111/(v1*v3)
     C122 = (cC003/v3)*(cC121 - cC101*v2) + (cC030/v2)*(cC112 - cC110*v3) + cC102*v2 + cC120*v3 - cC003*cC030*cC111/(v2*v3)
 
-    # --- central -> raw (subset of C5toM5_3D); lower-order centrals are the cC themselves ---
-    (rM100,rM200,rM300,rM400,rM500,rM010,rM110,rM210,rM310,rM410,rM020,rM120,rM220,rM320,
-     rM030,rM130,rM230,rM040,rM140,rM050,rM001,rM101,rM201,rM301,rM401,rM011,rM111,rM211,rM311,
-     rM021,rM121,rM221,rM031,rM131,rM041,rM002,rM102,rM202,rM302,rM012,rM112,rM212,rM022,rM122,
-     rM032,rM003,rM103,rM203,rM013,rM113,rM023,rM004,rM104,rM014,rM005) =
-        _c5tom5_subset(M000,umean,vmean,wmean,cC200,cC110,cC101,cC020,cC011,cC002,
-                       cC300,cC210,cC201,cC120,cC111,cC102,cC030,cC021,cC012,cC003,
-                       cC400,cC310,cC301,cC220,cC211,cC202,cC130,cC121,cC112,cC103,cC040,cC031,cC022,cC013,cC004,
-                       C500,C410,C320,C230,C140,C401,C302,C203,C104,C311,C221,C131,C212,C113,C122,
-                       C050,C041,C032,C023,C014,C005)
+    # --- ONLY the 21 fifth-order raw moments (the others are input moments, raised index) ---
+    (rM500,rM410,rM320,rM230,rM140,rM050,rM401,rM311,rM221,rM131,rM041,rM302,rM212,rM122,rM032,
+     rM203,rM113,rM023,rM104,rM014,rM005) =
+        _c5tom5_fifth(M000,umean,vmean,wmean,cC200,cC110,cC101,cC020,cC011,cC002,
+                      cC300,cC210,cC201,cC120,cC111,cC102,cC030,cC021,cC012,cC003,
+                      cC400,cC310,cC301,cC220,cC211,cC202,cC130,cC121,cC112,cC103,cC040,cC031,cC022,cC013,cC004,
+                      C500,C410,C320,C230,C140,C401,C302,C203,C104,C311,C221,C131,C212,C113,C122,
+                      C050,C041,C032,C023,C014,C005)
 
+    # assemble Fx|Fy|Fz: <=4th-order flux components are input moments raised (read directly);
+    # only the 21 fifth-order components come from `_c5tom5_fifth`.
     return (
-        rM100,rM200,rM300,rM400,rM500,rM110,rM210,rM310,rM410,rM120,rM220,rM320,rM130,rM230,rM140,
-        rM101,rM201,rM301,rM401,rM102,rM202,rM302,rM103,rM203,rM104,rM111,rM211,rM311,rM121,rM221,
-        rM131,rM112,rM212,rM113,rM122,
-        rM010,rM110,rM210,rM310,rM410,rM020,rM120,rM220,rM320,rM030,rM130,rM230,rM040,rM140,rM050,
-        rM011,rM111,rM211,rM311,rM012,rM112,rM212,rM013,rM113,rM014,rM021,rM121,rM221,rM031,rM131,
-        rM041,rM022,rM122,rM023,rM032,
-        rM001,rM101,rM201,rM301,rM401,rM011,rM111,rM211,rM311,rM021,rM121,rM221,rM031,rM131,rM041,
-        rM002,rM102,rM202,rM302,rM003,rM103,rM203,rM004,rM104,rM005,rM012,rM112,rM212,rM022,rM122,
-        rM032,rM013,rM113,rM014,rM023)
+        M100,M200,M300,M400,rM500,M110,M210,M310,rM410,M120,M220,rM320,M130,rM230,rM140,
+        M101,M201,M301,rM401,M102,M202,rM302,M103,rM203,rM104,M111,M211,rM311,M121,rM221,
+        rM131,M112,rM212,rM113,rM122,
+        M010,M110,M210,M310,rM410,M020,M120,M220,rM320,M030,M130,rM230,M040,rM140,rM050,
+        M011,M111,M211,rM311,M012,M112,rM212,M013,rM113,rM014,M021,M121,rM221,M031,rM131,
+        rM041,M022,rM122,rM023,rM032,
+        M001,M101,M201,M301,rM401,M011,M111,M211,rM311,M021,M121,rM221,M031,rM131,rM041,
+        M002,M102,M202,rM302,M003,M103,rM203,M004,rM104,rM005,M012,M112,rM212,M022,rM122,
+        rM032,M013,rM113,rM014,rM023)
 end
 
 end # module
