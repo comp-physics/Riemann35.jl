@@ -49,7 +49,8 @@ using ..ReconDev: to_recon_vars_dev, from_recon_vars_dev,
 
 export realizable_3D_M4_dev, realizable_3D_M4_corr_dev, projection35_dev,
        delta2star_mineig_dev, sym6_mineig, realizability_S2_dev, realizability_S220_dev,
-       is_realizable_recon_dev, scaling_theta_dev, scaling_limited_faces_dev
+       is_realizable_recon_dev, scaling_theta_dev, scaling_limited_faces_dev,
+       delta2star_psd_dev, sym6_psd_bunchkaufman, _delta2star_entries
 
 # ---------------------------------------------------------------------------
 # realizability_S2  (port of src/realizability/realizability_S2.jl, NOT @fastmath)
@@ -172,12 +173,13 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# delta2star3D smallest eigenvalue: build the 6x6 symmetric matrix (verbatim
-# @fastmath port of src/autogen/delta2star3D.jl, alloc-free) and return its
-# smallest eigenvalue via sym6_mineig.
-# Argument order matches the autogen signature.
+# delta2star3D 6x6 symmetric matrix build: verbatim @fastmath port of
+# src/autogen/delta2star3D.jl (alloc-free), returning the 21 upper-triangular
+# entries. Argument order matches the autogen signature. `@inline` so the build
+# inlines into delta2star_mineig_dev exactly as the original single function did
+# (byte-identical). Shared by the Jacobi (default) and Bunch-Kaufman (opt-in) paths.
 # ---------------------------------------------------------------------------
-@inline function delta2star_mineig_dev(
+@inline function _delta2star_entries(
         s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
         s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
         s211, s021, s121, s031, s012, s112, s013, s022)
@@ -427,13 +429,139 @@ end
 
         E66 = -t538*(s004-t41+t365+t368+t537+s011*t2*2.0-s004*t42-s004*t47-s004*t50+s101*t7*2.0+s110*t10*2.0+s004*t294-t7*t11*2.0-t8*t10*2.0-t2*t20*2.0+t41*t50+t42*t49+t44*t47)
 
-        return sym6_mineig(E11, E12, E13, E14, E15, E16,
-                           E22, E23, E24, E25, E26,
-                           E33, E34, E35, E36,
-                           E44, E45, E46,
-                           E55, E56,
-                           E66)
+        return (E11, E12, E13, E14, E15, E16,
+                E22, E23, E24, E25, E26,
+                E33, E34, E35, E36,
+                E44, E45, E46,
+                E55, E56,
+                E66)
     end
+end
+
+# OPT-IN realizability solver select (compile-time, default :jacobi => byte-identical).
+# :jacobi  -> cyclic-Jacobi smallest eigenvalue (the validated default).
+# :pivot   -> Bunch-Kaufman 6x6 INERTIA (the sign of min-eig, exact by Sylvester's law).
+# Consumers use ONLY the sign of min-eig, so the inertia decides realizability identically
+# to the eigenvalue — but in ONE pivoted factorization instead of iterative sweeps, and
+# (unlike a naive unpivoted LDL^T) it stays correct at the realizability boundary because
+# the 2x2 pivots engage exactly when a 1x1 pivot would be ~0.
+const _REALIZ_SOLVER = :jacobi
+
+# Default smallest-eigenvalue path (unchanged behavior; @inline => byte-identical).
+@inline function delta2star_mineig_dev(
+        s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022)
+    e = _delta2star_entries(s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022)
+    return sym6_mineig(e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11],
+        e[12], e[13], e[14], e[15], e[16], e[17], e[18], e[19], e[20], e[21])
+end
+
+# Symmetric swap of rows+cols p,q of a 6x6 MMatrix (for Bunch-Kaufman pivoting).
+@inline function _sym6_swap!(A, p::Int, q::Int)
+    @inbounds for j in 1:6
+        t = A[p,j]; A[p,j] = A[q,j]; A[q,j] = t
+    end
+    @inbounds for i in 1:6
+        t = A[i,p]; A[i,p] = A[i,q]; A[i,q] = t
+    end
+    return nothing
+end
+
+# Is (delta2star + shift*I) positive semidefinite?  Bunch-Kaufman diagonal-pivoting LDL^T
+# on the 6x6, accumulating INERTIA: PSD iff no 1x1 pivot is negative and no 2x2 pivot block
+# carries a negative eigenvalue. By Sylvester's law of inertia this is the EXACT sign of
+# min-eig, and the partial pivoting (alpha=(1+sqrt(17))/8) bounds element growth so the
+# decision is robust at the near-singular boundary (where unpivoted LDL^T fails). The 21
+# entries are the upper triangle (row-major); `shift` is added to the diagonal.
+@inline function sym6_psd_bunchkaufman(e11, e12, e13, e14, e15, e16,
+                                       e22, e23, e24, e25, e26,
+                                       e33, e34, e35, e36,
+                                       e44, e45, e46,
+                                       e55, e56,
+                                       e66, shift::Float64)
+    A = MMatrix{6,6,Float64}(undef)
+    @inbounds begin
+        A[1,1]=e11+shift; A[1,2]=e12; A[1,3]=e13; A[1,4]=e14; A[1,5]=e15; A[1,6]=e16
+        A[2,1]=e12; A[2,2]=e22+shift; A[2,3]=e23; A[2,4]=e24; A[2,5]=e25; A[2,6]=e26
+        A[3,1]=e13; A[3,2]=e23; A[3,3]=e33+shift; A[3,4]=e34; A[3,5]=e35; A[3,6]=e36
+        A[4,1]=e14; A[4,2]=e24; A[4,3]=e34; A[4,4]=e44+shift; A[4,5]=e45; A[4,6]=e46
+        A[5,1]=e15; A[5,2]=e25; A[5,3]=e35; A[5,4]=e45; A[5,5]=e55+shift; A[5,6]=e56
+        A[6,1]=e16; A[6,2]=e26; A[6,3]=e36; A[6,4]=e46; A[6,5]=e56; A[6,6]=e66+shift
+        α = 0.6403882032022076   # (1+sqrt(17))/8
+        k = 1
+        while k <= 6
+            # column-k off-diagonal max over the trailing block
+            λ = 0.0; r = k
+            for i in (k+1):6
+                ai = abs(A[i,k]); if ai > λ; λ = ai; r = i; end
+            end
+            akk = abs(A[k,k])
+            use2 = false
+            if λ == 0.0
+                # already-diagonal column: 1x1 pivot
+            elseif akk >= α*λ
+                # 1x1 pivot with A[k,k]
+            else
+                σ = 0.0
+                for j in k:6
+                    if j != r
+                        arj = abs(A[r,j]); if arj > σ; σ = arj; end
+                    end
+                end
+                if akk*σ >= α*λ*λ
+                    # 1x1 with A[k,k]
+                elseif abs(A[r,r]) >= α*σ
+                    _sym6_swap!(A, k, r)     # 1x1 with A[r,r] (now at k)
+                else
+                    _sym6_swap!(A, k+1, r)   # 2x2 pivot on rows k,k+1
+                    use2 = true
+                end
+            end
+            if !use2
+                d = A[k,k]
+                if !(d >= 0.0); return false; end   # negative (or NaN) 1x1 pivot -> not PSD
+                if d > 0.0
+                    for i in (k+1):6
+                        lik = A[i,k]/d
+                        for j in (k+1):6
+                            A[i,j] -= lik*A[k,j]
+                        end
+                    end
+                end
+                k += 1
+            else
+                a = A[k,k]; b = A[k,k+1]; c = A[k+1,k+1]
+                det2 = a*c - b*b; tr2 = a + c
+                # 2x2 block eigenvalue signs: det2<0 -> one negative; det2>=0 & tr2<0 -> two negative
+                if det2 < 0.0 || (tr2 < 0.0) || !isfinite(det2); return false; end
+                for i in (k+2):6
+                    wik = A[i,k]; wik1 = A[i,k+1]
+                    p1 = (c*wik - b*wik1)/det2
+                    p2 = (a*wik1 - b*wik)/det2
+                    for j in (k+2):6
+                        A[i,j] -= p1*A[k,j] + p2*A[k+1,j]
+                    end
+                end
+                k += 2
+            end
+        end
+        return true
+    end
+end
+
+# PSD predicate for the (optionally shifted) delta2star matrix via Bunch-Kaufman inertia.
+@inline function delta2star_psd_dev(
+        s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022, shift::Float64)
+    e = _delta2star_entries(s300, s400, s110, s210, s310, s120, s220, s030, s130, s040,
+        s101, s201, s301, s102, s202, s003, s103, s004, s011, s111,
+        s211, s021, s121, s031, s012, s112, s013, s022)
+    return sym6_psd_bunchkaufman(e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10],
+        e[11], e[12], e[13], e[14], e[15], e[16], e[17], e[18], e[19], e[20], e[21], shift)
 end
 
 # ---------------------------------------------------------------------------
@@ -446,12 +574,17 @@ end
         S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
         S211, S021, S121, S031, S012, S112, S013, S022)
 
-    lam = delta2star_mineig_dev(
-        S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
-        S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
-        S211, S021, S121, S031, S012, S112, S013, S022)
+    realizable = _REALIZ_SOLVER === :pivot ?
+        delta2star_psd_dev(
+            S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
+            S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
+            S211, S021, S121, S031, S012, S112, S013, S022, 0.0) :
+        (delta2star_mineig_dev(
+            S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
+            S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
+            S211, S021, S121, S031, S012, S112, S013, S022) >= 0)
 
-    if lam >= 0
+    if realizable
         return (S300, S400, S110, S210, S310, S120, S220, S030, S130, S040,
                 S101, S201, S301, S102, S202, S003, S103, S004, S011, S111,
                 S211, S021, S121, S031, S012, S112, S013, S022)
@@ -494,12 +627,18 @@ end
     nS202 = S4
     nS022 = S4
 
-    lam2 = delta2star_mineig_dev(
-        nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
-        S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
-        nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022)
+    # min-eig > -1e-6  <=>  (A + 1e-6*I) positive (semi)definite -> shift = 1e-6 for pivot path.
+    realizable2 = _REALIZ_SOLVER === :pivot ?
+        delta2star_psd_dev(
+            nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
+            S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
+            nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022, 1.0e-6) :
+        (delta2star_mineig_dev(
+            nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
+            S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
+            nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022) > -1.0e-6)
 
-    if lam2 > -1.0e-6
+    if realizable2
         return (nS300, nS400, S110, nS210, nS310, nS120, nS220, nS030, nS130, nS040,
                 S101, nS201, nS301, nS102, nS202, nS003, nS103, nS004, S011, nS111,
                 nS211, nS021, nS121, nS031, nS012, nS112, nS013, nS022)
@@ -689,6 +828,13 @@ end
     C  = from_recon_vars_tup(V)
     Vt = to_recon_vars_tup(C)
     (Vt[1] > 0.0 && Vt[5] > 0.0 && Vt[6] > 0.0 && Vt[7] > 0.0) || return false
+    if _REALIZ_SOLVER === :pivot
+        # Bunch-Kaufman rejects negative/non-finite pivots, folding in the isfinite guard.
+        return delta2star_psd_dev(
+            Vt[8],  Vt[9],  Vt[10], Vt[11], Vt[12], Vt[13], Vt[14], Vt[15], Vt[16], Vt[17],
+            Vt[18], Vt[19], Vt[20], Vt[21], Vt[22], Vt[23], Vt[24], Vt[25], Vt[26], Vt[27],
+            Vt[28], Vt[29], Vt[30], Vt[31], Vt[32], Vt[33], Vt[34], Vt[35], 0.0)
+    end
     m = delta2star_mineig_dev(
         Vt[8],  Vt[9],  Vt[10], Vt[11], Vt[12], Vt[13], Vt[14], Vt[15], Vt[16], Vt[17],
         Vt[18], Vt[19], Vt[20], Vt[21], Vt[22], Vt[23], Vt[24], Vt[25], Vt[26], Vt[27],
