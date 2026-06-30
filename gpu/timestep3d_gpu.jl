@@ -123,11 +123,12 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
     R = CUDA.zeros(Float64, 35, nx, ny, nz)
     fmax = max((nx+1)*ny*nz, (ny+1)*nx*nz, (nz+1)*nx*ny)
     flat = CUDA.zeros(Float64, 35, fmax)            # box face-scratch (alloc-free reuse)
+    vbuf = CUDA.zeros(Float64, 35, nx, ny, nz)      # recon-var cache (alloc-free reuse)
     M1, M2, M3, Pbuf, M1m, M2m, M3m, Pbufm, svec = _rk3_buffers(nx, ny, nz)
     M = M_dev
     L! = (Rint, st) -> residual3d_box_gpu!(Rint, st, nx, ny, nz, dxf, Maf;
                                            vacuum_floor=vacf, project_faces=true,
-                                           order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter, threads=threads, flat=flat)
+                                           order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter, threads=threads, flat=flat, vbuf=vbuf)
 
     used = Vector{Float64}(undef, nstep)
     for s in 1:nstep
@@ -164,6 +165,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
     Rext = CUDA.zeros(Float64, 35, n, n, nz_ext)
     fmax = max((n+1)*n*nz_ext, (nz_ext+1)*n*n)
     flat = CUDA.zeros(Float64, 35, fmax)                       # box face-scratch (alloc-free reuse)
+    vbuf = CUDA.zeros(Float64, 35, n, n, nz_ext)               # recon-var cache (alloc-free reuse)
     M1, M2, M3, Pbuf, M1m, M2m, M3m, Pbufm, svec = _rk3_buffers(n, n, nzloc)
     Rint = CUDA.zeros(Float64, 35, n, n, nzloc)
     pin() = (h = Array{Float64}(undef, 35, n, n, halo); CUDA.pin(h); h)
@@ -188,7 +190,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
             copyto!(@view(Mext[:, :, :, gtop:nz_ext]), reshape(hrT, 35, n, n, halo))
         end
         residual3d_box_gpu!(Rext, Mext, n, n, nz_ext, dxf, Maf;
-                            vacuum_floor=vacf, project_faces=true, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter, threads=threads, flat=flat)
+                            vacuum_floor=vacf, project_faces=true, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter, threads=threads, flat=flat, vbuf=vbuf)
         @inbounds Rout .= @view Rext[:, :, :, halo+1:halo+nzloc]
         return nothing
     end

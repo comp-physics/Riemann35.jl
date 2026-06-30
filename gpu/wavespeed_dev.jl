@@ -578,7 +578,7 @@ end
 # via eig3 (+ complex flag); 4x4 companion block real-part min/max via Schur4.
 # If any block entry is non-finite -> (NaN, NaN, false) (matches `any(!isfinite,J)`).
 # ---------------------------------------------------------------------------
-@inline function jac15_eig_dev(m00,m01,m02,m03,m04,m10,m11,m12,m13,m20,m21,m22,m30,m31,m40)
+@noinline function jac15_eig_dev(m00,m01,m02,m03,m04,m10,m11,m12,m13,m20,m21,m22,m30,m31,m40)
     e84,e99,e114,e129,e194,e195,e209,e210,e224,e225 =
         jac15_blocks_dev(m00,m01,m02,m03,m04,m10,m11,m12,m13,m20,m21,m22,m30,m31,m40)
     ok = isfinite(e84) & isfinite(e99) & isfinite(e114) & isfinite(e129) &

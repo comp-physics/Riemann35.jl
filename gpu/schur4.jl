@@ -129,7 +129,7 @@ by its 16 scalar entries (row-major arg order). `status`: 0 = converged cleanly,
 1 = suspicious (no deflation within the sweep cap, NaN/Inf, degenerate) → the caller
 should fall back to LAPACK. Allocation-free; no LAPACK / `eigvals` inside.
 """
-@inline function schur4_realpart_minmax(
+@noinline function schur4_realpart_minmax(
         a11::Float64, a12::Float64, a13::Float64, a14::Float64,
         a21::Float64, a22::Float64, a23::Float64, a24::Float64,
         a31::Float64, a32::Float64, a33::Float64, a34::Float64,

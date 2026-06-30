@@ -107,7 +107,7 @@ end
 # 6x6 SYMMETRIC smallest eigenvalue: in-kernel cyclic Jacobi (eigenvalues only).
 # Inputs are the 21 upper-triangular entries. Register/local MMatrix workspace.
 # ---------------------------------------------------------------------------
-@inline function sym6_mineig(e11, e12, e13, e14, e15, e16,
+@noinline function sym6_mineig(e11, e12, e13, e14, e15, e16,
                              e22, e23, e24, e25, e26,
                              e33, e34, e35, e36,
                              e44, e45, e46,
