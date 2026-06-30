@@ -83,8 +83,13 @@ export residual3d_gpu!, residual3d_gpu
     return !isfinite(m) || m < 0.0
 end
 
-@inline function _face_flux_core(Cfm1::NTuple{35,Float64}, Cf::NTuple{35,Float64},
-                                 Cfp1::NTuple{35,Float64}, Cfp2::NTuple{35,Float64},
+# Recon vars (Vfm1,Vf,Vfp1,Vfp2) are PRECOMPUTED once per cell by `_recon_kernel!` and passed
+# in; to_recon_vars is axis-independent and was being recomputed per face per axis (~12x), so
+# caching it is a pure compute dedup (byte-identical). Cf/Cfp1 (the raw inner cells) are still
+# needed for the vacuum floor, the proj-first-order flag, and the first-order/cell-mean fallback.
+@inline function _face_flux_core(Cf::NTuple{35,Float64}, Cfp1::NTuple{35,Float64},
+                                 Vfm1::NTuple{35,Float64}, Vf::NTuple{35,Float64},
+                                 Vfp1::NTuple{35,Float64}, Vfp2::NTuple{35,Float64},
                                  axis::Int, Ma::Float64, vacf::Float64, project::Bool,
                                  order::Int, proj::Bool, rs::Int, lim::Int)
     ML0 = Cf[1]
@@ -101,25 +106,14 @@ end
         # shared `scaling_limited_faces_dev` returns faces realizable by construction, so
         # there is NO vacuum-floor / recon-validity fallback and NO proj override here
         # (the limiter takes precedence) — matching CPU `face_states_lim`.
-        # distinct names from the MUSCL branch below: a local assigned in two
-        # if/elseif branches AND captured by closures in both gets boxed -> device
-        # dynamic dispatch. These names appear only in this branch.
-        Wm1 = to_recon_vars_tup(Cfm1)
-        W0  = to_recon_vars_tup(Cf)
-        Wp1 = to_recon_vars_tup(Cfp1)
-        Wp2 = to_recon_vars_tup(Cfp2)
-        θL = scaling_theta_dev(Wm1, W0, Wp1)   # limiter coeff for cell f
-        θR = scaling_theta_dev(W0, Wp1, Wp2)   # limiter coeff for cell f+1
-        Vlp = muscl_right_face_tup(Wm1, W0, Wp1, θL)   # right face of cell f   == Vplus(cell f)
-        Vlm = muscl_left_face_tup(W0, Wp1, Wp2, θR)    # left face of cell f+1  == Vminus(cell f+1)
+        θL = scaling_theta_dev(Vfm1, Vf, Vfp1)   # limiter coeff for cell f
+        θR = scaling_theta_dev(Vf, Vfp1, Vfp2)   # limiter coeff for cell f+1
+        Vlp = muscl_right_face_tup(Vfm1, Vf, Vfp1, θL)   # right face of cell f   == Vplus(cell f)
+        Vlm = muscl_left_face_tup(Vf, Vfp1, Vfp2, θR)    # left face of cell f+1  == Vminus(cell f+1)
         Li = from_recon_vars_tup(Vlp)
         Ri = from_recon_vars_tup(Vlm)
         use_recon = true
     elseif order >= 2 && !(vacf > 0.0 && (ML0 < vacf || MR0 < vacf))
-        Vfm1 = to_recon_vars_tup(Cfm1)
-        Vf   = to_recon_vars_tup(Cf)
-        Vfp1 = to_recon_vars_tup(Cfp1)
-        Vfp2 = to_recon_vars_tup(Cfp2)
         Vp = muscl_right_face_tup(Vfm1, Vf, Vfp1, 1.0)  # MUSCL right face of cell f
         Vm = muscl_left_face_tup(Vf, Vfp1, Vfp2, 1.0)   # MUSCL left face of cell f+1
         # ho_proj_first_order (Rodney): a cell whose mean is flagged for the realizability
@@ -219,6 +213,21 @@ end
 
 @inline _clamp(a::Int, n::Int) = a < 1 ? 1 : (a > n ? n : a)
 
+# Precompute the reconstruction variables ONCE per cell into Vbuf (35,nx,ny,nz). to_recon_vars
+# is axis-independent, so this replaces the per-face/per-axis recompute in the fhat kernels.
+function _recon_kernel!(Vbuf, M, nx::Int, ny::Int, nz::Int)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nx * ny * nz
+        @inbounds begin
+            i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
+            j = r % ny + 1;         k = r ÷ ny + 1
+            V = to_recon_vars_tup(_cell(M, i, j, k))
+            for m in 1:35; Vbuf[m, i, j, k] = V[m]; end
+        end
+    end
+    return nothing
+end
+
 """
     residual3d_gpu!(R, Fbuf, M, n, dx, Ma; vacuum_floor=0.001, project_faces=true, threads=128)
 
@@ -273,7 +282,7 @@ end
 # full-domain result because every interior cell sees its real +/-2 neighbors.
 # Same `_face_flux_core` / `_cell` / `_clamp` as the cubic path -> bit parity.
 # ===========================================================================
-function _fhat_x_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
+function _fhat_x_g!(Fbuf, M, Vbuf, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nx + 1
     if idx <= nf * ny * nz
@@ -281,16 +290,17 @@ function _fhat_x_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float
             t = (idx - 1) % nf + 1; r = (idx - 1) ÷ nf
             j = r % ny + 1;         k = r ÷ ny + 1
             f = t - 1
-            cm1 = _cell(M, _clamp(f - 1, nx), j, k); c0  = _cell(M, _clamp(f, nx), j, k)
-            cp1 = _cell(M, _clamp(f + 1, nx), j, k); cp2 = _cell(M, _clamp(f + 2, nx), j, k)
-            Fh = _face_flux_core(cm1, c0, cp1, cp2, 1, Ma, vacf, project, order, proj, rs, lim)
+            c0 = _cell(M, _clamp(f, nx), j, k); cp1 = _cell(M, _clamp(f + 1, nx), j, k)
+            vm1 = _cell(Vbuf, _clamp(f - 1, nx), j, k); v0 = _cell(Vbuf, _clamp(f, nx), j, k)
+            vp1 = _cell(Vbuf, _clamp(f + 1, nx), j, k); vp2 = _cell(Vbuf, _clamp(f + 2, nx), j, k)
+            Fh = _face_flux_core(c0, cp1, vm1, v0, vp1, vp2, 1, Ma, vacf, project, order, proj, rs, lim)
             for m in 1:35; Fbuf[m, t, j, k] = Fh[m]; end
         end
     end
     return nothing
 end
 
-function _fhat_y_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
+function _fhat_y_g!(Fbuf, M, Vbuf, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = ny + 1
     if idx <= nf * nx * nz
@@ -298,16 +308,17 @@ function _fhat_y_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float
             t = (idx - 1) % nf + 1; r = (idx - 1) ÷ nf
             i = r % nx + 1;         k = r ÷ nx + 1
             f = t - 1
-            cm1 = _cell(M, i, _clamp(f - 1, ny), k); c0  = _cell(M, i, _clamp(f, ny), k)
-            cp1 = _cell(M, i, _clamp(f + 1, ny), k); cp2 = _cell(M, i, _clamp(f + 2, ny), k)
-            Fh = _face_flux_core(cm1, c0, cp1, cp2, 2, Ma, vacf, project, order, proj, rs, lim)
+            c0 = _cell(M, i, _clamp(f, ny), k); cp1 = _cell(M, i, _clamp(f + 1, ny), k)
+            vm1 = _cell(Vbuf, i, _clamp(f - 1, ny), k); v0 = _cell(Vbuf, i, _clamp(f, ny), k)
+            vp1 = _cell(Vbuf, i, _clamp(f + 1, ny), k); vp2 = _cell(Vbuf, i, _clamp(f + 2, ny), k)
+            Fh = _face_flux_core(c0, cp1, vm1, v0, vp1, vp2, 2, Ma, vacf, project, order, proj, rs, lim)
             for m in 1:35; Fbuf[m, t, i, k] = Fh[m]; end
         end
     end
     return nothing
 end
 
-function _fhat_z_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
+function _fhat_z_g!(Fbuf, M, Vbuf, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float64, project::Bool, order::Int, proj::Bool, rs::Int, lim::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nz + 1
     if idx <= nf * nx * ny
@@ -315,9 +326,10 @@ function _fhat_z_g!(Fbuf, M, nx::Int, ny::Int, nz::Int, Ma::Float64, vacf::Float
             t = (idx - 1) % nf + 1; r = (idx - 1) ÷ nf
             i = r % nx + 1;         j = r ÷ nx + 1
             f = t - 1
-            cm1 = _cell(M, i, j, _clamp(f - 1, nz)); c0  = _cell(M, i, j, _clamp(f, nz))
-            cp1 = _cell(M, i, j, _clamp(f + 1, nz)); cp2 = _cell(M, i, j, _clamp(f + 2, nz))
-            Fh = _face_flux_core(cm1, c0, cp1, cp2, 3, Ma, vacf, project, order, proj, rs, lim)
+            c0 = _cell(M, i, j, _clamp(f, nz)); cp1 = _cell(M, i, j, _clamp(f + 1, nz))
+            vm1 = _cell(Vbuf, i, j, _clamp(f - 1, nz)); v0 = _cell(Vbuf, i, j, _clamp(f, nz))
+            vp1 = _cell(Vbuf, i, j, _clamp(f + 1, nz)); vp2 = _cell(Vbuf, i, j, _clamp(f + 2, nz))
+            Fh = _face_flux_core(c0, cp1, vm1, v0, vp1, vp2, 3, Ma, vacf, project, order, proj, rs, lim)
             for m in 1:35; Fbuf[m, t, i, j] = Fh[m]; end
         end
     end
@@ -372,7 +384,8 @@ nx==ny==nz this is bit-identical to `residual3d_gpu!`.
 function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
                              nx::Int, ny::Int, nz::Int, dx::Real, Ma::Real;
                              vacuum_floor::Real=0.001, project_faces::Bool=true, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
-                             threads::Int=128, flat::Union{Nothing,CuMatrix{Float64}}=nothing)
+                             threads::Int=128, flat::Union{Nothing,CuMatrix{Float64}}=nothing,
+                             vbuf::Union{Nothing,CuArray{Float64,4}}=nothing)
     @assert size(M) == (35, nx, ny, nz) "M must be (35,nx,ny,nz)"
     @assert size(R) == (35, nx, ny, nz) "R must be (35,nx,ny,nz)"
     Maf = Float64(Ma); dxf = Float64(dx); vacf = Float64(vacuum_floor)
@@ -391,13 +404,28 @@ function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
     By = reshape(view(flat, :, 1:fy), 35, ny + 1, nx, nz)
     Bz = reshape(view(flat, :, 1:fz), 35, nz + 1, nx, ny)
     bc = cld(nx * ny * nz, threads)
+    # Recon-var cache (35,nx,ny,nz): to_recon_vars is axis-independent, so precompute it ONCE per
+    # cell here (one thread/cell) instead of ~12x across the per-face/per-axis fhat kernels. The
+    # fhat kernels then read cached Vbuf for the 4 MUSCL stencil cells. Byte-identical; only used
+    # when order>=2 (order-1 faces are cell means, no recon). Caller may supply a (35,nx,ny,nz)
+    # scratch to avoid per-call alloc.
+    if order >= 2
+        if vbuf === nothing
+            vbuf = CUDA.zeros(Float64, 35, nx, ny, nz)
+        else
+            @assert size(vbuf) == (35, nx, ny, nz) "vbuf must be (35,nx,ny,nz)"
+        end
+        @cuda threads=threads blocks=bc _recon_kernel!(vbuf, M, nx, ny, nz)
+    else
+        vbuf = M  # unused by the fhat kernels at order==1; pass a valid CuArray to satisfy types
+    end
 
     fill!(R, 0.0)
-    @cuda threads=threads blocks=cld(fx, threads) _fhat_x_g!(Bx, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
+    @cuda threads=threads blocks=cld(fx, threads) _fhat_x_g!(Bx, M, vbuf, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
     @cuda threads=threads blocks=bc               _diff_x_g!(R, Bx, nx, ny, nz, dxf)
-    @cuda threads=threads blocks=cld(fy, threads) _fhat_y_g!(By, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
+    @cuda threads=threads blocks=cld(fy, threads) _fhat_y_g!(By, M, vbuf, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
     @cuda threads=threads blocks=bc               _diff_y_g!(R, By, nx, ny, nz, dxf)
-    @cuda threads=threads blocks=cld(fz, threads) _fhat_z_g!(Bz, M, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
+    @cuda threads=threads blocks=cld(fz, threads) _fhat_z_g!(Bz, M, vbuf, nx, ny, nz, Maf, vacf, project_faces, order, proj_first_order, rs, lim)
     @cuda threads=threads blocks=bc               _diff_z_g!(R, Bz, nx, ny, nz, dxf)
     return nothing
 end
