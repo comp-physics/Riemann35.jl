@@ -463,9 +463,13 @@ end
 function _diff_y_g!(R, Fbuf, nx::Int, ny::Int, nz::Int, ds::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
+        # j (the diff/face axis) is the fastest thread index so adjacent threads read the
+        # y face-buffer By=(35,ny+1,nx,nz) contiguously (its 2nd dim is the y-face index) —
+        # mirrors _diff_x, where the face axis i is already R's fast axis. Byte-identical
+        # (each cell's residual is written once into a distinct slot; thread order is free).
         @inbounds begin
-            i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
-            j = r % ny + 1;         k = r ÷ ny + 1
+            j = (idx - 1) % ny + 1; r = (idx - 1) ÷ ny
+            i = r % nx + 1;         k = r ÷ nx + 1
             for m in 1:35; R[m, i, j, k] += -(Fbuf[m, j + 1, i, k] - Fbuf[m, j, i, k]) / ds; end
         end
     end
@@ -475,9 +479,11 @@ end
 function _diff_z_g!(R, Fbuf, nx::Int, ny::Int, nz::Int, ds::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
+        # k (the diff/face axis) fastest -> adjacent threads read Bz=(35,nz+1,nx,ny)
+        # contiguously (2nd dim is the z-face index). Byte-identical thread remap.
         @inbounds begin
-            i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
-            j = r % ny + 1;         k = r ÷ ny + 1
+            k = (idx - 1) % nz + 1; r = (idx - 1) ÷ nz
+            i = r % nx + 1;         j = r ÷ nx + 1
             for m in 1:35; R[m, i, j, k] += -(Fbuf[m, k + 1, i, j] - Fbuf[m, k, i, j]) / ds; end
         end
     end
