@@ -36,10 +36,18 @@ Pure addition under `gpu/`; not wired into production; fp64.
 module WavespeedDev
 
 include(joinpath(@__DIR__, "schur4.jl"))
-using .Schur4: schur4_realpart_minmax
+using .Schur4: schur4_realpart_minmax, ferrari_realpart_minmax
 
 export realize_and_speed_dev, realize_and_speed_Mr_dev, jac15_eig_dev, closure5_dev,
        correct_moments_dev, eig3_realparts_dev
+
+# OPT-IN 4x4-companion wave-speed solver (compile-time, default :qr => byte-identical).
+# :qr      -> iterative Francis double-shift QR (the validated default).
+# :ferrari -> closed-form Ferrari quartic on the companion's char-poly coefficients
+#             (straight-line, no iteration / warp divergence), with a QR fallback on the
+#             rare degenerate block. Numerics-changing at the ~1e-4 level on the
+#             ill-conditioned high-Ma blocks (HLL tolerates a small wave-speed perturbation).
+const _WAVESPEED_SOLVER = :qr
 
 # ---------------------------------------------------------------------------
 # eig3_realparts_dev: analytic eigenvalues (real parts) of a general real 3x3,
@@ -590,10 +598,20 @@ end
     # 3x3 block J[13:15,13:15] = [[0,1,0],[e194,e209,e224],[e195,e210,e225]]
     r3lo, _, r3hi, hc = eig3_realparts_dev(0.0, 1.0, 0.0, e194, e209, e224, e195, e210, e225)
     # 4x4 companion block J[6:9,6:9]
-    e4lo, e4hi, _ = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
-                                           0.0, 0.0, 1.0, 0.0,
-                                           0.0, 0.0, 0.0, 1.0,
-                                           e84, e99, e114, e129)
+    if _WAVESPEED_SOLVER === :ferrari
+        e4lo, e4hi, st4 = ferrari_realpart_minmax(e84, e99, e114, e129)
+        if st4 != 0   # rare degenerate/non-finite block -> exact QR fallback
+            e4lo, e4hi, _ = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
+                                                   0.0, 0.0, 1.0, 0.0,
+                                                   0.0, 0.0, 0.0, 1.0,
+                                                   e84, e99, e114, e129)
+        end
+    else
+        e4lo, e4hi, _ = schur4_realpart_minmax(0.0, 1.0, 0.0, 0.0,
+                                               0.0, 0.0, 1.0, 0.0,
+                                               0.0, 0.0, 0.0, 1.0,
+                                               e84, e99, e114, e129)
+    end
     vmin = min(r3lo, e4lo)
     vmax = max(r3hi, e4hi)
     return vmin, vmax, hc

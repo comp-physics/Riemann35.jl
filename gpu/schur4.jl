@@ -17,7 +17,7 @@ module Schur4
 
 using StaticArrays
 
-export schur4_realpart_minmax
+export schur4_realpart_minmax, ferrari_realpart_minmax
 
 # EPS² floor: when the reflector "tail" (the part to be zeroed) is below machine
 # precision relative to the head, the reflection is a no-op to working precision but
@@ -256,6 +256,96 @@ should fall back to LAPACK. Allocation-free; no LAPACK / `eigvals` inside.
         status = 1
     end
     return rmin, rmax, status
+end
+
+# ---------------------------------------------------------------------------
+# CLOSED-FORM (Ferrari) alternative for the 4x4 COMPANION block. The wave-speed
+# Jacobian's 4x4 is the companion [[0,1,0,0],[0,0,1,0],[0,0,0,1],[e84,e99,e114,e129]],
+# whose characteristic polynomial is available for free as the bottom row:
+#   λ^4 - e129 λ^3 - e114 λ^2 - e99 λ - e84 = 0.
+# So we skip the Hessenberg reduction + iterative Francis QR entirely and solve the
+# quartic analytically (Ferrari), which is a straight-line, branch-divergence-free path.
+# Returns (min, max) of the four roots' REAL parts + status (status!=0 => caller should
+# fall back to the QR for the rare near-defective / degenerate block).
+# ---------------------------------------------------------------------------
+# Largest real root of  z^3 + a2 z^2 + a1 z + a0  (real coefficients).
+@inline function _cubic_max_real_root(a2::Float64, a1::Float64, a0::Float64)
+    sh = a2 / 3.0
+    P = a1 - a2*a2/3.0                       # depressed cubic w^3 + P w + Q, z = w - a2/3
+    Q = a0 - a1*a2/3.0 + 2.0*a2*a2*a2/27.0
+    if P < 0.0
+        disc = -4.0*P*P*P - 27.0*Q*Q
+        if disc >= 0.0                       # three real roots (trig form)
+            m = 2.0*sqrt(-P/3.0)
+            arg = (3.0*Q)/(2.0*P) * sqrt(-3.0/P)
+            arg = arg < -1.0 ? -1.0 : (arg > 1.0 ? 1.0 : arg)
+            φ = acos(arg) / 3.0
+            w0 = m*cos(φ)
+            w1 = m*cos(φ - 2.0943951023931953)   # 2π/3
+            w2 = m*cos(φ - 4.1887902047863905)   # 4π/3
+            return max(w0, max(w1, w2)) - sh
+        end
+    end
+    h = Q*Q/4.0 + P*P*P/27.0                 # one real root (Cardano)
+    sq = sqrt(h >= 0.0 ? h : 0.0)
+    A = cbrt(-0.5*Q + sq)
+    B = cbrt(-0.5*Q - sq)
+    return (A + B) - sh
+end
+
+@inline function ferrari_realpart_minmax(e84::Float64, e99::Float64, e114::Float64, e129::Float64)
+    # companion char poly -> monic λ^4 + bλ^3 + cλ^2 + dλ + e
+    b = -e129; c = -e114; d = -e99; e = -e84
+    if !(isfinite(b) && isfinite(c) && isfinite(d) && isfinite(e))
+        return NaN, NaN, 1
+    end
+    b4 = 0.25*b
+    # depress λ = y - b/4 -> y^4 + p y^2 + q y + r
+    p = c - 0.375*b*b
+    q = d - 0.5*b*c + 0.125*b*b*b
+    r = e - 0.25*b*d + b*b*c/16.0 - 3.0*b*b*b*b/256.0
+    # resolvent cubic: z^3 + 2p z^2 + (p^2 - 4r) z - q^2 = 0 ; take the largest real root (>=0)
+    z = _cubic_max_real_root(2.0*p, p*p - 4.0*r, -q*q)
+    if !isfinite(z)
+        return NaN, NaN, 1
+    end
+    if z <= 0.0
+        # biquadratic y^4 + p y^2 + r = 0 (q ~ 0): y^2 = (-p ± sqrt(p^2-4r))/2
+        disc = p*p - 4.0*r
+        if disc < 0.0
+            return -b4, -b4, 0          # all 4 roots complex, real part 0 in y
+        end
+        sq = sqrt(disc)
+        y2a = 0.5*(-p + sq); y2b = 0.5*(-p - sq)
+        ra = y2a >= 0.0 ? sqrt(y2a) : 0.0
+        rb = y2b >= 0.0 ? sqrt(y2b) : 0.0
+        return min(-ra, -rb) - b4, max(ra, rb) - b4, 0
+    end
+    u = sqrt(z)
+    qu = q / u
+    s = 0.5*(p + z - qu)        # factor (y^2 + u y + s)(y^2 - u y + t)
+    t = 0.5*(p + z + qu)
+    u2 = u*u
+    # quad A: y^2 + u y + s
+    dA = u2 - 4.0*s
+    if dA >= 0.0
+        rA = sqrt(dA); a1 = 0.5*(-u + rA); a2v = 0.5*(-u - rA)
+    else
+        a1 = -0.5*u; a2v = -0.5*u
+    end
+    # quad B: y^2 - u y + t
+    dB = u2 - 4.0*t
+    if dB >= 0.0
+        rB = sqrt(dB); b1 = 0.5*(u + rB); b2 = 0.5*(u - rB)
+    else
+        b1 = 0.5*u; b2 = 0.5*u
+    end
+    ymin = min(min(a1, a2v), min(b1, b2))
+    ymax = max(max(a1, a2v), max(b1, b2))
+    if !(isfinite(ymin) && isfinite(ymax))
+        return NaN, NaN, 1
+    end
+    return ymin - b4, ymax - b4, 0
 end
 
 end # module
