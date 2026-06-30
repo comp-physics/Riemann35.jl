@@ -84,8 +84,12 @@ _cfl_from_vmax(vmax, dx) = (1.0/3.0) * dx / max(vmax, 1e-12)
 # kernel + writeback). All buffers are `(35,n,n,nz)`; the `*m` are their
 # `reshape(_, 35, n*n*nz)` views for the batched projection.
 # ---------------------------------------------------------------------------
-@inline function _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Pbufm, Rint, dt, Maf, threads, L!)
-    proj!(Xm) = (realizable_batched!(Pbufm, Xm, Maf; threads=threads); copyto!(Xm, Pbufm))
+@inline function _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Rint, dt, Maf, threads, L!)
+    # In-place projection: `_realize_kernel_scalar!` reads all 35 moments of a cell
+    # into registers before storing them back (`realize_gpu.jl:60-66`), and threads
+    # touch disjoint columns, so `Mout === Min` is safe. This removes the per-stage
+    # `copyto!` writeback pass AND the `Pbuf` buffer (byte-identical).
+    proj!(Xm) = realizable_batched!(Xm, Xm, Maf; threads=threads)
     L!(Rint, M);  @. M1 = M + dt * Rint;                              proj!(M1m)
     L!(Rint, M1); @. M2 = 0.75*M + 0.25*(M1 + dt*Rint);               proj!(M2m)
     L!(Rint, M2); @. M3 = (1.0/3.0)*M + (2.0/3.0)*(M2 + dt*Rint);     proj!(M3m)
@@ -97,9 +101,10 @@ end
 function _rk3_buffers(nx::Int, ny::Int, nz::Int)
     ncl = nx * ny * nz
     M1 = CUDA.zeros(Float64, 35, nx, ny, nz); M2 = similar(M1); M3 = similar(M1)
-    Pbuf = similar(M1); svec = CUDA.zeros(Float64, ncl)
-    return (M1, M2, M3, Pbuf,
-            reshape(M1,35,ncl), reshape(M2,35,ncl), reshape(M3,35,ncl), reshape(Pbuf,35,ncl),
+    svec = CUDA.zeros(Float64, ncl)
+    # No `Pbuf`: the realizability projection is done in place (see `_rk3_step!`).
+    return (M1, M2, M3,
+            reshape(M1,35,ncl), reshape(M2,35,ncl), reshape(M3,35,ncl),
             svec)
 end
 
@@ -124,7 +129,7 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
     fmax = max((nx+1)*ny*nz, (ny+1)*nx*nz, (nz+1)*nx*ny)
     flat = CUDA.zeros(Float64, 35, fmax)            # box face-scratch (alloc-free reuse)
     vbuf = CUDA.zeros(Float64, 35, nx, ny, nz)      # recon-var cache (alloc-free reuse)
-    M1, M2, M3, Pbuf, M1m, M2m, M3m, Pbufm, svec = _rk3_buffers(nx, ny, nz)
+    M1, M2, M3, M1m, M2m, M3m, svec = _rk3_buffers(nx, ny, nz)
     M = M_dev
     L! = (Rint, st) -> residual3d_box_gpu!(Rint, st, nx, ny, nz, dxf, Maf;
                                            vacuum_floor=vacf, project_faces=true,
@@ -134,7 +139,7 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
     for s in 1:nstep
         dt = dts_host === nothing ? _cfl_from_vmax(_local_vmax(M, svec, nx, ny, nz; threads=threads), dxf) : dts_host[s]
         used[s] = dt
-        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Pbufm, R, dt, Maf, threads, L!)
+        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, R, dt, Maf, threads, L!)
     end
     CUDA.synchronize()
     return used
@@ -166,7 +171,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
     fmax = max((n+1)*n*nz_ext, (nz_ext+1)*n*n)
     flat = CUDA.zeros(Float64, 35, fmax)                       # box face-scratch (alloc-free reuse)
     vbuf = CUDA.zeros(Float64, 35, n, n, nz_ext)               # recon-var cache (alloc-free reuse)
-    M1, M2, M3, Pbuf, M1m, M2m, M3m, Pbufm, svec = _rk3_buffers(n, n, nzloc)
+    M1, M2, M3, M1m, M2m, M3m, svec = _rk3_buffers(n, n, nzloc)
     Rint = CUDA.zeros(Float64, 35, n, n, nzloc)
     pin() = (h = Array{Float64}(undef, 35, n, n, halo); CUDA.pin(h); h)
     hsT = pin(); hsB = pin(); hrT = pin(); hrB = pin()
@@ -204,7 +209,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
             dt = dts_host[s]
         end
         used[s] = dt
-        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Pbufm, Rint, dt, Maf, threads, L!)
+        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Rint, dt, Maf, threads, L!)
     end
     CUDA.synchronize()
     return used
