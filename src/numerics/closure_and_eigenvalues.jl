@@ -39,7 +39,18 @@ function closure_and_eigenvalues(mom)
     k = N + 2
     sig[k,k] = sig[k-1,k+1] - a[k-2]*sig[k-1,k] - b[k-2]*sig[k-2,k]
     b[k-1] = sig[k,k] / sig[k-1,k-1]
-    
+
+    # Rodney Fox (2026-07): at large Ma, roundoff in the s_k -> m_k change of variables can
+    # make the closure coefficient b[N+1] slightly NEGATIVE (unrealizable) although the
+    # density is order 1. b[N+1]=0 is the two-delta-function limit, so floor a negative
+    # b[N+1] to a tiny positive (~QMOM) rather than forming spurious complex abscissae in
+    # the Jacobi matrix below. Matches the reset in his MATLAB closure_and_eigenvalues.m;
+    # gives cleaner high-Ma results (RF, Ma=200). Keeps parity with the GPU `closure5_dev`.
+    # Only `b[N+1]` (the Jacobi off-diagonal) is affected; the closure moment `Mp` is not.
+    if b[N+1] < 0.0
+        b[N+1] = 1.0e-10
+    end
+
     # Closure
     a[N+1] = sum(a[1:N]) / N
     
