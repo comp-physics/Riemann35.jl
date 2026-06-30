@@ -374,6 +374,47 @@ producing spurious complex marginal abscissae. Matches Rodney's MATLAB (cleaner 
 Ma=200). Byte-identical on the Ma=100 r3d state (`b(3) < 0` on 0/41472 marginals — a safety
 net for evolved / higher-Ma states), applied in both CPU and GPU for parity.
 
+## 7c. The flux closure is the real default-mode bottleneck
+
+A wave-speed STUB experiment settled where the default-mode time goes: replacing the
+*entire* wave-speed eigensolve with a trivial bound changed the residual by **0 ms** (286.7
+vs 282.5 on V100). The eigensolvers sit in the **latency shadow** of the flux closure — so
+every wave-speed optimization (`schur4`/Ferrari/Tridiag) is ~0% on the default path; they
+only pay where the solver is called many times serially (the limiter's realizability, where
+Bunch–Kaufman gives 2.86×). A 5-agent math review of the closure converged: the 21 fifth-order
+closures are cheap and already CSE'd; the cost is the **standardize ⇄ destandardize round-trip**
+(2 sqrt + ~28 divides + the ~49-wide live "S-bridge") that sets the 255-register / 12%-occupancy
+wall.
+
+**Central-direct closure (`CentralClosure`, opt-in, commit on this branch).** Each fifth-order
+*central* moment is computed directly from the lower central moments — the variance powers
+cancel by a parity property (every 5th-order standardized closure has the variances to even
+powers), so no sqrt and no standardized intermediates. The 21 forms were hand-derived and
+verified to 7e-14 vs the standardized path. Result: A100 default residual **118.8 → 110.4 ms
+(1.07×)**, accuracy 5.8e-11 vs the goldenfile. Registers stay 255 (the live set is intrinsically
+wide — even removing the S-bridge, the raw-moment assembly is the binding width), so the gain is
+critical-path-only. Caveat: it divides by variance² (vs the conditioning-robust standardized
+form), losing ~2 digits at high Ma, and perturbs the chaotic Ma=100 trajectory ~1e-6 over a few
+limiter steps. So default-mode is genuinely near its wall; 7% is about what the closure layer
+admits without a *method* change (fewer moments).
+
+## 7d. Validation by integral QoIs (not byte-identity)
+
+For numerics-changing opt-ins at Ma=100, byte-identity is the wrong bar — the flow is chaotic,
+so two valid methods drift ~20% pointwise (turbulent rearrangement, not error). The right test
+is a **limiter-active march measuring integral QoIs** with the *same* dt sequence (same physical
+time): conserved integrals (mass, momentum) test that conservation is intact; solution integrals
+(energy, peak density, total variation = a diffusion proxy) test the physics. Crucially the test
+must be **short** — at 2 steps the integral QoIs still resolve the method difference before chaos
+dominates; by 20 steps chaos amplifies it ~1e4×.
+
+| opt-in | single-residual vs goldenfile | integral QoI, 2-step limiter march | verdict |
+|---|---|---|---|
+| Bunch–Kaufman realizability | byte-identical (5.119e-11) | **1.6e-10** (mass), 4.6e-11 (energy) | good-enough → default-eligible |
+| central-direct closure | 5.8e-11 | ~1e-6 (peak 1.3e-6) | meets goldenfile bar; perturbs trajectory more |
+
+Harness: `vizwork/qoi.jl` / `qoi2.jl` (limiter march, prescribed dt, integral diagnostics).
+
 ## 8. One-paragraph summary
 
 The GPU residual is at a genuine register/latency wall set by the 5th-order HyQMOM
