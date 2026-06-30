@@ -447,7 +447,7 @@ end
 # Consumers use ONLY the sign, i.e. "is (delta2star + shift*I) PSD?", so both decide identically.
 struct JacobiRealiz end
 struct PivotRealiz end
-const REALIZ_SOLVER = JacobiRealiz()
+const REALIZ_SOLVER = PivotRealiz()
 
 # Is (delta2star + shift*I) positive semidefinite? (the realizability predicate the 3 consumers
 # call). The Jacobi method's `isfinite(lam) && lam >= -shift` reproduces all three original
