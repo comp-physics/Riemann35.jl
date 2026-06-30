@@ -21,6 +21,10 @@ multi-GPU path of HyQMOM.jl. Written against the prototype on branch
    MPI/CUDA/HDF5 ABI clashes, CI flakes, fp32, tuple-splat, scope). Read before
    debugging anything weird.
 5. [`05-results.md`](05-results.md) — consolidated performance + accuracy tables.
+6. [`06-optimization-journey.md`](06-optimization-journey.md) — the residual performance
+   work (H200, 2026-07): every optimization tried, what shipped vs what didn't and **why**,
+   with the math (Bunch–Kaufman inertia realizability, Ferrari closed-form quartic wave
+   speeds, the chaotic-Ma=100 trajectory finding). The "negative results" reference.
 
 The narrative milestone log (how each piece was built and why) lives in
 [`../gpu/README.md`](../gpu/README.md); `misc/` is the operational reference.
