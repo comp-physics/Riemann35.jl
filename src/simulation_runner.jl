@@ -187,6 +187,8 @@ function simulation_runner(params)
     
     # Streaming snapshot file (rank 0 only)
     snapshot_filename = get(params, :snapshot_filename, nothing)
+    # Optional: auto-export a browser-viewable web bundle to this dir after the run.
+    web_dir = get(params, :web_dir, nothing)
     jld_file = nothing
     snap_count = 0
     
@@ -1014,6 +1016,14 @@ function simulation_runner(params)
             jld_file["meta/n_snapshots"] = snap_count  # Write final count
             close(jld_file)
             println("Snapshot file closed: $snapshot_filename")
+            if web_dir !== nothing
+                try
+                    WebExport.export_jld2_web(snapshot_filename, web_dir)
+                    println("Web viewer bundle: $web_dir  (run ./serve.sh there)")
+                catch e
+                    @warn "web_dir export failed (snapshot JLD2 still saved)" exception=e
+                end
+            end
             return snapshot_filename, grid_out
         else
             return nothing, nothing
