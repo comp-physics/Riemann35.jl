@@ -287,3 +287,32 @@ srun --mpi=pmix -n 1 --gpus=1 julia --project=gpu/gpuenv2 examples/run_gpu_cross
 It prints the exact commands to analyze (`compute_standardized_field`) and visualize
 (`interactive_3d_timeseries_streaming`) the output in the main package env. See
 `misc/03-running-and-validation.md` and the JLD2-version note in `misc/04-gotchas.md`.
+
+### `rodney_validation_1d.jl` / `rodney_validation_2d.jl` - Uniform-Pressure Validation Cases
+
+Rodney Fox's validation ladder for the 35-moment model (2026-07-02). Both cases
+start from **uniform pressure** (p ≡ 1), so the Kn=0 Euler solution is trivial:
+
+- **1D** (`ic_type = :riemann1d`): stationary contact — L: (ρ,u,T)=(1,0,1),
+  R: (1000,0,10⁻³). Nothing moves at Kn=0, so any velocity or pressure deviation
+  is pure numerical error (exact verification of the Riemann solver; the
+  first-order scheme preserves it to machine precision). At Kn>0,
+  non-equilibrium heat flux develops on the dilute side (validation vs kinetic
+  references). Defaults give uniform pressure: `Tr = Tl·rhol/rhor`.
+- **2D** (`ic_type = :bubble` + `T_in/T_out/u_out`): the same dense cold state as
+  a disk, ambient gas flowing past at `u_out = Ma` — quasi-2D flow past an
+  effectively rigid cold cylinder with heat transfer (t ≤ 0.2).
+
+```bash
+# 1D, default Rodney parameters (Np=256, Kn=0)
+julia --project=. examples/rodney_validation_1d.jl
+
+# 2D at Ma=1, Kn=0.01 on 512² with 4 ranks
+RODNEY_NP=512 RODNEY_MA=1.0 RODNEY_KN=0.01 mpiexec -n 4 julia --project=. examples/rodney_validation_2d.jl
+```
+
+Env knobs: `RODNEY_NP`, `RODNEY_KN`, `RODNEY_TMAX`, and (2D) `RODNEY_MA`.
+Snapshots land in `output/runs/`, with a browser-viewable bundle auto-exported to
+`output/viz/` (see `output/viz/README.md`). Outer boundaries are copy/extrapolation;
+keep `tmax` small enough that disturbances stay interior. The automated
+exact-solution gate lives in `test/test_rodney_cases.jl`.
