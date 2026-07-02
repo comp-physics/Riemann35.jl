@@ -26,6 +26,15 @@ const POSITIVITY_ENABLED = Ref(true)
 # See docs/ma100-highorder-crash-analysis.md.
 const HO_VACUUM_FLOOR = Ref(0.0)
 
+# ho_pressure_recon (OPT-IN, default false): reconstruct the pressure-tensor
+# diagonal P_ii = rho*C2ii in recon-var slots 5-7 instead of the variances C2ii.
+# At a uniform-pressure contact every recon var except rho is then uniform, so
+# MUSCL slopes vanish and the contact is preserved exactly at second order
+# (default recon vars leave ~5% L∞ error there; see test_rodney_cases.jl and
+# docs/superpowers/specs/2026-07-02-pressure-recon-design.md). CPU path only.
+# Set from params in `simulation_runner`.
+const HO_PRESSURE_RECON = Ref(false)
+
 # Guarded eigvals matching MATLAB's `eig`, which returns NaN on a matrix containing
 # Inf/NaN instead of throwing (Julia's `eigvals` throws). Every eigen site guards
 # its input this way to preserve MATLAB semantics.
