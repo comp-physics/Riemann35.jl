@@ -28,3 +28,8 @@ snapshot_*.pdf
 
 # Generated output (web viewer bundles, run snapshots) — central to the repo
 output/
+
+# Internal workflow artifacts and site-specific job scripts (never commit)
+docs/superpowers/
+.superpowers/
+*.sbatch

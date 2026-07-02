@@ -368,7 +368,7 @@ function simulation_runner(params)
         # Tr = Tl*rhol/rhor gives UNIFORM PRESSURE — Rodney Fox's validation
         # case (2026-07-02): at Kn=0 the exact Euler solution is a stationary
         # contact, so any velocity/pressure deviation is pure numerical error.
-        # See docs/superpowers/specs/2026-07-02-rodney-validation-cases-design.md.
+        # See docs/design/rodney-validation-cases.md.
         ul = get(params, :ul, 0.0)
         Tl = get(params, :Tl, 1.0)
         ur = get(params, :ur, 0.0)

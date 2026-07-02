@@ -1,5 +1,5 @@
 # Rodney Fox's uniform-pressure validation cases (email 2026-07-02; see
-# docs/superpowers/specs/2026-07-02-rodney-validation-cases-design.md).
+# docs/design/rodney-validation-cases.md).
 #
 # 1D: L=(rho,u,T)=(1,0,1), R=(1000,0,1e-3), p≡1. Kn=0 Euler exact solution is a
 # STATIONARY CONTACT — any velocity/pressure deviation is pure numerical error.
