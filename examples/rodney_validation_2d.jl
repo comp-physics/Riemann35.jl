@@ -6,31 +6,34 @@
 #
 # Usage:
 #   julia --project=. examples/rodney_validation_2d.jl
-#   RODNEY_NP=512 RODNEY_MA=1.0 RODNEY_KN=0.01 mpiexec -n 4 julia --project=. examples/rodney_validation_2d.jl
+#   RODNEY_NP=512 RODNEY_MA=1.0 RODNEY_KN=0.001 mpiexec -n 4 julia --project=. examples/rodney_validation_2d.jl
 # Output: output/runs/<tag>.jld2 + browseable bundle in output/viz/ (./serve.sh).
 using MPI
 MPI.Initialized() || MPI.Init()
 using Riemann35
 
-Np    = parse(Int,     get(ENV, "RODNEY_NP",   "128"))
+Np    = parse(Int,     get(ENV, "RODNEY_NP",   "128"))   # Rodney's production run: 512
 Ma    = parse(Float64, get(ENV, "RODNEY_MA",   "1.0"))
-Kn    = parse(Float64, get(ENV, "RODNEY_KN",   "0.01"))
+Kn    = parse(Float64, get(ENV, "RODNEY_KN",   "0.001"))
 tmax  = parse(Float64, get(ENV, "RODNEY_TMAX", "0.2"))
 rank0 = MPI.Comm_rank(MPI.COMM_WORLD) == 0
 
 rank0 && mkpath("output/runs")
 tag = "rodney2d_Ma$(Ma)_Kn$(Kn)_Np$(Np)"
 
+rho_in = 1000.0
+
 params = (
     Nx = Np, Ny = Np, Nz = 4,
     tmax = tmax, Kn = Kn, Ma = Ma, flag2D = 0, CFL = 1/3,
-    Nmom = 35, nnmax = 1_000_000, dtmax = 1000.0,
+    Nmom = 35, nnmax = 1_000_000,
+    dtmax = Kn / sqrt(rho_in),           # Rodney: resolve collisions in the dense bubble
     rhol = 1.0, rhor = 1.0,              # required by the runner; unused by :bubble
     T = 1.0, r110 = 0.0, r101 = 0.0, r011 = 0.0,
     symmetry_check_interval = 100000, homogeneous_z = true, debug_output = false,
     ic_type = :bubble, spatial_order = 2,
-    rho_in = 1000.0, rho_out = 1.0, bubble_radius = 0.15,
-    T_in = 1e-3, T_out = 1.0, u_out = Ma,   # uniform p=1, ambient flow
+    rho_in = rho_in, rho_out = 1.0, bubble_radius = 0.125,   # r <= 1/8 disk, per his file
+    T_in = 1/rho_in, T_out = 1.0, u_out = Ma,   # uniform p=1, ambient flow
     scheme = :recommended,   # pressure recon + stage BGK (docs/design/scheme-graduation.md)
     snapshot_interval = 25,
     snapshot_filename = "output/runs/$tag.jld2",
