@@ -25,3 +25,6 @@ slurm-*.out
 snapshots_*.jld2
 snapshot_*.png
 snapshot_*.pdf
+
+# Generated output (web viewer bundles, run snapshots) — central to the repo
+output/
