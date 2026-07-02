@@ -1,0 +1,166 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<title>HyQMOM viewer</title>
+<style>
+ body{font-family:sans-serif;margin:0}
+ #bar{padding:6px 12px;background:#f4f4f6;border-bottom:1px solid #ccc;display:flex;flex-wrap:wrap;gap:12px;align-items:center;font-size:13px}
+ select,button,input{font-size:13px}
+ .vbtn,.abtn{padding:3px 9px;border:1px solid #888;background:#fff;cursor:pointer;border-radius:4px}
+ .vbtn.on,.abtn.on{background:#3a6;color:#fff;border-color:#3a6}
+ .grp{display:flex;gap:6px;align-items:center;padding:2px 8px;border-left:1px solid #ddd}
+ #wrap{display:flex;width:100%;height:calc(100vh - 82px)} .pane{flex:1;height:100%}
+ #status{color:#888;font-size:12px} .hide{display:none!important}
+</style></head><body>
+<div id="bar">
+ <b>HyQMOM</b>
+ <span class="grp">View:
+  <button class="vbtn" data-v="iso">Isosurface</button>
+  <button class="vbtn on" data-v="som">Realizability</button>
+  <button class="vbtn" data-v="slice">Slice</button></span>
+ <span class="grp"><label>Field <select id="field"></select></label>
+  <label><input type="checkbox" id="log"> log</label>
+  <label><input type="checkbox" id="lock"> lock range</label></span>
+ <span class="grp iso-c">Level <input type="range" id="ilev" min="0" max="100" value="45" style="width:90px"><span id="ilab"></span>
+  &nbsp;shells <select id="shells"><option>1</option><option>2</option><option>3</option></select>
+  &nbsp;opacity <input type="range" id="iopac" min="10" max="100" value="55" style="width:70px"></span>
+ <span class="grp slice-c">Axis <button class="abtn on" data-a="2">z</button><button class="abtn" data-a="0">x</button><button class="abtn" data-a="1">y</button>
+  pos <input type="range" id="spos" min="0" max="31" value="10" style="width:80px">
+  <label><input type="checkbox" id="s3d"> 3D plane</label></span>
+ <span class="grp"><label><input type="checkbox" id="cmp"> compare</label></span>
+ <span id="status"></span>
+</div>
+<div id="bar" style="border-top:none">
+ <span class="grp"><b>A</b> <select id="caseA"></select>
+  time <input type="range" id="timeA" min="0" max="0" value="0" style="width:130px"><span id="tlabA"></span>
+  <button id="playA">▶</button></span>
+ <span class="grp cmp-c hide"><b>B</b> <select id="caseB"></select>
+  time <input type="range" id="timeB" min="0" max="0" value="0" style="width:130px"><span id="tlabB"></span>
+  <button id="playB">▶</button></span>
+</div>
+<div id="wrap"><div id="plotA" class="pane"></div><div id="plotB" class="pane hide"></div></div>
+<script>
+var FN=[],SIGNED={2:1,3:1,4:1,6:1,7:1,8:1,10:1};
+var view="som",field=0,logOn=false,lockOn=false,ilev=45,shells=1,iopac=55,saxis=2,spos=10,s3d=false,cmp=false;
+var PAN={A:{file:null,CUR:null,t:0,timer:null},B:{file:null,CUR:null,t:0,timer:null}};
+var linking=false;
+// elliptope
+var GG=[],SP=[],SM=[];(function(){var n=48,i,jj;for(i=0;i<n;i++)GG.push(-1+2*i/(n-1));
+ for(i=0;i<n;i++){var rp=[],rm=[];for(jj=0;jj<n;jj++){var a=GG[i],b=GG[jj],d=Math.sqrt(Math.max((1-a*a)*(1-b*b),0));rp.push(a*b+d);rm.push(a*b-d);}SP.push(rp);SM.push(rm);}})();
+var els={type:'surface',x:GG,y:GG,opacity:0.12,showscale:false,colorscale:[[0,'#bcc'],[1,'#bcc']],hoverinfo:'skip'};
+function rng(a){var lo=Infinity,hi=-Infinity;for(var i=0;i<a.length;i++){var v=a[i];if(v<lo)lo=v;if(v>hi)hi=v;}return (lo>=hi)?[lo-1e-9,lo+1e-9]:[lo,hi];}
+function grange(CUR,fi){var lo=Infinity,hi=-Infinity;for(var s=0;s<CUR.snaps.length;s++){var a=CUR.snaps[s].F[fi];for(var i=0;i<a.length;i++){var v=a[i];if(v<lo)lo=v;if(v>hi)hi=v;}}return [lo,hi];}
+function tf(vals){return logOn && !SIGNED[field] ? vals.map(function(v){return Math.log10(Math.max(v,1e-12));}) : vals;}
+// color spec: returns {vals(transformed), cs, cmin, cmax, title}
+function cspec(CUR,vals){
+ var signed=SIGNED[field], uselog=logOn && !signed, tv=tf(vals);
+ var base = lockOn ? CUR.grange[field] : rng(vals);
+ var lo=base[0],hi=base[1];
+ if(uselog){lo=Math.log10(Math.max(lo,1e-12));hi=Math.log10(Math.max(hi,1e-12));}
+ var title=FN[field]+(uselog?" (log10)":"");
+ if(field==9)return{vals:tv,cs:'Viridis',cmin:0,cmax:1.7321,title:title};
+ if(signed){var M=Math.max(Math.abs(base[0]),Math.abs(base[1]))||1e-9;return{vals:tv,cs:'RdBu',cmin:-M,cmax:M,title:title};}
+ return{vals:tv,cs:'Viridis',cmin:lo,cmax:hi,title:title};
+}
+function draw(P){
+ var st=PAN[P],div=(P=='A'?'plotA':'plotB'); if(!st.CUR){return;}
+ var s=st.CUR.snaps[st.t],vn=s.vn,nx=vn[0],ny=vn[1],nz=vn[2],arr=s.F[field],tr,lay;
+ document.getElementById('tlab'+P).innerText=" t="+(s.t).toPrecision(3)+" ("+(st.t+1)+"/"+st.CUR.snaps.length+")";
+ if(view=="som"){
+  var d=s.F[0],x=[],y=[],z=[],cv=[],col=s.F[field];
+  for(var i=0;i<d.length;i++){if(d[i]>5e-3){x.push(s.F[6][i]);y.push(s.F[7][i]);z.push(s.F[8][i]);cv.push(col[i]);}}
+  var cc=cspec(st.CUR,cv);
+  tr=[Object.assign({z:SP},els),Object.assign({z:SM},els),
+      {type:'scatter3d',mode:'markers',x:x,y:y,z:z,marker:{size:2,color:cc.vals,colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title,len:.7}}}];
+  lay={margin:{l:0,r:0,t:0,b:0},scene:{xaxis:{title:'s110',range:[-1,1]},yaxis:{title:'s101',range:[-1,1]},zaxis:{title:'s011',range:[-1,1]},aspectmode:'cube'}};
+ } else if(view=="iso"){
+  var X=[],Y=[],Z=[];for(var k=0;k<nz;k++)for(var jj=0;jj<ny;jj++)for(var ii=0;ii<nx;ii++){X.push(ii/Math.max(nx-1,1));Y.push(jj/Math.max(ny-1,1));Z.push(k/Math.max(nz-1,1));}
+  var cc=cspec(st.CUR,arr),r=[cc.cmin,cc.cmax],lo=Math.min(r[0],r[1]),hi=Math.max(r[0],r[1]);
+  var lv=lo+(ilev/100)*(hi-lo);
+  document.getElementById('ilab').innerText=" "+lv.toPrecision(3);
+  tr=[{type:'isosurface',x:X,y:Y,z:Z,value:cc.vals,isomin:lv,isomax:hi,surface:{count:shells,fill:1.0},opacity:iopac/100,
+       colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title},caps:{x:{show:false},y:{show:false},z:{show:false}}}];
+  lay={margin:{l:0,r:0,t:0,b:0},scene:{xaxis:{title:'x',range:[0,1]},yaxis:{title:'y',range:[0,1]},zaxis:{title:'z',range:[0,1]},aspectmode:'cube'}};
+ } else {
+  var p2=Math.min(spos,vn[saxis]-1),cc=cspec(st.CUR,arr),grid=[],a,b,ax,bx;
+  function val(i,j,k){return arr[i+nx*j+nx*ny*k];}
+  if(saxis==2){ax=nx;bx=ny;for(a=0;a<ax;a++){var rr=[];for(b=0;b<bx;b++)rr.push(val(a,b,p2));grid.push(rr);}}
+  else if(saxis==0){ax=ny;bx=nz;for(a=0;a<ax;a++){var rr=[];for(b=0;b<bx;b++)rr.push(val(p2,a,b));grid.push(rr);}}
+  else{ax=nx;bx=nz;for(a=0;a<ax;a++){var rr=[];for(b=0;b<bx;b++)rr.push(val(a,p2,b));grid.push(rr);}}
+  var gtf = logOn&&!SIGNED[field] ? grid.map(function(r){return r.map(function(v){return Math.log10(Math.max(v,1e-12));});}) : grid;
+  if(s3d){ // slice as a colored plane in 3D
+   var xs=[],ys=[],zs=[];for(a=0;a<ax;a++){xs.push([]);ys.push([]);zs.push([]);for(b=0;b<bx;b++){
+     var P0=p2/Math.max(vn[saxis]-1,1),u=a/Math.max(ax-1,1),w=b/Math.max(bx-1,1);
+     if(saxis==2){xs[a].push(u);ys[a].push(w);zs[a].push(P0);}else if(saxis==0){xs[a].push(P0);ys[a].push(u);zs[a].push(w);}else{xs[a].push(u);ys[a].push(P0);zs[a].push(w);}}}
+   tr=[{type:'surface',x:xs,y:ys,z:zs,surfacecolor:gtf,colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title}}];
+   lay={margin:{l:0,r:0,t:0,b:0},scene:{xaxis:{title:'x',range:[0,1]},yaxis:{title:'y',range:[0,1]},zaxis:{title:'z',range:[0,1]},aspectmode:'cube'}};
+  } else {
+   tr=[{type:'heatmap',z:gtf,colorscale:cc.cs,zmin:cc.cmin,zmax:cc.cmax,colorbar:{title:cc.title}}];
+   lay={margin:{l:40,r:0,t:10,b:30},yaxis:{scaleanchor:'x'}};
+  }
+ }
+ lay.uirevision='keep'; if(lay.scene)lay.scene.uirevision='keep';
+ Plotly.react(div,tr,lay,{responsive:true});
+ var gd=document.getElementById(div);
+ if(lay.scene && !gd._linked){gd._linked=true;gd.on('plotly_relayout',function(e){
+   if(!cmp||linking||!('scene.camera' in e))return;linking=true;var o=(P=='A'?'plotB':'plotA');
+   Plotly.relayout(o,{'scene.camera':e['scene.camera']}).then(function(){linking=false;});});}
+}
+function drawAll(){draw('A');if(cmp)draw('B');}
+function loadCase(P,file){var st=PAN[P];st.file=file;document.getElementById('status').innerText="loading "+file+"...";
+ fetch('case_'+file+'.json').then(function(r){return r.json();}).then(function(c){
+  c.grange={};for(var fi=0;fi<FN.length;fi++)c.grange[fi]=grange(c,fi);
+  st.CUR=c;st.t=0;var ts=document.getElementById('time'+P);ts.max=c.snaps.length-1;ts.value=0;
+  document.getElementById('spos').max=c.snaps[0].vn[saxis]-1;
+  document.getElementById('status').innerText=file+" ("+c.snaps.length+" snaps)";draw(P);updateURL();
+ }).catch(function(e){document.getElementById('status').innerText="ERR "+file+": "+e;});}
+function showctl(){document.querySelector('.iso-c').classList.toggle('hide',view!='iso');
+ document.querySelector('.slice-c').classList.toggle('hide',view!='slice');}
+// controls
+function on(id,ev,fn){document.getElementById(id).addEventListener(ev,fn);}
+on('field','change',function(){field=+this.value;drawAll();updateURL();});
+on('log','change',function(){logOn=this.checked;drawAll();});
+on('lock','change',function(){lockOn=this.checked;drawAll();});
+on('ilev','input',function(){ilev=+this.value;drawAll();});
+on('shells','change',function(){shells=+this.value;drawAll();});
+on('iopac','input',function(){iopac=+this.value;drawAll();});
+on('spos','input',function(){spos=+this.value;drawAll();});
+on('s3d','change',function(){s3d=this.checked;drawAll();});
+on('timeA','input',function(){PAN.A.t=+this.value;draw('A');updateURL();});
+on('timeB','input',function(){PAN.B.t=+this.value;draw('B');});
+document.querySelectorAll('.vbtn').forEach(function(b){b.onclick=function(){
+ document.querySelectorAll('.vbtn').forEach(function(x){x.classList.remove('on');});this.classList.add('on');
+ view=this.dataset.v;showctl();drawAll();updateURL();};});
+document.querySelectorAll('.abtn').forEach(function(b){b.onclick=function(){
+ document.querySelectorAll('.abtn').forEach(function(x){x.classList.remove('on');});this.classList.add('on');
+ saxis=+this.dataset.a;if(PAN.A.CUR)document.getElementById('spos').max=PAN.A.CUR.snaps[PAN.A.t].vn[saxis]-1;drawAll();};});
+function playToggle(P){var st=PAN[P],btn=document.getElementById('play'+P);
+ if(st.timer){clearInterval(st.timer);st.timer=null;btn.innerText='▶';}
+ else{btn.innerText='⏸';st.timer=setInterval(function(){if(!st.CUR)return;st.t=(st.t+1)%st.CUR.snaps.length;
+   document.getElementById('time'+P).value=st.t;draw(P);},600);}}
+on('playA','click',function(){playToggle('A');});on('playB','click',function(){playToggle('B');});
+on('cmp','change',function(){cmp=this.checked;
+ document.getElementById('plotB').classList.toggle('hide',!cmp);
+ document.querySelector('.cmp-c').classList.toggle('hide',!cmp);
+ if(cmp&&!PAN.B.CUR)loadCase('B',PAN.A.file);setTimeout(drawAll,50);});
+document.addEventListener('keydown',function(e){if(e.target.tagName=='SELECT'||e.target.tagName=='INPUT')return;
+ if(e.key=='ArrowRight'||e.key=='ArrowLeft'){var st=PAN.A;if(!st.CUR)return;
+  st.t=Math.max(0,Math.min(st.CUR.snaps.length-1,st.t+(e.key=='ArrowRight'?1:-1)));
+  document.getElementById('timeA').value=st.t;draw('A');updateURL();}});
+function updateURL(){location.hash="c="+encodeURIComponent(PAN.A.file||"")+"&v="+view+"&f="+field+"&t="+PAN.A.t;}
+function readURL(){var h={};location.hash.slice(1).split('&').forEach(function(kv){var p=kv.split('=');h[p[0]]=decodeURIComponent(p[1]||"");});return h;}
+// field dropdown + manifest
+fetch('fields.json').then(function(r){return r.json();}).then(function(f){FN=f;
+ var fs=document.getElementById('field');FN.forEach(function(n,i){var o=document.createElement('option');o.value=i;o.text=n;fs.appendChild(o);});
+ return fetch('manifest.json');}).then(function(r){return r.json();}).then(function(m){
+ [['caseA','A'],['caseB','B']].forEach(function(pp){var cs=document.getElementById(pp[0]);
+  m.forEach(function(c){var o=document.createElement('option');o.value=c.file;
+   o.text=c.file.replace('.jld2','')+" ["+c.nx+"³"+(c.Ma!=null?", Ma="+c.Ma:"")+", "+c.nsnap+"]";cs.appendChild(o);});
+  cs.onchange=function(){loadCase(pp[1],this.value);};});
+ var h=readURL();
+ if(h.v){view=h.v;document.querySelectorAll('.vbtn').forEach(function(x){x.classList.toggle('on',x.dataset.v==view);});}
+ if(h.f){field=+h.f;document.getElementById('field').value=field;}
+ showctl();
+ var start=(h.c&&m.some(function(c){return c.file==h.c}))?h.c:m[0].file;
+ document.getElementById('caseA').value=start;loadCase('A',start);
+}).catch(function(e){document.getElementById('status').innerText="ERR manifest: "+e+" (serve via http?)";});
+</script></body></html>

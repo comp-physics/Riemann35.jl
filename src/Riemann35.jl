@@ -36,6 +36,7 @@ end
 
 # Export main entry points
 export run_simulation, simulation_runner, run_simulation_with_snapshots
+export export_web, export_jld2_web
 
 # Export visualization functions
 export interactive_3d_timeseries_streaming
@@ -146,6 +147,10 @@ include("initial_conditions.jl")
 
 # Main simulation
 include("simulation_runner.jl")
+
+# Browser-viewable web export (self-contained HTML viewer + JSON case bundles)
+include("web_export.jl")
+using .WebExport: export_web, export_jld2_web
 
 # Visualization (GLMakie only) - optional
 # Skip in CI or if explicitly disabled
