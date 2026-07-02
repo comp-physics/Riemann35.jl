@@ -363,3 +363,15 @@ end
     @test θdev == θcpu               # device == CPU wrapper, bitwise
     @test abs(θdev - θref) < 1e-9    # P-form == C-form (same physical state)
 end
+
+@testset "scheme bundle: :recommended == explicit flags, :legacy == defaults (bitwise)" begin
+    Mr1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :recommended))
+    Mr2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, ho_pressure_recon = true, stage_bgk = true))
+    Ml1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy))
+    Ml2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02))
+    if RODNEY_RANK == 0
+        @test Mr1 == Mr2
+        @test Ml1 == Ml2
+        @test Mr1 != Ml1     # the bundle actually changes the scheme
+    end
+end

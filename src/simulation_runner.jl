@@ -173,6 +173,16 @@ function simulation_runner(params)
     # Demo env: REPRO_PROJREC=1 in debug/run_ma100_demo.jl.
     ho_proj_first_order = get(params, :ho_proj_first_order, false)
 
+    # scheme (OPT-IN bundle, default :legacy): one switch for the vetted flag set.
+    #   :legacy      — historical bit-exact defaults (all opt-ins off)
+    #   :recommended — ho_pressure_recon + stage_bgk (machine-exact on uniform-p
+    #                  equilibria/contacts, same formal order, ~zero cost; evidence
+    #                  in docs/design/scheme-graduation.md)
+    # Individually passed flags override the bundle.
+    scheme = get(params, :scheme, :legacy)
+    scheme in (:legacy, :recommended) ||
+        error("unknown scheme=$scheme; available :legacy (default), :recommended")
+
     # ho_pressure_recon (OPT-IN, default false): high-order reconstruction carries
     # the pressure-tensor diagonal P_ii = rho*C2ii in recon-var slots 5-7 instead of
     # the temperature-like variances C2ii. Removes the reconstruction channel of the
@@ -181,7 +191,7 @@ function simulation_runner(params)
     # with stage_bgk below; gated in test/test_rodney_cases.jl). Bijection branch
     # lives in to_recon_vars/from_recon_vars (src/numerics/reconstruction.jl);
     # default path byte-identical.
-    HO_PRESSURE_RECON[] = get(params, :ho_pressure_recon, false)
+    HO_PRESSURE_RECON[] = get(params, :ho_pressure_recon, scheme === :recommended)
 
     # stage_bgk (OPT-IN, default false; spatial_order=2 only): apply the
     # exact-exponential BGK relaxation after EVERY SSP-RK3 stage instead of once
@@ -190,7 +200,7 @@ function simulation_runner(params)
     # invariant at order 2 — gated in test/test_rodney_cases.jl). Uses the
     # single-source `bgk_relax_tup` shared with the GPU path; the legacy
     # post-step `collision35` is skipped when active (no double relaxation).
-    stage_bgk = get(params, :stage_bgk, false)
+    stage_bgk = get(params, :stage_bgk, scheme === :recommended)
 
     # riemann_solver (OPT-IN, default :hll): interface flux for the high-order path.
     # :hll = original two-wave HLL (byte-identical default); :rusanov = robust local

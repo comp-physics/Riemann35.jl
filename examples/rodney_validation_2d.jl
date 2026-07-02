@@ -31,6 +31,7 @@ params = (
     ic_type = :bubble, spatial_order = 2,
     rho_in = 1000.0, rho_out = 1.0, bubble_radius = 0.15,
     T_in = 1e-3, T_out = 1.0, u_out = Ma,   # uniform p=1, ambient flow
+    scheme = :recommended,   # pressure recon + stage BGK (docs/design/scheme-graduation.md)
     snapshot_interval = 25,
     snapshot_filename = "output/runs/$tag.jld2",
     web_dir = "output",

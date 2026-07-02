@@ -27,9 +27,9 @@ params = (
     rhol = 1.0, rhor = 1000.0,           # :riemann1d L/R densities
     T = 1.0, r110 = 0.0, r101 = 0.0, r011 = 0.0,
     symmetry_check_interval = 100000, homogeneous_z = true, debug_output = false,
-    ic_type = :riemann1d, spatial_order = 2,   # set 1 for the machine-exact contact gate
-
+    ic_type = :riemann1d, spatial_order = 2,
     # defaults: ul=ur=0, Tl=1, Tr=Tl*rhol/rhor=1e-3 (uniform p), interface at x=0
+    scheme = :recommended,   # pressure recon + stage BGK (docs/design/scheme-graduation.md)
     snapshot_interval = 25,
     snapshot_filename = "output/runs/$tag.jld2",
     web_dir = "output",
