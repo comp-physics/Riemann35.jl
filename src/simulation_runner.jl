@@ -277,10 +277,12 @@ function simulation_runner(params)
                                        r110=r110, r101=r101, r011=r011, halo=halo)
     elseif haskey(params, :ic_type) && params.ic_type == :bubble
         # Discontinuous circular "bubble" IC (Rice, Plante-Sabourin & McDonald,
-        # JCP 562 (2026) 115026, Sec. 5.2). Isothermal two-state: a disk of
-        # radius `bubble_radius` at (bubble_xc, bubble_yc) with density rho_in,
-        # surrounded by rho_out, both at temperature T and zero bulk velocity.
-        # With p = rho*T this gives a density/pressure ratio of rho_in/rho_out.
+        # JCP 562 (2026) 115026, Sec. 5.2). Two-state: a disk of radius
+        # `bubble_radius` at (bubble_xc, bubble_yc) with density rho_in,
+        # surrounded by rho_out. By default both states are at temperature T
+        # with zero bulk velocity (isothermal Rice et al. case; pressure ratio
+        # = density ratio); the opt-in T_in/T_out/u_out params below generalize
+        # to non-isothermal states and a moving ambient.
         rho_in  = get(params, :rho_in, 2.0)
         rho_out = get(params, :rho_out, 1.0)
         radius  = get(params, :bubble_radius, 0.25)
@@ -292,15 +294,20 @@ function simulation_runner(params)
         profile = get(params, :bubble_profile, :sharp)
         width   = get(params, :bubble_width, 0.1)
 
-        C200 = T
-        C020 = T
-        C002 = T
-        C110 = r110 * sqrt(C200 * C020)
-        C101 = r101 * sqrt(C200 * C002)
-        C011 = r011 * sqrt(C020 * C002)
+        # Opt-in non-isothermal / moving-ambient extension (Rodney Fox's
+        # uniform-pressure bubble, 2026-07-02): T_in=1/rho_in with T_out=1 gives
+        # p≡1; u_out is the ambient x-velocity (bubble interior stays at rest).
+        # Defaults (T_in=T_out=T, u_out=0) reproduce the isothermal Rice et al.
+        # case byte-identically.
+        T_in  = get(params, :T_in, T)
+        T_out = get(params, :T_out, T)
+        u_out = get(params, :u_out, 0.0)
 
-        Mr_in  = InitializeM4_35(rho_in,  0.0, 0.0, 0.0, C200, C110, C101, C020, C011, C002)
-        Mr_out = InitializeM4_35(rho_out, 0.0, 0.0, 0.0, C200, C110, C101, C020, C011, C002)
+        Ci110 = r110 * sqrt(T_in * T_in);   Ci101 = r101 * sqrt(T_in * T_in);   Ci011 = r011 * sqrt(T_in * T_in)
+        Co110 = r110 * sqrt(T_out * T_out); Co101 = r101 * sqrt(T_out * T_out); Co011 = r011 * sqrt(T_out * T_out)
+
+        Mr_in  = InitializeM4_35(rho_in,  0.0,   0.0, 0.0, T_in,  Ci110, Ci101, T_in,  Ci011, T_in)
+        Mr_out = InitializeM4_35(rho_out, u_out, 0.0, 0.0, T_out, Co110, Co101, T_out, Co011, T_out)
 
         for kk in 1:nz
             gk = k0k1[1] + kk - 1  # global k index (unused; bubble is z-uniform)
@@ -312,9 +319,24 @@ function simulation_runner(params)
                     ycoord = ymin + (gj - 0.5) * dy_global
                     rr2 = (xcoord - xc)^2 + (ycoord - yc)^2
                     if profile == :smooth
-                        rho_loc = rho_out + (rho_in - rho_out) * exp(-rr2 / (2 * width^2))
-                        M[ii + halo, jj + halo, kk, :] =
-                            InitializeM4_35(rho_loc, 0.0, 0.0, 0.0, C200, C110, C101, C020, C011, C002)
+                        if T_in == T_out && u_out == 0.0
+                            # existing isothermal path — expressions kept verbatim
+                            # so the default stays byte-identical
+                            rho_loc = rho_out + (rho_in - rho_out) * exp(-rr2 / (2 * width^2))
+                            M[ii + halo, jj + halo, kk, :] =
+                                InitializeM4_35(rho_loc, 0.0, 0.0, 0.0, T_out, Co110, Co101, T_out, Co011, T_out)
+                        else
+                            # blend PRESSURE (not T) so a uniform-p case stays
+                            # exactly uniform-p at every resolution: T = p/rho.
+                            wgt = exp(-rr2 / (2 * width^2))
+                            rho_loc = rho_out + (rho_in - rho_out) * wgt
+                            p_loc = rho_out * T_out + (rho_in * T_in - rho_out * T_out) * wgt
+                            T_loc = p_loc / rho_loc
+                            u_loc = u_out * (1 - wgt)
+                            Cs110 = r110 * sqrt(T_loc * T_loc); Cs101 = r101 * sqrt(T_loc * T_loc); Cs011 = r011 * sqrt(T_loc * T_loc)
+                            M[ii + halo, jj + halo, kk, :] =
+                                InitializeM4_35(rho_loc, u_loc, 0.0, 0.0, T_loc, Cs110, Cs101, T_loc, Cs011, T_loc)
+                        end
                     else
                         M[ii + halo, jj + halo, kk, :] = (sqrt(rr2) <= radius) ? Mr_in : Mr_out
                     end

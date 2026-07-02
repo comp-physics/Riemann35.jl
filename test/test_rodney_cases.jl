@@ -141,3 +141,65 @@ end
         @test abs(mass - mass0) / mass0 < 1e-10
     end
 end
+
+# ---------------------------------------------------------------------------
+# :bubble extension — Rodney's 2D uniform-pressure dense-bubble case
+# ---------------------------------------------------------------------------
+
+# complete bubble params (rhol/rhor required by the runner but unused by :bubble)
+bubble_params(; kw...) = merge(rodney_params(
+        Nx = 16, Ny = 16, Nz = 4, rhol = 1.0, rhor = 1.0,
+        ic_type = :bubble,
+    ), NamedTuple(kw))
+
+# Rodney's uniform-pressure state: p ≡ 1 inside and out, ambient flow at Ma=1
+rodney_bubble_up = (rho_in = 1000.0, rho_out = 1.0, T_in = 1e-3, T_out = 1.0,
+                    u_out = 1.0, bubble_radius = 0.15)
+
+@testset ":bubble new params default byte-identical" begin
+    for prof in (:sharp, :smooth)
+        M1, _, _, _ = simulation_runner(bubble_params(bubble_profile = prof))
+        M2, _, _, _ = simulation_runner(bubble_params(bubble_profile = prof,
+                                                      T_in = 1.0, T_out = 1.0, u_out = 0.0))
+        if RODNEY_RANK == 0
+            @test M1 == M2   # bitwise
+        end
+    end
+end
+
+@testset "uniform-pressure bubble IC (Rodney 2D case)" begin
+    M, _, _, _ = simulation_runner(bubble_params(; rodney_bubble_up...))
+    if RODNEY_RANK == 0
+        @test all(isfinite, M)
+        @test maximum(abs, _pressure(M) .- 1.0) < 1e-10
+        rho = _rho(M); u = _u(M)
+        @test rho[8, 8, 1] ≈ 1000.0        # center cell inside bubble
+        @test u[8, 8, 1]   ≈ 0.0 atol=1e-14
+        @test rho[1, 1, 1] ≈ 1.0           # corner is ambient
+        @test u[1, 1, 1]   ≈ 1.0
+    end
+    # smooth variant blends PRESSURE, so uniform p stays exactly uniform
+    Ms, _, _, _ = simulation_runner(bubble_params(; rodney_bubble_up...,
+                                                  bubble_profile = :smooth))
+    if RODNEY_RANK == 0
+        @test all(isfinite, Ms)
+        @test maximum(abs, _pressure(Ms) .- 1.0) < 1e-10
+        @test _rho(Ms)[8, 8, 1] > 100.0    # dense core present
+    end
+end
+
+@testset "uniform-pressure bubble: short run stays sane" begin
+    M0, _, _, _ = simulation_runner(bubble_params(; rodney_bubble_up...))   # IC
+    M, t, steps, grid = simulation_runner(bubble_params(; rodney_bubble_up...,
+                                                        Ma = 1.0, Kn = 0.01, tmax = 0.005))
+    @test steps >= 1
+    if RODNEY_RANK == 0
+        @test all(isfinite, M)
+        @test minimum(_rho(M)) > 0.0
+        # copy BCs with ambient throughflow ⇒ modest mass drift allowed
+        dxg = 1.0 / 16
+        mass  = sum(_rho(M)[:, :, 1])  * dxg^2
+        mass0 = sum(_rho(M0)[:, :, 1]) * dxg^2
+        @test abs(mass - mass0) / mass0 < 5e-2
+    end
+end
