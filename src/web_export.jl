@@ -93,15 +93,21 @@ end
 """
     export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30)
 
-Write/append a browser-viewable case to `outdir` from in-memory snapshots.
-`snaps` is a vector of `(M, t)` with `M` sized `(Nx,Ny,Nz,35)`.
+Write/append a browser-viewable case from in-memory snapshots. The bundle is placed in
+`outdir/viz/` (the viewer files live in their own dir, separate from raw run data);
+returns that path. `snaps` is a vector of `(M, t)` with `M` sized `(Nx,Ny,Nz,35)`.
 """
+# The browseable bundle always lives in a `viz/` subdir (kept separate from raw run
+# data like `runs/`). Passing a dir already named `viz` is used as-is (no `viz/viz`).
+_vizdir(dir) = basename(rstrip(String(dir), '/')) == "viz" ? String(dir) : joinpath(String(dir), "viz")
+
 function export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30)
-    _ensure_assets(outdir)
-    ns = _write_case(outdir, string(name), Ma, Kn, snaps; rescap=rescap)
-    _rebuild_manifest(outdir)
-    @info "web viewer bundle written" case=name outdir=outdir snapshots=ns serve="run ./serve.sh in $outdir"
-    outdir
+    vd = _vizdir(outdir)
+    _ensure_assets(vd)
+    ns = _write_case(vd, string(name), Ma, Kn, snaps; rescap=rescap)
+    _rebuild_manifest(vd)
+    @info "web viewer bundle written" case=name viz=vd snapshots=ns serve="run ./serve.sh in $vd"
+    vd
 end
 
 """
