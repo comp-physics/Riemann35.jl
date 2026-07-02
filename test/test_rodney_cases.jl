@@ -203,3 +203,51 @@ end
         @test abs(mass - mass0) / mass0 < 5e-2
     end
 end
+
+# ---------------------------------------------------------------------------
+# ho_pressure_recon — pressure-tensor reconstruction variables (opt-in)
+# ---------------------------------------------------------------------------
+
+@testset "stationary contact, Kn=0: order-2 + ho_pressure_recon 13x better" begin
+    M, t, steps, grid = simulation_runner(rodney_params(tmax = 0.05, ho_pressure_recon = true))
+    @test steps >= 1
+    if RODNEY_RANK == 0
+        maxvel = max(maximum(abs, _u(M)), maximum(abs, _v(M)), maximum(abs, _w(M)))
+        pdev   = maximum(abs, _pressure(M) .- 1.0)
+        @info "stationary-contact (order 2, pressure recon) error metrics" maxvel pdev steps t
+        # Pressure-tensor recon vars (slots 5-7 hold P_ii = rho*C2ii): at the
+        # uniform-p contact every recon var except rho is uniform, so all MUSCL
+        # slopes vanish and the RECONSTRUCTION error channel is eliminated —
+        # maxvel drops 0.064 -> 0.0049, pdev 0.039 -> 0.014 at Nx=64 (13x / 2.7x).
+        # The residual (0.0027/0.0049/0.0060 at Nx=32/64/128, saturating) comes
+        # from a DIFFERENT channel: SSP-RK3 stages are collisionless (BGK applied
+        # once per full step), so at Kn=0 stage 1 pumps transient M300 from the
+        # M400 = 3p^2/rho variation, later stages flux it into pressure, and the
+        # velocity error persists (collision preserves u). Applying the
+        # exact-exponential BGK per RK stage is the follow-up predicted to make
+        # this machine-exact. Ceilings pin the improved level (~2x observed).
+        @test maxvel < 0.01
+        @test pdev   < 0.03
+        @test maximum(abs, M .- repeat(M[:, 1:1, 1:1, :], 1, 4, 4, 1)) < 1e-9
+    end
+end
+
+@testset "ho_pressure_recon off is identical to never setting it" begin
+    M1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02))
+    M2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, ho_pressure_recon = false))
+    if RODNEY_RANK == 0
+        @test M1 == M2   # bitwise
+    end
+end
+
+@testset "ho_pressure_recon: crossing-jets near-vacuum robustness smoke" begin
+    p = rodney_params(Nx = 16, Ny = 16, Nz = 16, tmax = 0.01, Kn = 1000.0,
+                      rhol = 1.0, rhor = 0.001, homogeneous_z = false,
+                      ic_type = :crossing_matlab, ho_pressure_recon = true)
+    M, t, steps, grid = simulation_runner(p)
+    @test steps >= 1
+    if RODNEY_RANK == 0
+        @test all(isfinite, M)
+        @test minimum(_rho(M)) > 0.0
+    end
+end

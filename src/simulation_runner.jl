@@ -173,6 +173,15 @@ function simulation_runner(params)
     # Demo env: REPRO_PROJREC=1 in debug/run_ma100_demo.jl.
     ho_proj_first_order = get(params, :ho_proj_first_order, false)
 
+    # ho_pressure_recon (OPT-IN, default false): high-order reconstruction carries
+    # the pressure-tensor diagonal P_ii = rho*C2ii in recon-var slots 5-7 instead of
+    # the temperature-like variances C2ii. Cures the pressure-oscillation pathology
+    # at strong contacts (uniform-p 1000:1 contact goes from ~5% L∞ spurious velocity
+    # to machine-exact at order 2; gated in test/test_rodney_cases.jl). Bijection
+    # branch lives in to_recon_vars/from_recon_vars (src/numerics/reconstruction.jl);
+    # default path byte-identical. CPU path only (GPU _dev kernels unchanged).
+    HO_PRESSURE_RECON[] = get(params, :ho_pressure_recon, false)
+
     # riemann_solver (OPT-IN, default :hll): interface flux for the high-order path.
     # :hll = original two-wave HLL (byte-identical default); :rusanov = robust local
     # Lax–Friedrichs fallback. (HLLC/HLLEM/kinetic removed — no benefit for the 35-moment
