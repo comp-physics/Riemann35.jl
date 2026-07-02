@@ -45,7 +45,8 @@ using StaticArrays
 # Residual3DGPU) `include`s `recon_dev.jl` as a sibling module FIRST, so `..ReconDev`
 # always resolves.
 using ..ReconDev: to_recon_vars_dev, from_recon_vars_dev,
-       to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod
+       to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod,
+       depressurize_recon_tup
 
 export realizable_3D_M4_dev, realizable_3D_M4_corr_dev, projection35_dev,
        delta2star_mineig_dev, sym6_mineig, realizability_S2_dev, realizability_S220_dev,
@@ -836,9 +837,12 @@ end
 # @noinline: contains the large `delta2star_mineig_dev`; the limiter calls it ~42x
 # per face, so inlining it into the already-huge residual kernel blows the device
 # compiler's inlining budget (-> spurious dynamic dispatch). Compiled once, called.
-@noinline function is_realizable_recon_dev(V::NTuple{35,Float64})
+@noinline function is_realizable_recon_dev(V::NTuple{35,Float64}, prec::Bool=false)
     recon_vars_ok_tup(V) || return false
-    C  = from_recon_vars_tup(V)
+    # prec (ho_pressure_recon): V slots 5-7 carry P_ii = rho*C2ii — depressurize
+    # before the recon-var -> moment conversion (recon_vars_ok is valid either way:
+    # P_ii > 0 <=> C2ii > 0 given rho > 0).
+    C  = from_recon_vars_tup(prec ? depressurize_recon_tup(V) : V)
     Vt = to_recon_vars_tup(C)
     (Vt[1] > 0.0 && Vt[5] > 0.0 && Vt[6] > 0.0 && Vt[7] > 0.0) || return false
     return _realiz_is_psd(REALIZ_SOLVER,
@@ -850,10 +854,11 @@ end
 # Both faces of a cell, shrunk by the largest theta in [0,1] for which BOTH map
 # to realizable states (recon vars in, recon vars out). theta=1 unlimited;
 # theta=0 collapses to the cell mean. 20-iteration bisection == CPU `nbisect`.
-@inline function _faces_realizable_dev(V0::NTuple{35,Float64}, s::NTuple{35,Float64}, θ::Float64)
+@inline function _faces_realizable_dev(V0::NTuple{35,Float64}, s::NTuple{35,Float64}, θ::Float64,
+                                       prec::Bool=false)
     Vminus = ntuple(Val(35)) do k; V0[k] - 0.5 * θ * s[k]; end
     Vplus  = ntuple(Val(35)) do k; V0[k] + 0.5 * θ * s[k]; end
-    return is_realizable_recon_dev(Vminus) && is_realizable_recon_dev(Vplus)
+    return is_realizable_recon_dev(Vminus, prec) && is_realizable_recon_dev(Vplus, prec)
 end
 
 # Core shared primitive: the largest theta in [0,1] for which BOTH of cell V0's
@@ -863,15 +868,15 @@ end
 # compiler's tuple-complexity heuristic inside the already-large flux kernel.
 # @noinline: holds the bisection loop over the large realizability check.
 @noinline function scaling_theta_dev(Vm1::NTuple{35,Float64}, V0::NTuple{35,Float64},
-                                     Vp1::NTuple{35,Float64})
+                                     Vp1::NTuple{35,Float64}, prec::Bool=false)
     s = ntuple(Val(35)) do k
         minmod(V0[k] - Vm1[k], Vp1[k] - V0[k])
     end
-    _faces_realizable_dev(V0, s, 1.0) && return 1.0   # common path: unlimited
+    _faces_realizable_dev(V0, s, 1.0, prec) && return 1.0   # common path: unlimited
     lo = 0.0; hi = 1.0                                 # bisect for the largest feasible theta
     for _ in 1:20
         mid = 0.5 * (lo + hi)
-        if _faces_realizable_dev(V0, s, mid); lo = mid; else; hi = mid; end
+        if _faces_realizable_dev(V0, s, mid, prec); lo = mid; else; hi = mid; end
     end
     return lo
 end
@@ -879,8 +884,8 @@ end
 # Full (both faces + theta) wrapper — the single source matching CPU
 # `scaling_limited_faces`. Returns recon-var faces (Vminus, Vplus, theta).
 @inline function scaling_limited_faces_dev(Vm1::NTuple{35,Float64}, V0::NTuple{35,Float64},
-                                           Vp1::NTuple{35,Float64})
-    θ = scaling_theta_dev(Vm1, V0, Vp1)
+                                           Vp1::NTuple{35,Float64}, prec::Bool=false)
+    θ = scaling_theta_dev(Vm1, V0, Vp1, prec)
     Vminus = ntuple(Val(35)) do k; V0[k] - 0.5 * θ * (minmod(V0[k] - Vm1[k], Vp1[k] - V0[k])); end
     Vplus  = ntuple(Val(35)) do k; V0[k] + 0.5 * θ * (minmod(V0[k] - Vm1[k], Vp1[k] - V0[k])); end
     return (Vminus, Vplus, θ)

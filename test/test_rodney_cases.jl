@@ -312,3 +312,51 @@ end
         @test abs(mass - mass0) / mass0 < 1e-10
     end
 end
+
+@testset "limiter + pressure recon + stage BGK: contact still machine-exact" begin
+    # ho_realizability_limiter slope-limits in the SAME recon variables, so with
+    # pressure recon all non-density slopes vanish at the uniform-p contact and
+    # theta=1 everywhere: the scaling limiter must not break exactness. This also
+    # covers the limiter+pressure_recon combination end-to-end (CPU); the GPU
+    # combination is covered by gpu/validation/stagebgk_* mode "limprec".
+    M, t, steps, grid = simulation_runner(rodney_params(tmax = 0.05,
+        ho_pressure_recon = true, stage_bgk = true, ho_realizability_limiter = true))
+    @test steps >= 1
+    if RODNEY_RANK == 0
+        maxvel = max(maximum(abs, _u(M)), maximum(abs, _v(M)), maximum(abs, _w(M)))
+        pdev   = maximum(abs, _pressure(M) .- 1.0)
+        @info "stationary-contact (order 2, limiter + pressure recon + stage BGK)" maxvel pdev
+        @test maxvel < 1e-12
+        @test pdev   < 1e-12
+    end
+end
+
+@testset "pressure-aware theta oracle: engaged limiter, P-form == C-form == device" begin
+    # A stencil whose MUSCL faces cross the S400 >= 1 + S300^2 realizability
+    # boundary engages the scaling limiter (theta << 1). The theta must be
+    # IDENTICAL through three routes: the CPU wrapper path with
+    # ho_pressure_recon on (P-form recon vars), the shared device
+    # scaling_theta_dev with prec=true (exactly what the GPU compiles), and the
+    # plain C-form reference (the same physical state, flag off). rho != 1 so
+    # the P-form genuinely differs from the C-form.
+    RZ = Riemann35.RealizeDev
+    function vvec(rho, C, s3, s4)
+        V = zeros(35); V[1] = rho; V[5] = C; V[6] = C; V[7] = C
+        S = zeros(28); S[1] = s3; S[2] = s4                       # S300, S400
+        S[7] = 1.0; S[10] = 3.0; S[15] = 1.0; S[18] = 3.0; S[28] = 1.0  # Maxwellian S220/S040/S202/S004/S022
+        V[8:35] .= S
+        return V
+    end
+    topform(V) = (W = copy(V); W[5] *= W[1]; W[6] *= W[1]; W[7] *= W[1]; W)
+    rho = 7.0; C = 0.3
+    Vm1 = vvec(rho, C, 0.0, 2.97); V0 = vvec(rho, C, 1.4, 2.97); Vp1 = vvec(rho, C, 2.8, 2.97)
+    Riemann35.HO_PRESSURE_RECON[] = true
+    θcpu = scaling_limited_faces(topform(Vm1), topform(V0), topform(Vp1))[3]
+    Riemann35.HO_PRESSURE_RECON[] = false
+    θdev = RZ.scaling_theta_dev(ntuple(i -> topform(Vm1)[i], 35), ntuple(i -> topform(V0)[i], 35),
+                                ntuple(i -> topform(Vp1)[i], 35), true)
+    θref = scaling_limited_faces(Vm1, V0, Vp1)[3]
+    @test θdev < 1.0                 # the limiter actually engages
+    @test θdev == θcpu               # device == CPU wrapper, bitwise
+    @test abs(θdev - θref) < 1e-9    # P-form == C-form (same physical state)
+end

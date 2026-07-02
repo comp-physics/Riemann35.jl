@@ -54,13 +54,13 @@ function bgkstage!(Mc,n,g,dt,kn)
         for q in 1:35; Mc[i+g,j+g,k,q] = out[q]; end
     end
 end
-function march(Mint, nstep, dts, n, g, dx; prec::Bool, kn)   # kn=nothing → no stage BGK
+function march(Mint, nstep, dts, n, g, dx; prec::Bool, kn, use_limiter::Bool=false)   # kn=nothing → no stage BGK
     Ma = 0.0
     Riemann35.HO_PRESSURE_RECON[] = prec
     Mc = zeros(n+2g,n+2g,n,35)
     for k in 1:n, j in 1:n, i in 1:n; @views Mc[i+g,j+g,k,:].=Mint[:,i,j,k]; end
     R = zeros(n+2g,n+2g,n,35); int = (g+1:g+n, g+1:g+n, 1:n, :)
-    L!(M) = (refill_xy!(M,n,g); residual_ho_3d!(R,M,n,n,n,g,dx,dx,dx,Ma; order=2); R)
+    L!(M) = (refill_xy!(M,n,g); residual_ho_3d!(R,M,n,n,n,g,dx,dx,dx,Ma; order=2, use_limiter=use_limiter); R)
     bgk!(M,dt) = kn === nothing ? nothing : bgkstage!(M,n,g,dt,kn)
     for s in 1:nstep
         dt = dts[s]; M0 = copy(Mc)
@@ -78,10 +78,12 @@ end
 M_def  = march(Mint, nstep, dts, n, g, dx; prec=false, kn=nothing)
 M_pbk0 = march(Mint, nstep, dts, n, g, dx; prec=true,  kn=0.0)
 M_pbk  = march(Mint, nstep, dts, n, g, dx; prec=true,  kn=0.01)
+M_lpb  = march(Mint, nstep, dts, n, g, dx; prec=true,  kn=0.01, use_limiter=true)
 maxu(M) = maximum(abs, M[2,:,:,:] ./ M[1,:,:,:])
 @printf("  CPU def : mass=%.10e max|u|=%.3e\n", sum(M_def[1,:,:,:]),  maxu(M_def))
 @printf("  CPU pbk0: mass=%.10e max|u|=%.3e (contact-exactness: expect ~1e-16)\n", sum(M_pbk0[1,:,:,:]), maxu(M_pbk0))
 @printf("  CPU pbk : mass=%.10e max|u|=%.3e\n", sum(M_pbk[1,:,:,:]),  maxu(M_pbk))
+@printf("  CPU lpb : mass=%.10e max|u|=%.3e (limiter + pressure recon + stage BGK)\n", sum(M_lpb[1,:,:,:]), maxu(M_lpb))
 
 mkpath(DATA)
 open(joinpath(DATA,"stagebgk.meta"),"w") do io; println(io,n); println(io,nstep); println(io,dx); end
@@ -90,4 +92,5 @@ write(joinpath(DATA,"stagebgk_dts.f64"),  reinterpret(UInt8, vec(dts)))
 write(joinpath(DATA,"stagebgk_cpu_def.f64"),  reinterpret(UInt8, vec(M_def)))
 write(joinpath(DATA,"stagebgk_cpu_pbk0.f64"), reinterpret(UInt8, vec(M_pbk0)))
 write(joinpath(DATA,"stagebgk_cpu_pbk.f64"),  reinterpret(UInt8, vec(M_pbk)))
-println("wrote stagebgk_{meta,M0,dts,cpu_def,cpu_pbk0,cpu_pbk}")
+write(joinpath(DATA,"stagebgk_cpu_lpb.f64"),  reinterpret(UInt8, vec(M_lpb)))
+println("wrote stagebgk_{meta,M0,dts,cpu_def,cpu_pbk0,cpu_pbk,cpu_lpb}")

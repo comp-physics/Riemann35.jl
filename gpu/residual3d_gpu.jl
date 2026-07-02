@@ -134,8 +134,8 @@ end
         # θ precomputed once per cell per axis (LIMITER_THETA_CACHE path, byte-identical:
         # a cell's θ is otherwise computed twice — as θR of one face and θL of the next);
         # sentinel <0 (default path) recomputes inline exactly as before.
-        θL = θLin >= 0.0 ? θLin : scaling_theta_dev(Vfm1, Vf, Vfp1)   # limiter coeff for cell f
-        θR = θRin >= 0.0 ? θRin : scaling_theta_dev(Vf, Vfp1, Vfp2)   # limiter coeff for cell f+1
+        θL = θLin >= 0.0 ? θLin : scaling_theta_dev(Vfm1, Vf, Vfp1, prec)   # limiter coeff for cell f
+        θR = θRin >= 0.0 ? θRin : scaling_theta_dev(Vf, Vfp1, Vfp2, prec)   # limiter coeff for cell f+1
         Vlp = muscl_right_face_tup(Vfm1, Vf, Vfp1, θL)   # right face of cell f   == Vplus(cell f)
         Vlm = muscl_left_face_tup(Vf, Vfp1, Vfp2, θR)    # left face of cell f+1  == Vminus(cell f+1)
         Li = from_recon_vars_tup(prec ? depressurize_recon_tup(Vlp) : Vlp)
@@ -379,7 +379,7 @@ end
 # clamps to self), so their θ never affects the face value. Tb is (3,nx,ny,nz):
 # row 1=x, 2=y, 3=z. Only launched when lim==1 && order>=2.
 # ===========================================================================
-function _theta_kernel!(Tb, V, nx::Int, ny::Int, nz::Int)
+function _theta_kernel!(Tb, V, nx::Int, ny::Int, nz::Int, prec::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -389,9 +389,9 @@ function _theta_kernel!(Tb, V, nx::Int, ny::Int, nz::Int)
             vxm = _cell(V, _clamp(i - 1, nx), j, k); vxp = _cell(V, _clamp(i + 1, nx), j, k)
             vym = _cell(V, i, _clamp(j - 1, ny), k); vyp = _cell(V, i, _clamp(j + 1, ny), k)
             vzm = _cell(V, i, j, _clamp(k - 1, nz)); vzp = _cell(V, i, j, _clamp(k + 1, nz))
-            Tb[1, i, j, k] = scaling_theta_dev(vxm, v0, vxp)
-            Tb[2, i, j, k] = scaling_theta_dev(vym, v0, vyp)
-            Tb[3, i, j, k] = scaling_theta_dev(vzm, v0, vzp)
+            Tb[1, i, j, k] = scaling_theta_dev(vxm, v0, vxp, prec)
+            Tb[2, i, j, k] = scaling_theta_dev(vym, v0, vyp, prec)
+            Tb[3, i, j, k] = scaling_theta_dev(vzm, v0, vzp, prec)
         end
     end
     return nothing
@@ -519,11 +519,6 @@ function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
          throw(ArgumentError("unknown riemann_solver=$riemann_solver; available :hll (default), :rusanov"))
     lim = limiter ? 1 : 0
     prec = pressure_recon
-    # The scaling limiter's theta oracle (scaling_theta_dev) converts recon vars to
-    # moments internally and is not pressure_recon-aware; the CPU path supports the
-    # combination via the flag-aware wrappers. Reject rather than silently mishandle.
-    (limiter && pressure_recon) && throw(ArgumentError(
-        "pressure_recon + limiter is not supported on the GPU path yet (use one or the other)"))
     fx = (nx + 1) * ny * nz; fy = (ny + 1) * nx * nz; fz = (nz + 1) * nx * ny
     fmax = max(fx, fy, fz)
     # reusable face buffer: caller may supply a (35, >=fmax) scratch to avoid per-call alloc
@@ -560,7 +555,7 @@ function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
         else
             @assert size(tbuf) == (3, nx, ny, nz) "tbuf must be (3,nx,ny,nz)"
         end
-        @cuda threads=threads blocks=bc _theta_kernel!(tbuf, vbuf, nx, ny, nz)
+        @cuda threads=threads blocks=bc _theta_kernel!(tbuf, vbuf, nx, ny, nz, prec)
     end
 
     fill!(R, 0.0)

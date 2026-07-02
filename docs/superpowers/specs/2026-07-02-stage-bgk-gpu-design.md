@@ -51,6 +51,13 @@ Value-parity test: `bgk_relax_tup` vs legacy `collision35` (rtol 1e-12). Legacy
   `march3d_gpu!`/`march3d_slab_gpu!` → `residual3d_box_gpu!` → kernels:
   pressurize after `to_recon_vars_tup` (vbuf fill), depressurize before each of
   the 4 `from_recon_vars_tup` sites in `_face_flux_core`.
+- **Limiter + pressure_recon supported** (added on user request): `prec` is
+  threaded down the θ chain (`scaling_theta_dev` → `_faces_realizable_dev` →
+  `is_realizable_recon_dev`, all defaulting `prec=false` for byte-identity), with
+  the depressurize at the single conversion point. Verified: engaged-limiter θ
+  (0.00509…) identical through CPU wrapper (flag), device oracle (prec=true),
+  and the C-form reference; contact stays machine-exact with the limiter on
+  (both gated in test_rodney_cases.jl); GPU `lpb` mode parity 3.2e-13.
 - `stage_bgk::Bool=false, Kn::Real=Inf` on the marches: `_bgk_kernel!` (per-cell
   `bgk_relax_tup` on the `(35,ncl)` view) launched after each stage's `proj!` in
   `_rk3_step!`. This is also the GPU's first collision capability (default off ⇒

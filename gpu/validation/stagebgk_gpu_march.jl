@@ -14,10 +14,10 @@ rd(f) = collect(reinterpret(Float64, read(joinpath(DATA,f))))
 Mint = reshape(rd("stagebgk_M0.f64"), 35, n, n, n)
 dts  = rd("stagebgk_dts.f64")
 
-function march(Mint, dts, n, dx; pressure_recon::Bool, stage_bgk::Bool, Kn)
+function march(Mint, dts, n, dx; pressure_recon::Bool, stage_bgk::Bool, Kn, limiter::Bool=false)
     Md = CuArray(Mint)
     march3d_gpu!(Md, dx, 0.0, length(dts); dts=dts, vacuum_floor=0.001, order=2,
-                 pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn)
+                 pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, limiter=limiter)
     return Array(Md)
 end
 
@@ -40,10 +40,11 @@ maxu(M) = maximum(abs, M[2,:,:,:] ./ M[1,:,:,:])
 
 @printf("GPU stagebgk march: n=%d nstep=%d dt=%.3e  [%s]\n", n, nstep, dts[1], CUDA.name(CUDA.device()))
 fails = 0
-for (tag, prec, sbgk, kn, extra) in (("def",  false, false, Inf,  :none),
-                                     ("pbk0", true,  true,  0.0,  :contact),
-                                     ("pbk",  true,  true,  0.01, :none))
-    G = march(Mint, dts, n, dx; pressure_recon=prec, stage_bgk=sbgk, Kn=kn)
+for (tag, prec, sbgk, kn, lim, extra) in (("def",  false, false, Inf,  false, :none),
+                                          ("pbk0", true,  true,  0.0,  false, :contact),
+                                          ("pbk",  true,  true,  0.01, false, :none),
+                                          ("lpb",  true,  true,  0.01, true,  :none))
+    G = march(Mint, dts, n, dx; pressure_recon=prec, stage_bgk=sbgk, Kn=kn, limiter=lim)
     C = reshape(rd("stagebgk_cpu_$(tag).f64"), 35, n, n, n)
     re = relerr(G, C)
     ok = re < 1e-8   # machine-zero fields sit at ~1e-16 abs over the 1e-10*gsc floor => ~1e-9
