@@ -50,6 +50,7 @@ module ReconDev
 
 export to_recon_vars_dev, from_recon_vars_dev, minmod,
        to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup,
+       pressurize_recon_tup, depressurize_recon_tup, bgk_relax_tup,
        muscl_right_face_tup, muscl_left_face_tup
 
 const _EPSF = 2.220446049250313e-16   # eps(Float64)
@@ -332,6 +333,50 @@ end
         fin &= isfinite(V[k])
     end
     @inbounds return fin && V[1] > 0.0 && V[5] > 0.0 && V[6] > 0.0 && V[7] > 0.0
+end
+
+# ---------------------------------------------------------------------------
+# ho_pressure_recon variant: slots 5-7 carry P_ii = rho*C2ii instead of C2ii.
+# SINGLE SOURCE for the transform — the CPU wrappers (reconstruction.jl) and the
+# GPU kernels (residual3d_gpu.jl) both call these. Plain arithmetic (no fastmath).
+# ---------------------------------------------------------------------------
+@inline pressurize_recon_tup(V::NTuple{35,Float64}) = (
+    V[1], V[2], V[3], V[4], V[5]*V[1], V[6]*V[1], V[7]*V[1],
+    V[8],V[9],V[10],V[11],V[12],V[13],V[14],V[15],V[16],V[17],V[18],V[19],V[20],
+    V[21],V[22],V[23],V[24],V[25],V[26],V[27],V[28],V[29],V[30],V[31],V[32],V[33],V[34],V[35])
+
+@inline depressurize_recon_tup(V::NTuple{35,Float64}) = (
+    V[1], V[2], V[3], V[4], V[5]/V[1], V[6]/V[1], V[7]/V[1],
+    V[8],V[9],V[10],V[11],V[12],V[13],V[14],V[15],V[16],V[17],V[18],V[19],V[20],
+    V[21],V[22],V[23],V[24],V[25],V[26],V[27],V[28],V[29],V[30],V[31],V[32],V[33],V[34],V[35])
+
+# ---------------------------------------------------------------------------
+# Exact-exponential BGK relaxation of one cell's raw 35-moment state.
+# SINGLE SOURCE for stage-wise collision — used by the CPU `stage_bgk` path
+# (step_highorder_3d!) and the GPU `_bgk_kernel!`. Same physics as the legacy
+# `collision35` (tc = Kn/(2*rho*sqrt(Theta)); Theta floored at 1e-14, matching
+# POSITIVITY_ENABLED=true), but the Maxwellian target is built by
+# `from_recon_vars_dev` with the Maxwellian standardized moments
+# (S400=S040=S004=3, S220=S202=S022=1, rest 0) — reusing the existing
+# single-source kernel instead of duplicating moment construction.
+# Mout = MG - e*(MG - M) = (1-e)*MG + e*M is a CONVEX combination of M and its
+# Maxwellian, so realizability is preserved. Kn=0 => e=0 (instant
+# Maxwellianization); Kn=Inf => e=1 (no-op); rho<=0 returns M unchanged.
+# ---------------------------------------------------------------------------
+@inline function bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64)::NTuple{35,Float64}
+    rho = M[1]
+    rho > 0.0 || return M
+    u = M[2]/rho; v = M[6]/rho; w = M[16]/rho
+    C200 = M[3]/rho - u*u; C020 = M[10]/rho - v*v; C002 = M[20]/rho - w*w
+    Theta = (C200 + C020 + C002) / 3
+    Theta = Theta > 1e-14 ? Theta : 1e-14
+    tc = Kn / (rho * sqrt(Theta) * 2)
+    e = exp(-dt/tc)
+    MG = from_recon_vars_dev(rho, u, v, w, Theta, Theta, Theta,
+        0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,   # S300,S400,S110,S210,S310,S120,S220,S030,S130,S040
+        0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,             # S101,S201,S301,S102,S202,S003,S103,S004
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)   # S011,S111,S211,S021,S121,S031,S012,S112,S013,S022
+    return ntuple(i -> MG[i] - e * (MG[i] - M[i]), Val(35))
 end
 
 end # module
