@@ -117,21 +117,22 @@ function to_recon_vars(M::AbstractVector)::Vector{Float64}
     # Delegate to the single-source, allocation-free device kernel (shared verbatim
     # with the GPU path). `to_recon_vars_dev(M...)` returns the length-35 recon-var
     # NTuple in the same canonical order; collect into the Vector callers expect.
-    V = collect(to_recon_vars_dev(M...))
+    V = to_recon_vars_dev(M...)
     if HO_PRESSURE_RECON[]
         # opt-in pressure-tensor variant: slots 5-7 carry P_ii = rho*C2ii, so a
         # uniform-pressure contact has zero slope in every var except density.
-        V[5] *= V[1]; V[6] *= V[1]; V[7] *= V[1]
+        # Single-source transform shared with the GPU kernels (recon_dev.jl).
+        V = pressurize_recon_tup(V)
     end
-    return V
+    return collect(V)
 end
 
 function from_recon_vars(V::AbstractVector)::Vector{Float64}
     # Delegate to the single-source device kernel; `from_recon_vars_dev(V...)` returns
     # the length-35 raw-moment NTuple in canonical layout.
     if HO_PRESSURE_RECON[]
-        W = copy(V)
-        W[5] /= W[1]; W[6] /= W[1]; W[7] /= W[1]   # P_ii -> C2ii (rho > 0 per recon_vars_ok)
+        # P_ii -> C2ii (rho > 0 per recon_vars_ok); single-source with GPU.
+        W = depressurize_recon_tup(ntuple(i -> Float64(V[i]), Val(35)))
         return collect(from_recon_vars_dev(W...))
     end
     return collect(from_recon_vars_dev(V...))

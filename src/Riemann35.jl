@@ -31,7 +31,8 @@ const HO_VACUUM_FLOOR = Ref(0.0)
 # At a uniform-pressure contact every recon var except rho is then uniform, so
 # MUSCL slopes vanish and the contact is preserved exactly at second order
 # (default recon vars leave ~5% L∞ error there; see test_rodney_cases.jl and
-# docs/superpowers/specs/2026-07-02-pressure-recon-design.md). CPU path only.
+# docs/design/pressure-recon.md). This Ref drives the CPU wrappers; the GPU path
+# takes the equivalent `pressure_recon` kwarg (gpu/residual3d_gpu.jl).
 # Set from params in `simulation_runner`.
 const HO_PRESSURE_RECON = Ref(false)
 
@@ -104,7 +105,8 @@ include("moments/enforce_univariate.jl")
 
 # Reconstruction variables (must precede realizability, which calls standardized_to_M4)
 include("numerics/recon_dev.jl")
-using .ReconDev: to_recon_vars_dev, from_recon_vars_dev
+using .ReconDev: to_recon_vars_dev, from_recon_vars_dev,
+                 pressurize_recon_tup, depressurize_recon_tup, bgk_relax_tup
 include("numerics/reconstruction.jl")
 
 # Realizability

@@ -135,7 +135,8 @@ end
 
 function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
-                            order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false)
+                            order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
+                            stage_bgk_kn=nothing)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # stage helper: M_in (with halos) -> returns updated interior-only array (full M-shape, halos zero)
@@ -144,13 +145,33 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
         residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon)
         return R
     end
+    # stage_bgk (opt-in, `stage_bgk_kn` = Kn): exact-exponential BGK relaxation of
+    # every interior cell after each stage's projection. Each SSP-RK3 building
+    # block is then a Lie-split forward-Euler step; the convex combinations keep
+    # first-order splitting consistency (same formal order as the legacy
+    # once-per-step collision). At Kn=0 every stage output is Maxwellian, so
+    # transient M300 can never flux M200 in a later stage — this closes the
+    # collisionless-stage error channel at contacts (see test_rodney_cases.jl).
+    # `bgk_relax_tup` is the single-source helper shared with the GPU path.
+    function bgk!(Mwork)
+        stage_bgk_kn === nothing && return nothing
+        kn = Float64(stage_bgk_kn); dtf = Float64(dt)
+        @inbounds for k in 1:nz, j in halo+1:halo+ny, i in halo+1:halo+nx
+            Mt = ntuple(q -> Mwork[i, j, k, q], Val(35))
+            out = bgk_relax_tup(Mt, dtf, kn)
+            for q in 1:35
+                Mwork[i, j, k, q] = out[q]
+            end
+        end
+        return nothing
+    end
     M0 = copy(M)
     # stage 1: M1 = M + dt*L(M)
-    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; _project_interior!(M,nx,ny,nz,halo,Ma)
+    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; _project_interior!(M,nx,ny,nz,halo,Ma); bgk!(M)
     # stage 2: M2 = 3/4 M0 + 1/4 (M1 + dt L(M1))
-    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma)
+    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma); bgk!(M)
     # stage 3: M = 1/3 M0 + 2/3 (M2 + dt L(M2))
-    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma)
+    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma); bgk!(M)
     halo_exchange_3d!(M, decomp, bc)
     return nothing
 end

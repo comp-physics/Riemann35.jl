@@ -173,14 +173,34 @@ function simulation_runner(params)
     # Demo env: REPRO_PROJREC=1 in debug/run_ma100_demo.jl.
     ho_proj_first_order = get(params, :ho_proj_first_order, false)
 
+    # scheme (OPT-IN bundle, default :legacy): one switch for the vetted flag set.
+    #   :legacy      — historical bit-exact defaults (all opt-ins off)
+    #   :recommended — ho_pressure_recon + stage_bgk (machine-exact on uniform-p
+    #                  equilibria/contacts, same formal order, ~zero cost; evidence
+    #                  in docs/design/scheme-graduation.md)
+    # Individually passed flags override the bundle.
+    scheme = get(params, :scheme, :legacy)
+    scheme in (:legacy, :recommended) ||
+        error("unknown scheme=$scheme; available :legacy (default), :recommended")
+
     # ho_pressure_recon (OPT-IN, default false): high-order reconstruction carries
     # the pressure-tensor diagonal P_ii = rho*C2ii in recon-var slots 5-7 instead of
-    # the temperature-like variances C2ii. Cures the pressure-oscillation pathology
-    # at strong contacts (uniform-p 1000:1 contact goes from ~5% L∞ spurious velocity
-    # to machine-exact at order 2; gated in test/test_rodney_cases.jl). Bijection
-    # branch lives in to_recon_vars/from_recon_vars (src/numerics/reconstruction.jl);
-    # default path byte-identical. CPU path only (GPU _dev kernels unchanged).
-    HO_PRESSURE_RECON[] = get(params, :ho_pressure_recon, false)
+    # the temperature-like variances C2ii. Removes the reconstruction channel of the
+    # pressure-oscillation pathology at strong contacts (uniform-p 1000:1 contact:
+    # ~5% -> ~0.5% L∞ spurious velocity at order 2; machine-exact when combined
+    # with stage_bgk below; gated in test/test_rodney_cases.jl). Bijection branch
+    # lives in to_recon_vars/from_recon_vars (src/numerics/reconstruction.jl);
+    # default path byte-identical.
+    HO_PRESSURE_RECON[] = get(params, :ho_pressure_recon, scheme === :recommended)
+
+    # stage_bgk (OPT-IN, default false; spatial_order=2 only): apply the
+    # exact-exponential BGK relaxation after EVERY SSP-RK3 stage instead of once
+    # per full step. Closes the collisionless-stage error channel at strong
+    # contacts (with ho_pressure_recon the uniform-p contact becomes an exact
+    # invariant at order 2 — gated in test/test_rodney_cases.jl). Uses the
+    # single-source `bgk_relax_tup` shared with the GPU path; the legacy
+    # post-step `collision35` is skipped when active (no double relaxation).
+    stage_bgk = get(params, :stage_bgk, scheme === :recommended)
 
     # riemann_solver (OPT-IN, default :hll): interface flux for the high-order path.
     # :hll = original two-wave HLL (byte-identical default); :rusanov = robust local
@@ -358,7 +378,7 @@ function simulation_runner(params)
         # Tr = Tl*rhol/rhor gives UNIFORM PRESSURE — Rodney Fox's validation
         # case (2026-07-02): at Kn=0 the exact Euler solution is a stationary
         # contact, so any velocity/pressure deviation is pure numerical error.
-        # See docs/superpowers/specs/2026-07-02-rodney-validation-cases-design.md.
+        # See docs/design/rodney-validation-cases.md.
         ul = get(params, :ul, 0.0)
         Tl = get(params, :Tl, 1.0)
         ur = get(params, :ur, 0.0)
@@ -791,7 +811,8 @@ function simulation_runner(params)
             # unaffected; the high-order step advances this hyperbolic state.
             step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma;
                                order=2, use_limiter=ho_realizability_limiter,
-                               use_proj_recon=ho_proj_first_order)
+                               use_proj_recon=ho_proj_first_order,
+                               stage_bgk_kn=(stage_bgk ? Kn : nothing))
         else
             # --- FIRST-ORDER PATH (spatial_order=1, default) ---
             # Byte-identical to the original validated path.
@@ -843,19 +864,22 @@ function simulation_runner(params)
             M[halo+1:halo+nx, halo+1:halo+ny, :, :] = Mnp[halo+1:halo+nx, halo+1:halo+ny, :, :]
         end  # spatial_order branch
 
-        # Apply BGK collision (both paths)
-        for k in 1:nz
-            for i in 1:nx
-                for j in 1:ny
-                    ih = i + halo
-                    jh = j + halo
-                    MOM = M[ih, jh, k, :]
-                    MMC = collision35(MOM, dt, Kn)
-                    Mnp[ih, jh, k, :] = MMC
+        # Apply BGK collision (both paths). Skipped when stage_bgk already relaxed
+        # every SSP-RK3 stage inside step_highorder_3d! (no double relaxation).
+        if !(stage_bgk && spatial_order == 2)
+            for k in 1:nz
+                for i in 1:nx
+                    for j in 1:ny
+                        ih = i + halo
+                        jh = j + halo
+                        MOM = M[ih, jh, k, :]
+                        MMC = collision35(MOM, dt, Kn)
+                        Mnp[ih, jh, k, :] = MMC
+                    end
                 end
             end
+            M[halo+1:halo+nx, halo+1:halo+ny, :, :] = Mnp[halo+1:halo+nx, halo+1:halo+ny, :, :]
         end
-        M[halo+1:halo+nx, halo+1:halo+ny, :, :] = Mnp[halo+1:halo+nx, halo+1:halo+ny, :, :]
         
         # Exchange halos for next iteration
         halo_exchange_3d!(M, decomp, bc)
