@@ -49,6 +49,7 @@ function _ensure_assets(outdir)
     mkpath(outdir)
     cp(joinpath(_ASSETS, "viewer.html"), joinpath(outdir, "viewer.html"); force=true)
     cp(joinpath(_ASSETS, "serve.sh"),    joinpath(outdir, "serve.sh");    force=true)
+    cp(joinpath(_ASSETS, "README.md"),   joinpath(outdir, "README.md");   force=true)
     try; chmod(joinpath(outdir, "serve.sh"), 0o755); catch; end
     open(joinpath(outdir, "fields.json"), "w") do io
         print(io, "[\"", join(WEB_FIELDS, "\",\""), "\"]")
