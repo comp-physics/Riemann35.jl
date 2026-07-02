@@ -18,7 +18,7 @@ module WebExport
 
 using JLD2
 
-export export_web, export_jld2_web
+export export_web, export_jld2_web, maybe_export_web
 
 const WEB_FIELDS = ["density","|velocity|","u","v","w","temperature","s110","s101","s011",
                     "‖s‖","skewness","kurtosis","S2 margin","pressure","Mach","Tx","Ty","Tz"]
@@ -124,6 +124,25 @@ function export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
         snaps = [(f["snapshots"][k]["M"], f["snapshots"][k]["t"]) for k in sk]
         export_web(outdir, nm, snaps; Ma=Ma, Kn=Kn, rescap=rescap)
     end
+end
+
+"""
+    maybe_export_web(snapshot_filename, web_dir)
+
+Shared opt-in run hook for both the CPU (`simulation_runner`) and GPU (`run_gpu_3d`)
+paths: if `web_dir !== nothing`, export the just-saved snapshot JLD2 to a
+browser-viewable bundle there. Never throws — a failed export must not break an
+otherwise-completed simulation (the JLD2 is already on disk). No-op if `web_dir` is nothing.
+"""
+function maybe_export_web(snapshot_filename, web_dir)
+    web_dir === nothing && return nothing
+    try
+        export_jld2_web(snapshot_filename, web_dir)
+        @info "web viewer bundle written" web_dir=web_dir serve="run ./serve.sh in $web_dir"
+    catch e
+        @warn "web_dir export failed (snapshot JLD2 still saved)" exception=e
+    end
+    nothing
 end
 
 end # module

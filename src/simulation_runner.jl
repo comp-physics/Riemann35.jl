@@ -1016,14 +1016,7 @@ function simulation_runner(params)
             jld_file["meta/n_snapshots"] = snap_count  # Write final count
             close(jld_file)
             println("Snapshot file closed: $snapshot_filename")
-            if web_dir !== nothing
-                try
-                    WebExport.export_jld2_web(snapshot_filename, web_dir)
-                    println("Web viewer bundle: $web_dir  (run ./serve.sh there)")
-                catch e
-                    @warn "web_dir export failed (snapshot JLD2 still saved)" exception=e
-                end
-            end
+            WebExport.maybe_export_web(snapshot_filename, web_dir)
             return snapshot_filename, grid_out
         else
             return nothing, nothing

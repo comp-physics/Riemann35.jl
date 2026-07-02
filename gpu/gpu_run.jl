@@ -25,6 +25,8 @@ module GPURun
 using CUDA, JLD2, MPI
 include(joinpath(@__DIR__, "timestep3d_gpu.jl"))
 using .Timestep3DGPU: march3d_gpu!, march3d_slab_gpu!, HO_VACUUM_FLOOR_DEFAULT
+include(joinpath(@__DIR__, "..", "src", "web_export.jl"))   # browser-viewable export (single source; shared with the CPU path)
+using .WebExport: maybe_export_web
 
 export run_gpu_3d
 
@@ -53,7 +55,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     snapshot_interval::Integer, snapshot_filename::AbstractString,
                     comm=nothing, halo::Int=2, dts=nothing, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
-                    params=Dict{String,Any}(), include_initial::Bool=true)
+                    params=Dict{String,Any}(), include_initial::Bool=true, web_dir=nothing)
     @assert size(M0, 1) == 35 "M0 must be (35,nx,ny,nz)"
     @assert snapshot_interval >= 1 "snapshot_interval must be >= 1"
     multigpu = comm !== nothing
@@ -113,6 +115,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     if writer
         jf["meta/n_snapshots"] = snap
         close(jf)
+        maybe_export_web(snapshot_filename, web_dir)
         return snapshot_filename
     end
     return nothing
