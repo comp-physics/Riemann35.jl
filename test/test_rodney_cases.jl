@@ -264,10 +264,13 @@ end
         tup    = collect(Riemann35.bgk_relax_tup(ntuple(i -> Mtest[i], 35), Float64(dt), Float64(Kn)))
         @test maximum(abs.(tup .- legacy) ./ max.(abs.(legacy), 1e-300)) < 1e-12
     end
-    # Kn=Inf: e=1, and MG - 1.0*(MG - M) is a near-no-op with the same FP
-    # cancellation as legacy collision35 — assert exact parity with legacy.
+    # Kn=Inf: e=1, and MG - 1.0*(MG - M) exposes the last-ulp difference between
+    # the two Maxwellian construction paths (from_recon_vars_dev vs
+    # InitializeM4_35) — bitwise-equal on some platforms but not all (CI showed
+    # 1-ulp differences), so assert the same 1e-12 relative parity as above.
     tup_inf = collect(Riemann35.bgk_relax_tup(ntuple(i -> Mtest[i], 35), 1e-2, Inf))
-    @test tup_inf == collision35(Mtest, 1e-2, Inf)
+    legacy_inf = collision35(Mtest, 1e-2, Inf)
+    @test maximum(abs.(tup_inf .- legacy_inf) ./ max.(abs.(legacy_inf), 1e-300)) < 1e-12
     g0 = Riemann35.bgk_relax_tup(ntuple(i -> Mtest[i], 35), 1e-2, 0.0)
     g1 = Riemann35.bgk_relax_tup(g0, 1e-2, 0.0)
     @test maximum(abs.(collect(g1) .- collect(g0))) < 1e-13
