@@ -173,13 +173,15 @@ function simulation_runner(params)
     # Demo env: REPRO_PROJREC=1 in debug/run_ma100_demo.jl.
     ho_proj_first_order = get(params, :ho_proj_first_order, false)
 
-    # scheme (OPT-IN bundle, default :legacy): one switch for the vetted flag set.
-    #   :legacy      — historical bit-exact defaults (all opt-ins off)
+    # scheme (default :recommended as of 2026-07-02 — the graduation study in
+    # docs/design/scheme-graduation.md):
     #   :recommended — ho_pressure_recon + stage_bgk (machine-exact on uniform-p
-    #                  equilibria/contacts, same formal order, ~zero cost; evidence
-    #                  in docs/design/scheme-graduation.md)
-    # Individually passed flags override the bundle.
-    scheme = get(params, :scheme, :legacy)
+    #                  equilibria/contacts, same formal order, ~zero cost)
+    #   :legacy      — the historical bit-exact behavior (all opt-ins off); use
+    #                  this to reproduce pre-July-2026 results and MATLAB parity
+    # Individually passed flags override the bundle. Function-level golden /
+    # MATLAB-parity tests are unaffected (they do not go through params).
+    scheme = get(params, :scheme, :recommended)
     scheme in (:legacy, :recommended) ||
         error("unknown scheme=$scheme; available :legacy (default), :recommended")
 

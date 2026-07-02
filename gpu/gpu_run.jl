@@ -54,18 +54,20 @@ given, `M0` is this rank's z-slab interior and snapshots are the gathered global
 function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     snapshot_interval::Integer, snapshot_filename::AbstractString,
                     comm=nothing, halo::Int=2, dts=nothing, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
-                    scheme::Symbol=:legacy, pressure_recon=nothing, stage_bgk=nothing, Kn::Real=Inf,
+                    scheme::Symbol=:recommended, pressure_recon=nothing, stage_bgk=nothing, Kn::Real=Inf,
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
                     params=Dict{String,Any}(), include_initial::Bool=true, web_dir=nothing)
     @assert size(M0, 1) == 35 "M0 must be (35,nx,ny,nz)"
     @assert snapshot_interval >= 1 "snapshot_interval must be >= 1"
-    # scheme bundle (matches the CPU runner): :recommended defaults
-    # pressure_recon + stage_bgk on; explicit kwargs override. Evidence:
+    # scheme bundle (matches the CPU runner): :recommended (the default) turns on
+    # pressure_recon, and stage_bgk when a finite Kn is supplied (at the Kn=Inf
+    # collisionless default a stage-BGK pass is a physical no-op that would only
+    # add kernel launches and ulp churn). Explicit kwargs override. Evidence:
     # docs/design/scheme-graduation.md.
     scheme in (:legacy, :recommended) ||
-        throw(ArgumentError("unknown scheme=$scheme; available :legacy (default), :recommended"))
+        throw(ArgumentError("unknown scheme=$scheme; available :recommended (default), :legacy"))
     pressure_recon = pressure_recon === nothing ? (scheme === :recommended) : Bool(pressure_recon)
-    stage_bgk      = stage_bgk      === nothing ? (scheme === :recommended) : Bool(stage_bgk)
+    stage_bgk      = stage_bgk      === nothing ? (scheme === :recommended && isfinite(Kn)) : Bool(stage_bgk)
     multigpu = comm !== nothing
     if multigpu
         rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
