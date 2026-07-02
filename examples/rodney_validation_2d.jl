@@ -1,8 +1,8 @@
-# Rodney Fox's 2D uniform-pressure dense-bubble case (2026-07-02): cold dense
-# disk (rho=1000, T=1e-3) at the origin, ambient reference gas (rho=T=p=1)
-# flowing past at u=(Ma,0,0). Quasi-2D flow past an effectively rigid cold
-# cylinder with heat transfer; t <= 0.2 (dense gas barely moves). Copy BCs act
-# as crude in/outflow — keep tmax small enough that disturbances stay interior.
+# Rodney Fox's 2D uniform-pressure dense-bubble case — CPU/MPI driver.
+# Case definition lives in rodney2d_setup.jl (single source, shared with the
+# GPU driver pair). Quasi-2D flow past an effectively rigid cold cylinder with
+# heat transfer; copy BCs act as crude in/outflow — keep tmax small enough that
+# disturbances stay interior.
 #
 # Usage:
 #   julia --project=. examples/rodney_validation_2d.jl
@@ -11,31 +11,15 @@
 using MPI
 MPI.Initialized() || MPI.Init()
 using Riemann35
+include(joinpath(@__DIR__, "rodney2d_setup.jl"))
 
-Np    = parse(Int,     get(ENV, "RODNEY_NP",   "128"))   # Rodney's production run: 512
-Ma    = parse(Float64, get(ENV, "RODNEY_MA",   "1.0"))
-Kn    = parse(Float64, get(ENV, "RODNEY_KN",   "0.001"))
-tmax  = parse(Float64, get(ENV, "RODNEY_TMAX", "0.2"))
+k = rodney2d_knobs()
 rank0 = MPI.Comm_rank(MPI.COMM_WORLD) == 0
-
 rank0 && mkpath("output/runs")
-tag = "rodney2d_Ma$(Ma)_Kn$(Kn)_Np$(Np)"
+tag = rodney2d_tag(; k...)
 
-rho_in = 1000.0
-
-params = (
-    Nx = Np, Ny = Np, Nz = 4,
-    tmax = tmax, Kn = Kn, Ma = Ma, flag2D = 0, CFL = 1/3,
-    Nmom = 35, nnmax = 1_000_000,
-    dtmax = Kn / sqrt(rho_in),           # Rodney: resolve collisions in the dense bubble
-    rhol = 1.0, rhor = 1.0,              # required by the runner; unused by :bubble
-    T = 1.0, r110 = 0.0, r101 = 0.0, r011 = 0.0,
-    symmetry_check_interval = 100000, homogeneous_z = true, debug_output = false,
-    ic_type = :bubble, spatial_order = 2,
-    rho_in = rho_in, rho_out = 1.0, bubble_radius = 0.125,   # r <= 1/8 disk, per his file
-    T_in = 1/rho_in, T_out = 1.0, u_out = Ma,   # uniform p=1, ambient flow
-    scheme = :recommended,   # pressure recon + stage BGK (docs/design/scheme-graduation.md)
-    snapshot_interval = 25,
+params = rodney2d_params(; k...,
+    snapshot_interval = rodney2d_snapshot_interval(; k...),
     snapshot_filename = "output/runs/$tag.jld2",
     web_dir = "output",
 )
