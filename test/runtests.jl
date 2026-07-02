@@ -36,6 +36,7 @@ const TOL = 1e-10
         include("test_hyqmom_closure_golden.jl")
         include("test_highorder_1d.jl")
         include("test_highorder_3d.jl")
+        include("test_rodney_cases.jl")
         include("test_numerical_schemes.jl")
         include("test_scaling_limiter.jl")
         include("test_riemann_solver.jl")

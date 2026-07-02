@@ -321,6 +321,36 @@ function simulation_runner(params)
                 end
             end
         end
+    elseif haskey(params, :ic_type) && params.ic_type == :riemann1d
+        # 1D Riemann problem along x, uniform in y/z: two Maxwellian states
+        # (rhol, ul, Tl) | (rhor, ur, Tr) split at x_interface. The default
+        # Tr = Tl*rhol/rhor gives UNIFORM PRESSURE — Rodney Fox's validation
+        # case (2026-07-02): at Kn=0 the exact Euler solution is a stationary
+        # contact, so any velocity/pressure deviation is pure numerical error.
+        # See docs/superpowers/specs/2026-07-02-rodney-validation-cases-design.md.
+        ul = get(params, :ul, 0.0)
+        Tl = get(params, :Tl, 1.0)
+        ur = get(params, :ur, 0.0)
+        Tr = get(params, :Tr, Tl * rhol / rhor)
+        x_interface = get(params, :x_interface, (xmin + xmax) / 2)
+        (rhol > 0 && rhor > 0 && Tl > 0 && Tr > 0) ||
+            error(":riemann1d requires rhol, rhor, Tl, Tr > 0 (got rhol=$rhol rhor=$rhor Tl=$Tl Tr=$Tr)")
+
+        Cl110 = r110 * sqrt(Tl * Tl); Cl101 = r101 * sqrt(Tl * Tl); Cl011 = r011 * sqrt(Tl * Tl)
+        Cr110 = r110 * sqrt(Tr * Tr); Cr101 = r101 * sqrt(Tr * Tr); Cr011 = r011 * sqrt(Tr * Tr)
+        M_left  = InitializeM4_35(rhol, ul, 0.0, 0.0, Tl, Cl110, Cl101, Tl, Cl011, Tl)
+        M_right = InitializeM4_35(rhor, ur, 0.0, 0.0, Tr, Cr110, Cr101, Tr, Cr011, Tr)
+
+        for kk in 1:nz
+            for ii in 1:nx
+                gi = i0i1[1] + ii - 1                     # global i index
+                xcoord = xmin + (gi - 0.5) * dx_global
+                Mside = (xcoord < x_interface) ? M_left : M_right
+                for jj in 1:ny
+                    M[ii + halo, jj + halo, kk, :] = Mside
+                end
+            end
+        end
     elseif haskey(params, :ic_type) && params.ic_type == :crossing_matlab
         # Faithful reproduction of the MATLAB main_crossing_3DHyQMOM35 IC:
         # two FULL 3D cubes of jet fluid (density rhol) diagonally offset about the
