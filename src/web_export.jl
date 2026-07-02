@@ -12,7 +12,8 @@ Public:
 
 Multiple cases can share one `outdir`: each `export_*` appends to `manifest.json`, so the
 viewer's Case dropdown lists them all by name. The reduced field volumes (18 physical
-fields per snapshot) are downsampled to `rescap` per axis (default 30) for responsiveness.
+fields per snapshot) are downsampled to `rescap` per axis (default 30) for responsiveness;
+quasi-2D cases (Nz <= 4) export one z-plane at the finer `rescap2d` in-plane cap (default 128).
 """
 module WebExport
 
@@ -66,15 +67,19 @@ function _rebuild_manifest(outdir)
 end
 
 # snaps :: Vector of (M, t), M sized (Nx,Ny,Nz,35)
-function _write_case(outdir, name, Ma, Kn, snaps; rescap=30)
+# Quasi-2D input (Nz <= 4, the thin z-uniform convention) exports a single
+# z-plane at the (much larger) `rescap2d` in-plane cap: a 2D heatmap can afford
+# far more pixels than a 3D point cloud, and the other z-planes are duplicates.
+function _write_case(outdir, name, Ma, Kn, snaps; rescap=30, rescap2d=128)
     NF = length(WEB_FIELDS)
     io = open(joinpath(outdir, "case_$(name).json"), "w")
     print(io, "{\"name\":\"$name\",\"Ma\":", _nn(Ma), ",\"Kn\":", _nn(Kn), ",\"snaps\":[")
     nx = ny = nz = vx = vy = vz = 0; nsnap = 0
     for (si, (M, t)) in enumerate(snaps)
         nx, ny, nz = size(M, 1), size(M, 2), size(M, 3)
-        sx = max(1, cld(nx, rescap)); sy = max(1, cld(ny, rescap)); sz = max(1, cld(nz, rescap))
-        ix = collect(1:sx:nx); iy = collect(1:sy:ny); iz = collect(1:sz:nz)
+        cap = nz <= 4 ? rescap2d : rescap
+        sx = max(1, cld(nx, cap)); sy = max(1, cld(ny, cap)); sz = max(1, cld(nz, cap))
+        ix = collect(1:sx:nx); iy = collect(1:sy:ny); iz = nz <= 4 ? [1] : collect(1:sz:nz)
         vx, vy, vz = length(ix), length(iy), length(iz)
         V = [Vector{Float64}(undef, vx*vy*vz) for _ in 1:NF]; p = 1
         for k in iz, jj in iy, ii in ix        # column-major: ii fastest
@@ -92,7 +97,7 @@ function _write_case(outdir, name, Ma, Kn, snaps; rescap=30)
 end
 
 """
-    export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30)
+    export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30, rescap2d=128)
 
 Write/append a browser-viewable case from in-memory snapshots. The bundle is placed in
 `outdir/viz/` (the viewer files live in their own dir, separate from raw run data);
@@ -102,22 +107,22 @@ returns that path. `snaps` is a vector of `(M, t)` with `M` sized `(Nx,Ny,Nz,35)
 # data like `runs/`). Passing a dir already named `viz` is used as-is (no `viz/viz`).
 _vizdir(dir) = basename(rstrip(String(dir), '/')) == "viz" ? String(dir) : joinpath(String(dir), "viz")
 
-function export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30)
+function export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30, rescap2d=128)
     vd = _vizdir(outdir)
     _ensure_assets(vd)
-    ns = _write_case(vd, string(name), Ma, Kn, snaps; rescap=rescap)
+    ns = _write_case(vd, string(name), Ma, Kn, snaps; rescap=rescap, rescap2d=rescap2d)
     _rebuild_manifest(vd)
     @info "web viewer bundle written" case=name viz=vd snapshots=ns serve="run ./serve.sh in $vd"
     vd
 end
 
 """
-    export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
+    export_jld2_web(jld2path, outdir; name=nothing, rescap=30, rescap2d=128)
 
 Convert a saved snapshot JLD2 into a browser-viewable case in `outdir` (case name
 defaults to the file's basename). Reads Ma/Kn from `meta/params` or the filename.
 """
-function export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
+function export_jld2_web(jld2path, outdir; name=nothing, rescap=30, rescap2d=128)
     nm = name === nothing ? replace(basename(jld2path), ".jld2" => "") : string(name)
     JLD2.jldopen(jld2path) do f
         haskey(f, "snapshots") || error("no /snapshots group in $jld2path")
@@ -129,7 +134,7 @@ function export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
         end
         sk = sort(collect(keys(f["snapshots"])))
         snaps = [(f["snapshots"][k]["M"], f["snapshots"][k]["t"]) for k in sk]
-        export_web(outdir, nm, snaps; Ma=Ma, Kn=Kn, rescap=rescap)
+        export_web(outdir, nm, snaps; Ma=Ma, Kn=Kn, rescap=rescap, rescap2d=rescap2d)
     end
 end
 
