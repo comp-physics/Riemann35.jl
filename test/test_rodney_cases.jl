@@ -113,11 +113,11 @@ end
     end
 end
 
-@testset "stationary contact, Kn=0: second-order error is bounded" begin
-    # Kn=0 ⇒ tc=0 ⇒ exact-exponential BGK relaxes instantly to the Maxwellian
-    # (exp(-dt/0)=0); the IC is already Maxwellian, so the exact solution is
-    # frozen. Every metric below is therefore PURE numerical error.
-    M, t, steps, grid = simulation_runner(rodney_params(tmax = 0.05))
+@testset "stationary contact, Kn=0: LEGACY second-order error is bounded" begin
+    # Pins the LEGACY scheme's error level (the package default is now
+    # :recommended, which is machine-exact — see later testsets). Every metric
+    # below is pure numerical error of the legacy order-2 scheme.
+    M, t, steps, grid = simulation_runner(rodney_params(tmax = 0.05, scheme = :legacy))
     @test steps >= 1
     if RODNEY_RANK == 0
         @test all(isfinite, M)
@@ -209,7 +209,9 @@ end
 # ---------------------------------------------------------------------------
 
 @testset "stationary contact, Kn=0: order-2 + ho_pressure_recon 13x better" begin
-    M, t, steps, grid = simulation_runner(rodney_params(tmax = 0.05, ho_pressure_recon = true))
+    # prec WITHOUT stage_bgk (pin :legacy so the bundle does not add stage_bgk)
+    M, t, steps, grid = simulation_runner(rodney_params(tmax = 0.05, scheme = :legacy,
+                                                        ho_pressure_recon = true))
     @test steps >= 1
     if RODNEY_RANK == 0
         maxvel = max(maximum(abs, _u(M)), maximum(abs, _v(M)), maximum(abs, _w(M)))
@@ -232,9 +234,10 @@ end
     end
 end
 
-@testset "ho_pressure_recon off is identical to never setting it" begin
-    M1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02))
-    M2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, ho_pressure_recon = false))
+@testset "ho_pressure_recon off is identical to never setting it (within :legacy)" begin
+    M1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy))
+    M2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy,
+                                                  ho_pressure_recon = false))
     if RODNEY_RANK == 0
         @test M1 == M2   # bitwise
     end
@@ -293,9 +296,10 @@ end
     end
 end
 
-@testset "stage_bgk off is identical to never setting it" begin
-    M1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02))
-    M2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, stage_bgk = false))
+@testset "stage_bgk off is identical to never setting it (within :legacy)" begin
+    M1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy))
+    M2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy,
+                                                  stage_bgk = false))
     if RODNEY_RANK == 0
         @test M1 == M2   # bitwise
     end
@@ -364,14 +368,14 @@ end
     @test abs(θdev - θref) < 1e-9    # P-form == C-form (same physical state)
 end
 
-@testset "scheme bundle: :recommended == explicit flags, :legacy == defaults (bitwise)" begin
+@testset "scheme bundle: default == :recommended == explicit flags (bitwise)" begin
     Mr1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :recommended))
     Mr2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, ho_pressure_recon = true, stage_bgk = true))
-    Ml1, _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy))
-    Ml2, _, _, _ = simulation_runner(rodney_params(tmax = 0.02))
+    Md,  _, _, _ = simulation_runner(rodney_params(tmax = 0.02))                     # package default
+    Ml,  _, _, _ = simulation_runner(rodney_params(tmax = 0.02, scheme = :legacy))
     if RODNEY_RANK == 0
         @test Mr1 == Mr2
-        @test Ml1 == Ml2
-        @test Mr1 != Ml1     # the bundle actually changes the scheme
+        @test Md  == Mr1     # the DEFAULT is the recommended scheme
+        @test Mr1 != Ml      # and :legacy still reproduces the old behavior
     end
 end

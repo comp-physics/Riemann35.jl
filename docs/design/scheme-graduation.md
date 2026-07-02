@@ -78,6 +78,7 @@ All second order; `prec` costs ~17% in the error constant on this case.
   realizability stress (see docs on `ho_realizability_limiter`), and it
   composes with the bundle when needed.
 
-`scheme = :legacy` (the default for now) reproduces the historical bit-exact
-behavior; flipping the package default to `:recommended` is a deliberate
-follow-up that regenerates golden files.
+**As of 2026-07-02 the package default IS `scheme = :recommended`** (on the CPU
+runner and `run_gpu_3d`). `scheme = :legacy` reproduces the historical bit-exact
+behavior (pre-July-2026 results, MATLAB parity). Function-level golden and
+MATLAB-parity tests are unaffected by the flip — they do not go through params.
