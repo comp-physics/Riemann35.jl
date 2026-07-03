@@ -63,7 +63,7 @@ function compute_halo_fluxes_and_wavespeeds_3d!(Fx::Array{Float64,4}, Fy::Array{
                 Mx, My, _ = Flux_closure35_3D(Mr)
                 Fx[i, jh, k, :] = Mx
                 Fy[i, jh, k, :] = My
-                _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
+                _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[1]])
                 vpxmin_ext[i, j, k] = min(v5x_min, v6x_min)
                 vpxmax_ext[i, j, k] = max(v5x_max, v6x_max)
             end
@@ -85,7 +85,7 @@ function compute_halo_fluxes_and_wavespeeds_3d!(Fx::Array{Float64,4}, Fy::Array{
                 Mx, My, _ = Flux_closure35_3D(Mr)
                 Fx[i, jh, k, :] = Mx
                 Fy[i, jh, k, :] = My
-                _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
+                _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[1]])
                 vpxmin_ext[i, j, k] = min(v5x_min, v6x_min)
                 vpxmax_ext[i, j, k] = max(v5x_max, v6x_max)
             end
@@ -107,7 +107,7 @@ function compute_halo_fluxes_and_wavespeeds_3d!(Fx::Array{Float64,4}, Fy::Array{
                 Mx, My, _ = Flux_closure35_3D(Mr)
                 Fx[ih, j, k, :] = Mx
                 Fy[ih, j, k, :] = My
-                _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
+                _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[2]])
                 vpymin_ext[i, j, k] = min(v5y_min, v6y_min)
                 vpymax_ext[i, j, k] = max(v5y_max, v6y_max)
             end
@@ -129,7 +129,7 @@ function compute_halo_fluxes_and_wavespeeds_3d!(Fx::Array{Float64,4}, Fy::Array{
                 Mx, My, _ = Flux_closure35_3D(Mr)
                 Fx[ih, j, k, :] = Mx
                 Fy[ih, j, k, :] = My
-                _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
+                _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[2]])
                 vpymin_ext[i, j, k] = min(v5y_min, v6y_min)
                 vpymax_ext[i, j, k] = max(v5y_max, v6y_max)
             end

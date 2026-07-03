@@ -95,6 +95,8 @@ include("autogen/M4toC4_3D.jl")
 include("autogen/S4toC4_3D_r.jl")
 
 # Moment operations
+include("moments/moment_indices.jl")
+using .MomentIndices
 include("moments/InitializeM4_35.jl")
 include("moments/M2CS4_35.jl")
 include("moments/Moments5_3D.jl")
@@ -122,12 +124,17 @@ include("realizability/realizability_oracle.jl")
 # Numerics
 include("numerics/small_eig.jl")
 include("numerics/closure_and_eigenvalues.jl")
+include("numerics/moment_correction_dev.jl")
+using .MomentCorrectionDev: correct_moments_dev
 include("numerics/eigenvalues6_hyperbolic_3D.jl")
 include("numerics/eigenvalues6z_hyperbolic_3D.jl")
 include("numerics/flux_closure_dev.jl")
 using .FluxClosureDev: flux_closure35_dev
 include("numerics/Flux_closure35_and_realizable_3D.jl")
 include("numerics/Flux_closure35_3D.jl")
+include("numerics/riemann_flux_dev.jl")
+using .RiemannFluxDev: riemann_flux_dev, rs_code
+const RoePS3Dev = RiemannFluxDev.RoePS3Dev   # stable path for tests/tools
 include("numerics/highorder_flux.jl")
 include("numerics/ssp_rk.jl")
 include("numerics/highorder_3d.jl")
@@ -143,7 +150,6 @@ include("mpi/setup_mpi_cartesian_2d.jl")
 include("mpi/setup_mpi_cartesian_3d.jl")
 include("mpi/halo_exchange_2d.jl")
 include("mpi/halo_exchange_3d.jl")
-include("mpi/compute_halo_fluxes_and_wavespeeds.jl")
 include("mpi/compute_halo_fluxes_and_wavespeeds_3d.jl")
 
 # Utilities

@@ -12,6 +12,13 @@ using MAT
 push!(LOAD_PATH, joinpath(@__DIR__, ".."))
 using Riemann35
 
+# GOLDEN POLICY (2026-07-03): comparisons are TOLERANCE-based, not bitwise —
+# the @fastmath autogen paths give compilers reassociation freedom, so bitwise
+# stability across toolchains/platforms is not guaranteed (a 1-ulp CI-vs-PACE
+# difference was observed in PR #10). Bitwise assertions are reserved for
+# same-code internal-consistency checks (e.g. serial == MPI, wrapper ==
+# device). Pure-reassociation refactors within this tolerance need NO golden
+# regeneration (e.g. the 2026-07-03 moment-correction unification, ~1.7e-13).
 const GOLDEN_TOL = 1e-10  # Tolerance for golden file comparisons
 const GOLDEN_DIR = joinpath(@__DIR__, "goldenfiles")
 

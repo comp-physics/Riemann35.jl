@@ -7,13 +7,13 @@ combined 6x6 + 1D-closure wave speeds, matching the interior flux path.
 function realize_and_speed(M::AbstractVector, axis::Int, Ma::Real)
     if axis == 1
         v6min, v6max, Mr = eigenvalues6_hyperbolic_3D(M, 1, 0, Ma)
-        _, v5min, v5max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
+        _, v5min, v5max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[1]])
     elseif axis == 2
         v6min, v6max, Mr = eigenvalues6_hyperbolic_3D(M, 2, 0, Ma)
-        _, v5min, v5max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
+        _, v5min, v5max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[2]])
     else
         v6min, v6max, Mr = eigenvalues6z_hyperbolic_3D(M, 0, Ma)
-        _, v5min, v5max = closure_and_eigenvalues(Mr[[1,16,20,23,25]])
+        _, v5min, v5max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[3]])
     end
     return Mr, min(v5min, v6min), max(v5max, v6max)
 end
@@ -52,22 +52,13 @@ function face_flux_1d(M_L::AbstractVector, M_R::AbstractVector, axis::Int, Ma::R
     FR = _phys_flux(MRr, axis)
     sL = min(lminL, lminR)
     sR = max(lmaxL, lmaxR)
-    rs = RIEMANN_SOLVER[]
-    if rs === :hll
-        if sL >= 0
-            return FL
-        elseif sR <= 0
-            return FR
-        else
-            return (sR .* FL .- sL .* FR .+ (sL*sR) .* (MRr .- MLr)) ./ (sR - sL)
-        end
-    elseif rs === :rusanov
-        # local Lax–Friedrichs (Rusanov): robust, more diffusive than HLL.
-        a = max(abs(sL), abs(sR))
-        return 0.5 .* (FL .+ FR) .- 0.5a .* (MRr .- MLr)
-    else
-        throw(ArgumentError("unknown riemann_solver=$(rs); available: :hll (default), :rusanov"))
-    end
+    # single-source flux + selector (src/numerics/riemann_flux_dev.jl; shared
+    # verbatim with the GPU _face_flux_core — byte-identical op order)
+    F = riemann_flux_dev(rs_code(RIEMANN_SOLVER[]), axis,
+                         NTuple{35,Float64}(MLr), NTuple{35,Float64}(MRr),
+                         NTuple{35,Float64}(FL), NTuple{35,Float64}(FR),
+                         Float64(sL), Float64(sR))
+    return collect(F)
 end
 
 """

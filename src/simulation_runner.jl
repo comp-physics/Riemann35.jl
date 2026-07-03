@@ -215,6 +215,8 @@ function simulation_runner(params)
     stage_bgk = get(params, :stage_bgk, scheme === :recommended)
 
     # riemann_solver (OPT-IN, default :hll): interface flux for the high-order path.
+    # :roeps3 = parity-split Roe (contact-exact by the parity theorem; sharper
+    # contacts, ~-8% Sod vs :hll in the 1D study). Single-source CPU/GPU.
     # :hll = original two-wave HLL (byte-identical default); :rusanov = robust local
     # Lax–Friedrichs fallback. (HLLC/HLLEM/kinetic removed — no benefit for the 35-moment
     # closure; see docs/riemann-solver-scope.md.)
@@ -667,9 +669,9 @@ function simulation_runner(params)
                     Fz[ih, jh, k, :] = Mz
                     Mnp[ih, jh, k, :] = Mr
                     
-                    _, v5xmin[i,j,k], v5xmax[i,j,k] = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
-                    _, v5ymin[i,j,k], v5ymax[i,j,k] = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
-                    _, v5zmin[i,j,k], v5zmax[i,j,k] = closure_and_eigenvalues(Mr[[1,16,20,23,25]])
+                    _, v5xmin[i,j,k], v5xmax[i,j,k] = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[1]])
+                    _, v5ymin[i,j,k], v5ymax[i,j,k] = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[2]])
+                    _, v5zmin[i,j,k], v5zmax[i,j,k] = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[3]])
                     
                     vpxmin[i,j,k] = min(v5xmin[i,j,k], v6xmin[i,j,k])
                     vpxmax[i,j,k] = max(v5xmax[i,j,k], v6xmax[i,j,k])
