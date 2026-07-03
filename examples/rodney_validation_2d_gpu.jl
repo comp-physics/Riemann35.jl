@@ -8,12 +8,13 @@
 using CUDA, Printf
 include(joinpath(@__DIR__, "..", "gpu", "gpu_run.jl"))
 using .GPURun
+include(joinpath(@__DIR__, "rodney2d_setup.jl"))   # shared meta schema + dt helper (pure Base)
 
 dir = get(ENV, "RODNEY_GPU_DATA", "output/rodney2d_gpu")
-meta  = readlines(joinpath(dir, "meta.txt"))
-Np    = parse(Int, meta[1]);     nz = parse(Int, meta[2]); nstep = parse(Int, meta[3])
-dx    = parse(Float64, meta[4]); Ma = parse(Float64, meta[5]); Kn = parse(Float64, meta[6])
-tmax  = parse(Float64, meta[7]); snap_int = parse(Int, meta[8]); tag = meta[9]
+m     = rodney2d_read_meta(joinpath(dir, "meta.txt"))
+Np    = parse(Int, m["Np"]);     nz = parse(Int, m["nz"]); nstep = parse(Int, m["nstep"])
+dx    = parse(Float64, m["dx"]); Ma = parse(Float64, m["Ma"]); Kn = parse(Float64, m["Kn"])
+tmax  = parse(Float64, m["tmax"]); snap_int = parse(Int, m["snap_interval"]); tag = m["tag"]
 
 rd(f) = collect(reinterpret(Float64, read(joinpath(dir, f))))
 M0  = reshape(rd("M0.f64"), 35, Np, Np, nz)
@@ -29,10 +30,9 @@ probe = GPURun.Timestep3DGPU.march3d_gpu!(CuArray(M0), dx, Ma, 1; order = 2, vac
 @printf("CFL dt = %.3e, staged dt = %.3e (margin %.2fx)  [%s]\n",
         probe[1], dts[1], probe[1] / dts[1], CUDA.name(CUDA.device()))
 if dts[1] > 0.9 * probe[1]
-    dt = 0.9 * probe[1]
-    nstep = ceil(Int, tmax / dt)
-    dts = fill(dt, nstep); dts[end] = tmax - (nstep - 1) * dt
-    @printf("dt CFL-limited: rebuilt sequence at dt = %.3e (%d steps)\n", dt, nstep)
+    dts = rodney2d_dts(tmax, 0.9 * probe[1])
+    nstep = length(dts)
+    @printf("dt CFL-limited: rebuilt sequence at dt = %.3e (%d steps)\n", dts[1], nstep)
 end
 @assert dts[1] <= probe[1] "staged dt violates CFL"
 

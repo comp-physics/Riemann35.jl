@@ -47,3 +47,30 @@ function rodney2d_params(; Np, Ma, Kn, tmax, kw...)
         kw...,
     )
 end
+
+# Constant-dt sequence covering [0, tmax] with a trimmed final step; shared by
+# the prep stage (collision-cap dt) and the GPU driver's CFL-limited rebuild.
+function rodney2d_dts(tmax, dt)
+    nstep = ceil(Int, tmax / dt)
+    dts = fill(Float64(dt), nstep)
+    dts[end] = tmax - (nstep - 1) * dt
+    return dts
+end
+
+# Shared meta schema for the prep -> GPU-driver handoff (key=value lines,
+# order-independent). Both stages include this file, so the schema exists once.
+function rodney2d_write_meta(path; kv...)
+    open(path, "w") do io
+        for (k, v) in kv
+            println(io, k, "=", v)
+        end
+    end
+end
+function rodney2d_read_meta(path)
+    d = Dict{String,String}()
+    for ln in eachline(path)
+        k, v = split(ln, "="; limit = 2)
+        d[strip(k)] = strip(v)
+    end
+    return d
+end

@@ -17,27 +17,20 @@ p = rodney2d_params(; k..., tmax = 0.0)   # zero steps -> the gathered IC
 M, _, _, _ = simulation_runner(p)         # (Nx,Ny,Nz,35)
 M0 = permutedims(M, (4, 1, 2, 3))         # (35,nx,ny,nz) device layout
 
-# Rodney's dt cap is binding for this case, so the dt sequence is constant with
-# a trimmed final step (his own code takes dt = min(CFL dt, dtmax) and lands on
-# dtmax too). The GPU driver asserts the cap really does sit below the CFL dt.
+# Rodney's dt cap: constant sequence with a trimmed final step (his own code
+# takes dt = min(CFL dt, dtmax); the GPU driver rebuilds the sequence if the
+# cap turns out not to be binding at fine resolution).
 dt = rodney2d_dtmax(k.Kn)
-nstep = ceil(Int, k.tmax / dt)
-dts = fill(dt, nstep)
-dts[end] = k.tmax - (nstep - 1) * dt
+dts = rodney2d_dts(k.tmax, dt)
 
 dir = get(ENV, "RODNEY_GPU_DATA", "output/rodney2d_gpu")
 mkpath(dir)
-open(joinpath(dir, "meta.txt"), "w") do io
-    println(io, k.Np)
-    println(io, size(M0, 4))
-    println(io, nstep)
-    println(io, 1.0 / k.Np)                          # dx (domain is [-0.5,0.5])
-    println(io, k.Ma)
-    println(io, k.Kn)
-    println(io, k.tmax)
-    println(io, rodney2d_snapshot_interval(; k...))
-    println(io, rodney2d_tag(; k...))
-end
+rodney2d_write_meta(joinpath(dir, "meta.txt");
+    Np = k.Np, nz = size(M0, 4), nstep = length(dts),
+    dx = 1.0 / k.Np,                                 # domain is [-0.5,0.5]
+    Ma = k.Ma, Kn = k.Kn, tmax = k.tmax,
+    snap_interval = rodney2d_snapshot_interval(; k...),
+    tag = rodney2d_tag(; k...))
 write(joinpath(dir, "M0.f64"), M0)
 write(joinpath(dir, "dts.f64"), dts)
-println("prep done: $dir  (Np=$(k.Np), nstep=$nstep, dt=$dt)")
+println("prep done: $dir  (Np=$(k.Np), nstep=$(length(dts)), dt=$dt)")
