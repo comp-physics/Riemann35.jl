@@ -20,12 +20,21 @@ M0  = reshape(rd("M0.f64"), 35, Np, Np, nz)
 dts = rd("dts.f64")
 @assert length(dts) == nstep
 
-# CFL probe: one adaptive step on a scratch copy returns the local-CFL dt; the
-# fixed collision-cap dt must sit below it or the fixed sequence is invalid.
+# CFL probe: one adaptive step on a scratch copy returns the local-CFL dt.
+# At coarse grids Rodney's collision cap is binding; at fine grids (~1024^2+)
+# the CFL dt drops below the cap — rebuild the constant sequence at 0.9x the
+# probed CFL dt (his own stepping is dt = min(CFL dt, dtmax) too; the 0.9
+# absorbs transient wave-speed growth the IC-time probe can't see).
 probe = GPURun.Timestep3DGPU.march3d_gpu!(CuArray(M0), dx, Ma, 1; order = 2, vacuum_floor = 0.0)
-@printf("CFL dt = %.3e, fixed dt = %.3e (margin %.1fx)  [%s]\n",
+@printf("CFL dt = %.3e, staged dt = %.3e (margin %.2fx)  [%s]\n",
         probe[1], dts[1], probe[1] / dts[1], CUDA.name(CUDA.device()))
-@assert dts[1] <= probe[1] "fixed dt violates CFL"
+if dts[1] > 0.9 * probe[1]
+    dt = 0.9 * probe[1]
+    nstep = ceil(Int, tmax / dt)
+    dts = fill(dt, nstep); dts[end] = tmax - (nstep - 1) * dt
+    @printf("dt CFL-limited: rebuilt sequence at dt = %.3e (%d steps)\n", dt, nstep)
+end
+@assert dts[1] <= probe[1] "staged dt violates CFL"
 
 mkpath("output/runs")
 out = "output/runs/$(tag)_gpu.jld2"
