@@ -15,6 +15,35 @@ module RiemannFluxDev
 
 include(joinpath(@__DIR__, "roeps3_dev.jl"))
 using .RoePS3Dev: roeps3_diss_dev
+using .RoePS3Dev.MomentIndices: MARG_IDX
+
+# standardized shape parameters (q̂ = central-3rd/σ³, K = central-4th/σ⁴) of a
+# 5-moment marginal chain — the dimensionless "is this side Maxwellian-like,
+# and does the shape match the other side" numbers used by the contact gate.
+@inline function _marg_shape(w1, w2, w3, w4, w5)
+    u = w2 / w1
+    c2 = w3 / w1 - u * u
+    c2 > 0.0 || return false, 0.0, 0.0
+    m3c = w4 / w1 - 3u * (w3 / w1) + 2u^3
+    m4c = w5 / w1 - 4u * (w4 / w1) + 6u^2 * (w3 / w1) - 3u^4
+    s3 = c2 * sqrt(c2)
+    return true, m3c / s3, m4c / (c2 * c2)
+end
+
+# necessary realizability of a 35-moment state via its three axis marginals:
+# ρ > 0, σ² > 0 and the Hamburger bound K ≥ 1 + q̂² on each 5-moment chain.
+# Cheap, device-safe; catches every poison mode diagnosed on the Ma=100
+# crossing jets (negative mass, high-moment kicks below the moment cone).
+@inline function _state_realizable(m::NTuple{35,Float64})
+    (isfinite(m[1]) && m[1] > 0.0) || return false
+    for ax in 1:3
+        idx = MARG_IDX[ax]
+        ok, qh, K = _marg_shape(m[idx[1]], m[idx[2]], m[idx[3]], m[idx[4]], m[idx[5]])
+        (ok && isfinite(K) && isfinite(qh) && K - 1.0 - qh * qh > 0.0) || return false
+    end
+    return true
+end
+
 
 export riemann_flux_dev, rs_code
 
@@ -37,11 +66,82 @@ rs_code(s::Symbol) =
         end
     end
     if rs == 2
-        # RoePS3 parity-split dissipation (roeps3_dev.jl)
-        D = roeps3_diss_dev(MLr, MRr, axis, sL, sR)
-        return ntuple(Val(35)) do j
-            0.5 * (FL[j] + FR[j]) - 0.5 * D[j]
+        # RoePS3 parity-split treatment, applied ONLY at contact-like faces
+        # (small velocity and pressure jumps relative to the wave scale) —
+        # exactly where its validated benefits live (contact exactness +
+        # sharpness, the parity theorem). Everywhere else: HLL. Central-form
+        # scalar dissipation is NOT robust at violently asymmetric faces —
+        # the Ma=100 crossing-jets stress test kills it (and the pre-existing
+        # :rusanov) in 2 steps, vacuum floor or not: HLL survives because its
+        # dissipation carries the dF-proportional upwinding term.
+        if sL < 0.0 && sR > 0.0
+            # CONTACT gate: the parity-split treatment is applied only where a
+            # true contact structure exists across the face —
+            #   (i)  the FULL velocity vector continuous (normal-only admitted
+            #        the crossing-jets shear faces);
+            #   (ii) the pressure continuous;
+            #   (iii) the STANDARDIZED SHAPE (q̂ = heat flux/σ³, K = kurtosis)
+            #        of the face-normal marginal continuous. A contact joins
+            #        two near-equilibrium states: q̂≈0, K≈3 on BOTH sides, so
+            #        this costs nothing there. The Ma=100 crossing-jets
+            #        interpenetration faces pass (i)+(ii) exactly (same ρ,u,p)
+            #        but carry O(1) jumps in q̂ and K (different beam mixes →
+            #        bimodal marginals, K≈1.4); through the wave-resolved
+            #        matrix dissipation such a jump feeds an ANTI-diffusive
+            #        mass-row term ~|λ|Δw₄/σ³ that dwarfs a·Δρ by ~1e7 and
+            #        drives near-vacuum densities negative in 3 steps
+            #        (diagnosed face-by-face, 16³ reproducer, 2026-07-03).
+            wjump = 0.05 * (sR - sL)
+            uL1 = MLr[2] / MLr[1];  uR1 = MRr[2] / MRr[1]
+            uL2 = MLr[6] / MLr[1];  uR2 = MRr[6] / MRr[1]
+            uL3 = MLr[16] / MLr[1]; uR3 = MRr[16] / MRr[1]
+            pL = (MLr[3] + MLr[10] + MLr[20]) / 3 -
+                 (MLr[2]^2 + MLr[6]^2 + MLr[16]^2) / (3 * MLr[1]^2) * MLr[1]
+            pR = (MRr[3] + MRr[10] + MRr[20]) / 3 -
+                 (MRr[2]^2 + MRr[6]^2 + MRr[16]^2) / (3 * MRr[1]^2) * MRr[1]
+            idx = MARG_IDX[axis]
+            okL, qhL, KL = _marg_shape(MLr[idx[1]], MLr[idx[2]], MLr[idx[3]],
+                                       MLr[idx[4]], MLr[idx[5]])
+            okR, qhR, KR = _marg_shape(MRr[idx[1]], MRr[idx[2]], MRr[idx[3]],
+                                       MRr[idx[4]], MRr[idx[5]])
+            if abs(uR1 - uL1) <= wjump && abs(uR2 - uL2) <= wjump &&
+               abs(uR3 - uL3) <= wjump &&
+               abs(pR - pL) <= 0.2 * min(pL, pR) && pL > 0 && pR > 0 &&
+               okL && okR && abs(qhR - qhL) <= 0.5 && abs(KR - KL) <= 0.5
+                D = roeps3_diss_dev(MLr, MRr, axis, sL, sR)
+                ok = true
+                for j in 1:35
+                    isfinite(D[j]) || (ok = false; break)
+                end
+                if ok
+                    Fhat = ntuple(Val(35)) do j
+                        0.5 * (FL[j] + FR[j]) - 0.5 * D[j]
+                    end
+                    # REALIZABILITY BACKSTOP (the literature recipe: limit
+                    # toward a realizability-preserving baseline flux): accept
+                    # the parity-split flux only if both HLL-form intermediate
+                    # states  m*_L = m_L + (F̂−F_L)/s_L,  m*_R = m_R + (F̂−F_R)/s_R
+                    # stay in the moment cone (necessary marginal conditions).
+                    # HLL passes by construction (both equal the Riemann-fan
+                    # average); at an exact contact F̂ is the exact flux whose
+                    # intermediate states are physical — so exactness is kept.
+                    # This is what actually protects the near-vacuum cells: on
+                    # the Ma=100 crossing jets, gate-admitted faces still fed
+                    # >10x high-moment kicks to ρ~1e-3 cells (non-realizable →
+                    # closure wave speeds explode → NaN by step 3).
+                    mstarL = ntuple(Val(35)) do j
+                        MLr[j] + (Fhat[j] - FL[j]) / sL
+                    end
+                    mstarR = ntuple(Val(35)) do j
+                        MRr[j] + (Fhat[j] - FR[j]) / sR
+                    end
+                    if _state_realizable(mstarL) && _state_realizable(mstarR)
+                        return Fhat
+                    end
+                end
+            end
         end
+        # fall through to HLL
     end
     # HLL (default)
     if sL >= 0.0

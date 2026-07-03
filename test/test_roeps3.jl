@@ -60,6 +60,59 @@ using Riemann35.RoePS3Dev: roeps3_diss_dev, _marg_eigen5, _vandermonde_solve5!
         end
     end
 
+    @testset "poison face routed to HLL (shape gate + realizability backstop)" begin
+        # The worst gate-fired face captured on the Ma=100 crossing-jets kill
+        # (16^3 reproducer, 2026-07-03): rho/u/p continuous to 1e-6 but ~48%
+        # jumps in the 3rd/4th-order x-marginal moments (different mixes of
+        # two counter-streaming beams; kurtosis 1.78 vs 1.09). The wave-split
+        # dissipation here put an anti-diffusive -0.31 in the MASS row against
+        # drho = 2.6e-8 — 1e7x the Rusanov bound — and killed the run in 3
+        # steps. The flux MUST route this face to HLL.
+        ML = (0.036202114813959956, -5.573644655450923e-7, 142.7503137104818,
+              -7898.911964371504, 999961.9684727857, -0.0028017859540235166,
+              142.62382520846108, -7902.958539427523, 999687.1177882002,
+              142.96790502915647, -7933.011847405899, 1.0027068374863835e6,
+              -7937.117830204303, 1.0024362207271369e6, 1.0054611712939047e6,
+              0.002800638209395703, 142.59120266437313, -7879.062226314581,
+              998236.2097305928, 143.03234941002378, -7892.439621415258,
+              1.0007159379035836e6, -7872.482462225589, 998984.7039345226,
+              1.001472412376428e6, 142.75820500502283, -7899.358214130146,
+              1.0000177776840269e6, -7913.152704724206, 1.0009778951137232e6,
+              1.0027643095322745e6, -7896.468333401173, 1.0004374049952858e6,
+              1.0007691641190496e6, 1.0034609489505584e6)
+        MR = (0.03620214052497041, -5.573648613894697e-7, 142.75030035933113,
+              2631.2097945730193, 611387.1876379917, -0.0028017879438726498,
+              142.5912039898323, 2617.231627436366, 610502.1950244632,
+              143.03236660449994, 2614.3382305630853, 612188.4402291763,
+              2600.264190797183, 611302.1486446162, 612993.8989391038,
+              0.002800640198429764, 142.62383733634283, 2639.9243238734803,
+              611049.1515955298, 142.96790395900874, 2657.2882239139317,
+              612725.9192152589, 2666.069238246919, 612390.0560045339,
+              614070.7341811847, 142.75821286844172, 2631.356984651248,
+              611421.1010201691, 2623.04409475001, 611847.551382906,
+              612221.5208406678, 2643.3095729172874, 611838.253855129,
+              612760.4079732308, 613525.7780347761)
+        sL, sR = -96.28614047470464, 72.68375591847992
+        FL = Tuple(Riemann35._phys_flux(collect(ML), 1))
+        FR = Tuple(Riemann35._phys_flux(collect(MR), 1))
+        Fr = Riemann35.riemann_flux_dev(2, 1, ML, MR, FL, FR, sL, sR)
+        Fh = Riemann35.riemann_flux_dev(0, 1, ML, MR, FL, FR, sL, sR)
+        @test all(Fr .=== Fh)
+
+        # shape params: the gate must reject on |dK| and |dqhat|
+        using Riemann35.RiemannFluxDev: _marg_shape, _state_realizable
+        okL, qhL, KL = _marg_shape(ML[1], ML[2], ML[3], ML[4], ML[5])
+        okR, qhR, KR = _marg_shape(MR[1], MR[2], MR[3], MR[4], MR[5])
+        @test okL && okR
+        @test abs(qhR - qhL) > 0.5 || abs(KR - KL) > 0.5
+
+        # realizability primitive: Maxwellian passes, sub-Hamburger fails
+        m = Tuple(InitializeM4_35(1.0, 0.1, 0, 0, 1.0, 0, 0, 1.0, 0, 1.0))
+        @test _state_realizable(m)
+        bad = ntuple(j -> j == 5 ? 0.9 * (m[3]^2 / m[1]) : m[j], 35)  # K < 1
+        @test !_state_realizable(bad)
+    end
+
     @testset "selector rejects unknown solver" begin
         old = Riemann35.RIEMANN_SOLVER[]
         try

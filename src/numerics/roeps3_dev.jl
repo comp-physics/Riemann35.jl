@@ -124,6 +124,13 @@ end
     spread = l5 - l1
     gap = min(min(l2 - l1, l3 - l2), min(l4 - l3, l5 - l4))
     (spread > 0 && gap > gap_tol * spread) || return false, 0.0, 0.0, 0.0, 0.0, 0.0
+    # MARGINAL-DOMINANCE criterion: the autonomous-1D wave split is only valid
+    # when the marginal spectrum spans a substantial fraction of the global
+    # wave-speed range. When cross-moment coupling dominates (e.g. Ma=100
+    # crossing jets: plane speeds ~25x the marginal ones), |lambda|-marginal
+    # dissipation is catastrophically under-scaled — fall back to the scalar
+    # sector coefficients (which keep contact exactness: constant even sector).
+    spread >= 0.5 * (sr - sl) || return false, 0.0, 0.0, 0.0, 0.0, 0.0
     # standardized central jump: ŵ_k = Σ_j C(k,j)(−u)^{k−j} Δw_j / σ^k
     d1 = wR1 - wL1; d2 = wR2 - wL2; d3 = wR3 - wL3; d4 = wR4 - wL4; d5 = wR5 - wL5
     s2 = sig * sig; s3 = s2 * sig; s4 = s3 * sig
@@ -158,6 +165,8 @@ end
     r2 = u^2 * D0 + 2u * sig * D1 + s2 * D2
     r3 = u^3 * D0 + 3u^2 * sig * D1 + 3u * s2 * D2 + s3 * D3
     r4 = u^4 * D0 + 4u^3 * sig * D1 + 6u^2 * s2 * D2 + 4u * s3 * D3 + s4 * D4
+    (isfinite(r0) && isfinite(r1) && isfinite(r2) && isfinite(r3) && isfinite(r4)) ||
+        return false, 0.0, 0.0, 0.0, 0.0, 0.0
     return true, r0, r1, r2, r3, r4
 end
 
