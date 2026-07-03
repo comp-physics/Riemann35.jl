@@ -52,31 +52,13 @@ function face_flux_1d(M_L::AbstractVector, M_R::AbstractVector, axis::Int, Ma::R
     FR = _phys_flux(MRr, axis)
     sL = min(lminL, lminR)
     sR = max(lmaxL, lmaxR)
-    rs = RIEMANN_SOLVER[]
-    if rs === :hll
-        if sL >= 0
-            return FL
-        elseif sR <= 0
-            return FR
-        else
-            return (sR .* FL .- sL .* FR .+ (sL*sR) .* (MRr .- MLr)) ./ (sR - sL)
-        end
-    elseif rs === :rusanov
-        # local Lax–Friedrichs (Rusanov): robust, more diffusive than HLL.
-        a = max(abs(sL), abs(sR))
-        return 0.5 .* (FL .+ FR) .- 0.5a .* (MRr .- MLr)
-    elseif rs === :roeps3
-        # parity-split Roe (RoePS3): wave-resolved |λ| on the reflection-odd
-        # sector of the face-normal marginal block, constant q(u) on the even
-        # sector, scalar sector coefficients on the remaining components.
-        # Uniform-pressure contacts are preserved exactly (parity theorem);
-        # single source with the GPU path: src/numerics/roeps3_dev.jl.
-        D = roeps3_diss_dev(NTuple{35,Float64}(MLr), NTuple{35,Float64}(MRr),
-                            axis, Float64(sL), Float64(sR))
-        return 0.5 .* (FL .+ FR) .- 0.5 .* collect(D)
-    else
-        throw(ArgumentError("unknown riemann_solver=$(rs); available: :hll (default), :rusanov, :roeps3"))
-    end
+    # single-source flux + selector (src/numerics/riemann_flux_dev.jl; shared
+    # verbatim with the GPU _face_flux_core — byte-identical op order)
+    F = riemann_flux_dev(rs_code(RIEMANN_SOLVER[]), axis,
+                         NTuple{35,Float64}(MLr), NTuple{35,Float64}(MRr),
+                         NTuple{35,Float64}(FL), NTuple{35,Float64}(FR),
+                         Float64(sL), Float64(sR))
+    return collect(F)
 end
 
 """

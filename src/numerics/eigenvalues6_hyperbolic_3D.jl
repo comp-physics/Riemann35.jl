@@ -57,6 +57,14 @@ end
 """
     correct_moments_hyperbolic_3D(M)
 
+NOTE (DRY audit 2026-07-03): the GPU carries its own scalar port of this
+function (correct_moments_dev, gpu/wavespeed_dev.jl). They agree only to
+~1 ulp (7e-14 measured over 200 states) because this CPU path uses the
+autogen M2CS4_35/C4toM4_3D conversions while the device port re-derives the
+algebra with different association — the SAME deliberate split as
+closure_and_eigenvalues vs the shared recurrence: this side is bit-locked to
+the MATLAB-parity goldens, so unification is intentionally NOT done.
+
 Project the 35-moment vector onto a hyperbolic set (port of the correction in
 `eigenvalues6{x,y,z}_hyperbolic_3D.m`): zero the cross 3rd-order standardized
 moments, set S112=S110, S121=S101, S211=S011, floor S220/S202/S022 at 1/3,

@@ -52,8 +52,8 @@ include(joinpath(@__DIR__, "wavespeed_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "numerics", "flux_closure_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "roeps3_dev.jl"))
-using .RoePS3Dev: roeps3_diss_dev
+include(joinpath(@__DIR__, "..", "src", "numerics", "riemann_flux_dev.jl"))
+using .RiemannFluxDev: riemann_flux_dev, rs_code
 using .WavespeedDev: realize_and_speed_Mr_dev
 using .FluxClosureDev: flux_closure35_dev, flux_closure35_central_dev
 
@@ -217,32 +217,11 @@ end
     sL = min(lminL, lminR)
     sR = max(lmaxL, lmaxR)
 
-    if rs == 1
-        # Rusanov / local Lax-Friedrichs: 0.5(FL+FR) - 0.5*max(|sL|,|sR|)*(MR-ML)
-        a = max(abs(sL), abs(sR))
-        return ntuple(Val(35)) do j
-            0.5 * (FLall[off + j] + FRall[off + j]) - 0.5 * a * (MRr[j] - MLr[j])
-        end
-    end
-    if rs == 2
-        # RoePS3 parity-split dissipation (single source: src/numerics/roeps3_dev.jl)
-        D = roeps3_diss_dev(MLr, MRr, axis, sL, sR)
-        return ntuple(Val(35)) do j
-            0.5 * (FLall[off + j] + FRall[off + j]) - 0.5 * D[j]
-        end
-    end
-    # HLL (default)
-    if sL >= 0.0
-        return ntuple(j -> FLall[off + j], Val(35))
-    elseif sR <= 0.0
-        return ntuple(j -> FRall[off + j], Val(35))
-    else
-        den = sR - sL
-        ss  = sL * sR
-        return ntuple(Val(35)) do j
-            (sR * FLall[off + j] - sL * FRall[off + j] + ss * (MRr[j] - MLr[j])) / den
-        end
-    end
+    # single-source flux + selector (src/numerics/riemann_flux_dev.jl; shared
+    # verbatim with the CPU face_flux_1d — byte-identical op order)
+    return riemann_flux_dev(rs, axis, MLr, MRr,
+                            ntuple(j -> FLall[off + j], Val(35)),
+                            ntuple(j -> FRall[off + j], Val(35)), sL, sR)
 end
 
 @inline _cell(M, i::Int, j::Int, k::Int) =
@@ -524,9 +503,7 @@ function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
     @assert size(M) == (35, nx, ny, nz) "M must be (35,nx,ny,nz)"
     @assert size(R) == (35, nx, ny, nz) "R must be (35,nx,ny,nz)"
     Maf = Float64(Ma); dxf = Float64(dx); vacf = Float64(vacuum_floor); s3f = Float64(s3max)
-    rs = riemann_solver === :hll ? 0 : riemann_solver === :rusanov ? 1 :
-         riemann_solver === :roeps3 ? 2 :
-         throw(ArgumentError("unknown riemann_solver=$riemann_solver; available :hll (default), :rusanov, :roeps3"))
+    rs = rs_code(riemann_solver)   # single-source selector (riemann_flux_dev.jl)
     lim = limiter ? 1 : 0
     prec = pressure_recon
     fx = (nx + 1) * ny * nz; fy = (ny + 1) * nx * nz; fz = (nz + 1) * nx * ny

@@ -130,8 +130,9 @@ include("numerics/flux_closure_dev.jl")
 using .FluxClosureDev: flux_closure35_dev
 include("numerics/Flux_closure35_and_realizable_3D.jl")
 include("numerics/Flux_closure35_3D.jl")
-include("numerics/roeps3_dev.jl")
-using .RoePS3Dev: roeps3_diss_dev
+include("numerics/riemann_flux_dev.jl")
+using .RiemannFluxDev: riemann_flux_dev, rs_code
+const RoePS3Dev = RiemannFluxDev.RoePS3Dev   # stable path for tests/tools
 include("numerics/highorder_flux.jl")
 include("numerics/ssp_rk.jl")
 include("numerics/highorder_3d.jl")
