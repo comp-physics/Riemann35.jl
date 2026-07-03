@@ -95,6 +95,8 @@ include("autogen/M4toC4_3D.jl")
 include("autogen/S4toC4_3D_r.jl")
 
 # Moment operations
+include("moments/moment_indices.jl")
+using .MomentIndices
 include("moments/InitializeM4_35.jl")
 include("moments/M2CS4_35.jl")
 include("moments/Moments5_3D.jl")
@@ -145,7 +147,6 @@ include("mpi/setup_mpi_cartesian_2d.jl")
 include("mpi/setup_mpi_cartesian_3d.jl")
 include("mpi/halo_exchange_2d.jl")
 include("mpi/halo_exchange_3d.jl")
-include("mpi/compute_halo_fluxes_and_wavespeeds.jl")
 include("mpi/compute_halo_fluxes_and_wavespeeds_3d.jl")
 
 # Utilities

@@ -35,6 +35,9 @@ Pure addition under `gpu/`; not wired into production; fp64.
 """
 module WavespeedDev
 
+include(joinpath(@__DIR__, "..", "src", "numerics", "recurrence_dev.jl"))
+using .RecurrenceDev: recurrence5_dev
+
 include(joinpath(@__DIR__, "schur4.jl"))
 using .Schur4: schur4_realpart_minmax, ferrari_realpart_minmax
 
@@ -170,22 +173,9 @@ end
 # ---------------------------------------------------------------------------
 @inline function closure5_dev(w1, w2, w3, w4, w5)
     begin
-        a1  = w2 / w1
-        s33 = w3 - a1*w2
-        s34 = w4 - a1*w3
-        s35 = w5 - a1*w4
-        a2  = s34/s33 - w2/w1
-        b2  = s33 / w1
-        s44 = s35 - a2*s34 - b2*w3
-        b3  = s44 / s33
-        # Rodney Fox (2026-07): at large Ma, roundoff in the s_k -> m_k change of variables
-        # can make b(3) slightly NEGATIVE (unrealizable) even though the density is order 1.
-        # b(3) = H2 = 0 is the two-delta-function limit, so floor a negative b(3) to a tiny
-        # positive (~QMOM limit) rather than letting it produce spurious complex marginal
-        # eigenvalues. Matches the reset in his MATLAB `closure_and_eigenvalues.m` (line 37);
-        # gives cleaner high-Ma results (validated by RF at Ma=200). Does NOT occur on the
-        # Ma=100 r3d validation state (0/41472 marginals), so byte-identical there.
-        if b3 < 0.0; b3 = 1.0e-10; end
+        # shared single-source recurrence (src/numerics/recurrence_dev.jl),
+        # byte-identical operation order incl. Fox's b3 floor
+        a1, a2, b2, b3 = recurrence5_dev(w1, w2, w3, w4, w5)
         a3  = (a1 + a2) / 2
         b3  = b3 * 5.0 / 2.0          # b[N+1] *= (2N+1)/N = 5/2  (N=2)
         lo, _, hi, _ = eig3_realparts_dev(a1, b2, 0.0,  1.0, a2, b3,  0.0, 1.0, a3)

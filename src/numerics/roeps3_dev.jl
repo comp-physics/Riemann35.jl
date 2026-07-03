@@ -26,27 +26,12 @@ module RoePS3Dev
 
 using StaticArrays
 
-export roeps3_diss_dev, MARG_IDX, ODD_MASK
+include(joinpath(@__DIR__, "..", "moments", "moment_indices.jl"))
+using .MomentIndices: MARG_IDX, ODD_MASK
+include(joinpath(@__DIR__, "recurrence_dev.jl"))
+using .RecurrenceDev: recurrence5_dev
 
-# ---------------------------------------------------------------------------
-# canonical exponent table (i,j,k) for the 35 moments — single source for the
-# parity masks and marginal index sets.
-# ---------------------------------------------------------------------------
-const IJK = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-             (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),
-             (0,3,0),(1,3,0),(0,4,0),
-             (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),
-             (0,0,3),(1,0,3),(0,0,4),
-             (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),
-             (0,1,2),(1,1,2),(0,1,3),(0,2,2))
-
-# per-axis: is the face-normal exponent odd? (reflection parity of M_ijk)
-const ODD_MASK = (ntuple(q -> isodd(IJK[q][1]), 35),
-                  ntuple(q -> isodd(IJK[q][2]), 35),
-                  ntuple(q -> isodd(IJK[q][3]), 35))
-
-# per-axis marginal moment indices (m0..m4 of the face-normal marginal chain)
-const MARG_IDX = ((1, 2, 3, 4, 5), (1, 6, 10, 13, 15), (1, 16, 20, 23, 25))
+export roeps3_diss_dev
 
 # ---------------------------------------------------------------------------
 # closed-form spectrum of the 1D marginal Jacobian: Q2 roots (quadratic) plus
@@ -75,18 +60,8 @@ const MARG_IDX = ((1, 2, 3, 4, 5), (1, 6, 10, 13, 15), (1, 16, 20, 23, 25))
 end
 
 @inline function _marg_eigen5(w1, w2, w3, w4, w5)
-    # recurrence (as closure5_dev), returns 5 ascending eigenvalues + (u, σ)
-    a1 = w2 / w1
-    s33 = w3 - a1 * w2
-    s34 = w4 - a1 * w3
-    s35 = w5 - a1 * w4
-    a2 = s34 / s33 - w2 / w1
-    b2 = s33 / w1
-    s44 = s35 - a2 * s34 - b2 * w3
-    b3 = s44 / s33
-    if b3 < 0.0
-        b3 = 1.0e-10
-    end
+    # shared single-source recurrence; returns 5 ascending eigenvalues + (u, σ)
+    a1, a2, b2, b3 = recurrence5_dev(w1, w2, w3, w4, w5)
     a3 = (a1 + a2) / 2
     b3p = b3 * 5.0 / 2.0
     # Q2 pair

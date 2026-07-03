@@ -7,13 +7,13 @@ combined 6x6 + 1D-closure wave speeds, matching the interior flux path.
 function realize_and_speed(M::AbstractVector, axis::Int, Ma::Real)
     if axis == 1
         v6min, v6max, Mr = eigenvalues6_hyperbolic_3D(M, 1, 0, Ma)
-        _, v5min, v5max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
+        _, v5min, v5max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[1]])
     elseif axis == 2
         v6min, v6max, Mr = eigenvalues6_hyperbolic_3D(M, 2, 0, Ma)
-        _, v5min, v5max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
+        _, v5min, v5max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[2]])
     else
         v6min, v6max, Mr = eigenvalues6z_hyperbolic_3D(M, 0, Ma)
-        _, v5min, v5max = closure_and_eigenvalues(Mr[[1,16,20,23,25]])
+        _, v5min, v5max = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[3]])
     end
     return Mr, min(v5min, v6min), max(v5max, v6max)
 end

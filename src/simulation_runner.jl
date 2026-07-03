@@ -669,9 +669,9 @@ function simulation_runner(params)
                     Fz[ih, jh, k, :] = Mz
                     Mnp[ih, jh, k, :] = Mr
                     
-                    _, v5xmin[i,j,k], v5xmax[i,j,k] = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
-                    _, v5ymin[i,j,k], v5ymax[i,j,k] = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
-                    _, v5zmin[i,j,k], v5zmax[i,j,k] = closure_and_eigenvalues(Mr[[1,16,20,23,25]])
+                    _, v5xmin[i,j,k], v5xmax[i,j,k] = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[1]])
+                    _, v5ymin[i,j,k], v5ymax[i,j,k] = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[2]])
+                    _, v5zmin[i,j,k], v5zmax[i,j,k] = closure_and_eigenvalues(Mr[MomentIndices.MARG_VEC[3]])
                     
                     vpxmin[i,j,k] = min(v5xmin[i,j,k], v6xmin[i,j,k])
                     vpxmax[i,j,k] = max(v5xmax[i,j,k], v6xmax[i,j,k])
