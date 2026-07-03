@@ -57,6 +57,7 @@ const TOL = 1e-10
         include("test_numerical_accuracy.jl")
         include("test_s3max.jl")
         include("test_roeps3.jl")
+        include("test_moment_correction.jl")
     end
     
     # Integration tests (Julia vs MATLAB golden files)

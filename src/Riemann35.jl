@@ -124,6 +124,8 @@ include("realizability/realizability_oracle.jl")
 # Numerics
 include("numerics/small_eig.jl")
 include("numerics/closure_and_eigenvalues.jl")
+include("numerics/moment_correction_dev.jl")
+using .MomentCorrectionDev: correct_moments_dev
 include("numerics/eigenvalues6_hyperbolic_3D.jl")
 include("numerics/eigenvalues6z_hyperbolic_3D.jl")
 include("numerics/flux_closure_dev.jl")

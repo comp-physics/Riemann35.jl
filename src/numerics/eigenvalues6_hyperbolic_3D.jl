@@ -57,13 +57,12 @@ end
 """
     correct_moments_hyperbolic_3D(M)
 
-NOTE (DRY audit 2026-07-03): the GPU carries its own scalar port of this
-function (correct_moments_dev, gpu/wavespeed_dev.jl). They agree only to
-~1 ulp (7e-14 measured over 200 states) because this CPU path uses the
-autogen M2CS4_35/C4toM4_3D conversions while the device port re-derives the
-algebra with different association — the SAME deliberate split as
-closure_and_eigenvalues vs the shared recurrence: this side is bit-locked to
-the MATLAB-parity goldens, so unification is intentionally NOT done.
+UNIFIED (2026-07-03): delegates to the single-source `correct_moments_dev`
+(src/numerics/moment_correction_dev.jl), shared verbatim with the GPU
+wave-speed path. This changed the CPU result by ~1 ulp relative to the
+previous autogen-conversion formulation (7e-14 over 200 states, pure
+reassociation — verified by a 2000-state battery); the CI golden battery is
+tolerance-based (GOLDEN_TOL = 1e-10), so no golden regeneration was needed.
 
 Project the 35-moment vector onto a hyperbolic set (port of the correction in
 `eigenvalues6{x,y,z}_hyperbolic_3D.m`): zero the cross 3rd-order standardized
@@ -72,51 +71,7 @@ rebuild the central moments and convert back to raw moments. No realizability
 projection is applied here (matches the MATLAB reference).
 """
 function correct_moments_hyperbolic_3D(M::AbstractVector)
-    M000 = M[1]
-    umean = M[2]/M000; vmean = M[6]/M000; wmean = M[16]/M000
-    C4, S4 = M2CS4_35(M)
-
-    C200=C4[3]; C300=C4[4]; C400=C4[5]; C110=C4[7]
-    C310=C4[9]; C020=C4[10]; C220=C4[12]; C030=C4[13]; C130=C4[14]; C040=C4[15]
-    C101=C4[17]; C301=C4[19]; C002=C4[20]; C202=C4[22]; C003=C4[23]; C103=C4[24]; C004=C4[25]
-    C011=C4[26]; C111=C4[27]; C031=C4[31]; C013=C4[34]; C022=C4[35]
-
-    S110=S4[7]; S101=S4[17]; S011=S4[26]
-    S220=S4[12]; S202=S4[22]; S022=S4[35]
-
-    s22min = 1.0/3.0
-    # force real eigenvalues
-    S120=0.0; S210=0.0; S102=0.0; S201=0.0; S012=0.0; S021=0.0
-    S112=S110; S121=S101; S211=S011
-    S220 = max(S220, s22min); S202 = max(S202, s22min); S022 = max(S022, s22min)
-
-    sC200 = sqrt(max(0.0, C200)); sC020 = sqrt(max(0.0, C020)); sC002 = sqrt(max(0.0, C002))
-    C210 = S210*C200*sC020; C120 = S120*sC200*C020
-    C102 = S102*sC200*C002; C201 = S201*C200*sC002
-    C021 = S021*C020*sC002; C012 = S012*sC020*C002
-    C112 = S112*sC200*sC020*C002; C121 = S121*sC200*C020*sC002; C211 = S211*C200*sC020*sC002
-    C220 = S220*C200*C020; C202 = S202*C200*C002; C022 = S022*C020*C002
-
-    M5 = C4toM4_3D(M000, umean, vmean, wmean, C200, C110, C101, C020, C011, C002,
-                   C300, C210, C201, C120, C111, C102, C030, C021, C012, C003,
-                   C400, C310, C301, C220, C211, C202, C130, C121, C112, C103,
-                   C040, C031, C022, C013, C004)
-
-    return [M5[1,1,1],M5[2,1,1],M5[3,1,1],M5[4,1,1],M5[5,1,1],
-            M5[1,2,1],M5[2,2,1],M5[3,2,1],M5[4,2,1],
-            M5[1,3,1],M5[2,3,1],M5[3,3,1],
-            M5[1,4,1],M5[2,4,1],
-            M5[1,5,1],
-            M5[1,1,2],M5[2,1,2],M5[3,1,2],M5[4,1,2],
-            M5[1,1,3],M5[2,1,3],M5[3,1,3],
-            M5[1,1,4],M5[2,1,4],
-            M5[1,1,5],
-            M5[1,2,2],M5[2,2,2],M5[3,2,2],
-            M5[1,3,2],M5[2,3,2],
-            M5[1,4,2],
-            M5[1,2,3],M5[2,2,3],
-            M5[1,2,4],
-            M5[1,3,3]]
+    return collect(correct_moments_dev(M...))
 end
 
 function eigenvalues6_hyperbolic_3D(M::AbstractVector, axis::Int, flag2D::Int, Ma::Real; debug_output=false)
