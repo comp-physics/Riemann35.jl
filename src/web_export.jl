@@ -12,7 +12,9 @@ Public:
 
 Multiple cases can share one `outdir`: each `export_*` appends to `manifest.json`, so the
 viewer's Case dropdown lists them all by name. The reduced field volumes (18 physical
-fields per snapshot) are downsampled to `rescap` per axis (default 30) for responsiveness.
+fields per snapshot) are downsampled to `rescap` per axis (default 30) for responsiveness;
+quasi-2D cases (Nz <= 4) export one z-plane at the finer `rescap2d` in-plane cap (default 512).
+Cases are written as metadata JSON + one Float32 .bin per snapshot, fetched lazily by the viewer.
 """
 module WebExport
 
@@ -20,12 +22,20 @@ using JLD2
 
 export export_web, export_jld2_web, maybe_export_web
 
-const WEB_FIELDS = ["density","|velocity|","u","v","w","temperature","s110","s101","s011",
-                    "‖s‖","skewness","kurtosis","S2 margin","pressure","Mach","Tx","Ty","Tz"]
+# Field schema — the single source for the viewer (serialized to fields.json).
+# `s` (signed) selects the symmetric diverging colormap; `r` pins a fixed
+# color range. Order defines the .bin field-major layout.
+const WEB_FIELD_META = [
+    (n = "density",), (n = "|velocity|",), (n = "u", s = true), (n = "v", s = true),
+    (n = "w", s = true), (n = "temperature",), (n = "s110", s = true),
+    (n = "s101", s = true), (n = "s011", s = true), (n = "‖s‖", r = (0.0, 1.7321)),
+    (n = "skewness", s = true), (n = "kurtosis",), (n = "S2 margin",),
+    (n = "pressure",), (n = "Mach",), (n = "Tx",), (n = "Ty",), (n = "Tz",),
+]
+const WEB_FIELDS = [f.n for f in WEB_FIELD_META]
 const _ASSETS = joinpath(@__DIR__, "web")   # viewer.html, serve.sh
 
 _nf(x) = (r = round(Float64(x); digits=4); isfinite(r) ? r : 0.0)
-_j(v)  = string("[", join((_nf(x) for x in v), ","), "]")
 _nn(x) = (x === nothing || !(x isa Number) || !isfinite(x)) ? "null" : string(round(Float64(x); digits=4))
 
 # 35 raw moments (M4 canonical order) -> 18 physical fields (0 where vacuum/unrealizable).
@@ -52,7 +62,14 @@ function _ensure_assets(outdir)
     cp(joinpath(_ASSETS, "README.md"),   joinpath(outdir, "README.md");   force=true)
     try; chmod(joinpath(outdir, "serve.sh"), 0o755); catch; end
     open(joinpath(outdir, "fields.json"), "w") do io
-        print(io, "[\"", join(WEB_FIELDS, "\",\""), "\"]")
+        ent = map(WEB_FIELD_META) do f
+            e = "{\"name\":\"$(f.n)\""
+            get(f, :s, false) && (e *= ",\"signed\":true")
+            r = get(f, :r, nothing)
+            r === nothing || (e *= ",\"range\":[$(_nf(r[1])),$(_nf(r[2]))]")
+            e * "}"
+        end
+        print(io, "[", join(ent, ","), "]")
     end
 end
 
@@ -66,25 +83,47 @@ function _rebuild_manifest(outdir)
 end
 
 # snaps :: Vector of (M, t), M sized (Nx,Ny,Nz,35)
-function _write_case(outdir, name, Ma, Kn, snaps; rescap=30)
+#
+# Format 2 (the default for every case): the case JSON carries only metadata —
+# snapshot times, view dims, per-field global ranges — plus one raw Float32
+# (little-endian, field-major) .bin per snapshot that the viewer fetches
+# LAZILY as the user scrubs. Full in-plane resolution up to `rescap2d`
+# (default 512) for quasi-2D cases (Nz <= 4; single z-plane, the rest are
+# duplicates) and up to `rescap` per axis (default 30) for 3D point-cloud
+# views. A monolithic float-text JSON at 512^2 x 18 fields x ~20 snapshots
+# would be ~700MB — unloadable; f32 bins are 4x smaller and parse-free.
+function _write_case(outdir, name, Ma, Kn, snaps; rescap=30, rescap2d=512)
     NF = length(WEB_FIELDS)
-    io = open(joinpath(outdir, "case_$(name).json"), "w")
-    print(io, "{\"name\":\"$name\",\"Ma\":", _nn(Ma), ",\"Kn\":", _nn(Kn), ",\"snaps\":[")
-    nx = ny = nz = vx = vy = vz = 0; nsnap = 0
+    nx = ny = nz = 0; nsnap = length(snaps)
+    smeta = String[]
+    gl = fill(Inf, NF); gh = fill(-Inf, NF)
     for (si, (M, t)) in enumerate(snaps)
         nx, ny, nz = size(M, 1), size(M, 2), size(M, 3)
-        sx = max(1, cld(nx, rescap)); sy = max(1, cld(ny, rescap)); sz = max(1, cld(nz, rescap))
-        ix = collect(1:sx:nx); iy = collect(1:sy:ny); iz = collect(1:sz:nz)
+        cap = nz <= 4 ? rescap2d : rescap
+        sx = max(1, cld(nx, cap)); sy = max(1, cld(ny, cap)); sz = max(1, cld(nz, cap))
+        ix = collect(1:sx:nx); iy = collect(1:sy:ny); iz = nz <= 4 ? [1] : collect(1:sz:nz)
         vx, vy, vz = length(ix), length(iy), length(iz)
-        V = [Vector{Float64}(undef, vx*vy*vz) for _ in 1:NF]; p = 1
+        V = [Vector{Float32}(undef, vx*vy*vz) for _ in 1:NF]; p = 1
         for k in iz, jj in iy, ii in ix        # column-major: ii fastest
-            r = _fvec(@view M[ii, jj, k, :]); for q in 1:NF; V[q][p] = r[q]; end; p += 1
+            r = _fvec(@view M[ii, jj, k, :])
+            for q in 1:NF
+                V[q][p] = Float32(r[q])
+                r[q] < gl[q] && (gl[q] = r[q]); r[q] > gh[q] && (gh[q] = r[q])
+            end
+            p += 1
         end
-        print(io, si > 1 ? "," : "", "{\"t\":", round(Float64(t); digits=6), ",\"vn\":[$vx,$vy,$vz],\"F\":[",
-              join((_j(V[q]) for q in 1:NF), ","), "]}")
-        nsnap += 1
+        bin = "case_$(name)_s$(lpad(si - 1, 3, '0')).bin"
+        open(joinpath(outdir, bin), "w") do bio
+            for q in 1:NF; write(bio, V[q]); end
+        end
+        push!(smeta, string("{\"t\":", round(Float64(t); digits=6),
+                            ",\"vn\":[$vx,$vy,$vz],\"bin\":\"$bin\"}"))
     end
-    print(io, "]}"); close(io)
+    open(joinpath(outdir, "case_$(name).json"), "w") do io
+        print(io, "{\"name\":\"$name\",\"format\":2,\"Ma\":", _nn(Ma), ",\"Kn\":", _nn(Kn),
+              ",\"grange\":[", join(("[$(_nf(gl[q])),$(_nf(gh[q]))]" for q in 1:NF), ","), "]",
+              ",\"snaps\":[", join(smeta, ","), "]}")
+    end
     open(joinpath(outdir, "case_$(name).json.meta"), "w") do mio
         print(mio, "{\"file\":\"$name\",\"Ma\":$(_nn(Ma)),\"Kn\":$(_nn(Kn)),\"nx\":$nx,\"ny\":$ny,\"nz\":$nz,\"nsnap\":$nsnap}")
     end
@@ -92,7 +131,7 @@ function _write_case(outdir, name, Ma, Kn, snaps; rescap=30)
 end
 
 """
-    export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30)
+    export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30, rescap2d=512)
 
 Write/append a browser-viewable case from in-memory snapshots. The bundle is placed in
 `outdir/viz/` (the viewer files live in their own dir, separate from raw run data);
@@ -102,22 +141,22 @@ returns that path. `snaps` is a vector of `(M, t)` with `M` sized `(Nx,Ny,Nz,35)
 # data like `runs/`). Passing a dir already named `viz` is used as-is (no `viz/viz`).
 _vizdir(dir) = basename(rstrip(String(dir), '/')) == "viz" ? String(dir) : joinpath(String(dir), "viz")
 
-function export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30)
+function export_web(outdir, name, snaps; Ma=nothing, Kn=nothing, rescap=30, rescap2d=512)
     vd = _vizdir(outdir)
     _ensure_assets(vd)
-    ns = _write_case(vd, string(name), Ma, Kn, snaps; rescap=rescap)
+    ns = _write_case(vd, string(name), Ma, Kn, snaps; rescap=rescap, rescap2d=rescap2d)
     _rebuild_manifest(vd)
     @info "web viewer bundle written" case=name viz=vd snapshots=ns serve="run ./serve.sh in $vd"
     vd
 end
 
 """
-    export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
+    export_jld2_web(jld2path, outdir; name=nothing, rescap=30, rescap2d=512)
 
 Convert a saved snapshot JLD2 into a browser-viewable case in `outdir` (case name
 defaults to the file's basename). Reads Ma/Kn from `meta/params` or the filename.
 """
-function export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
+function export_jld2_web(jld2path, outdir; name=nothing, rescap=30, rescap2d=512)
     nm = name === nothing ? replace(basename(jld2path), ".jld2" => "") : string(name)
     JLD2.jldopen(jld2path) do f
         haskey(f, "snapshots") || error("no /snapshots group in $jld2path")
@@ -129,7 +168,7 @@ function export_jld2_web(jld2path, outdir; name=nothing, rescap=30)
         end
         sk = sort(collect(keys(f["snapshots"])))
         snaps = [(f["snapshots"][k]["M"], f["snapshots"][k]["t"]) for k in sk]
-        export_web(outdir, nm, snaps; Ma=Ma, Kn=Kn, rescap=rescap)
+        export_web(outdir, nm, snaps; Ma=Ma, Kn=Kn, rescap=rescap, rescap2d=rescap2d)
     end
 end
 

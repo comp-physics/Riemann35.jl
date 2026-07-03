@@ -39,7 +39,7 @@
 </div>
 <div id="wrap"><div id="plotA" class="pane"></div><div id="plotB" class="pane hide"></div></div>
 <script>
-var FN=[],SIGNED={2:1,3:1,4:1,6:1,7:1,8:1,10:1};
+var FN=[],FMETA=[],FI={},SIGNED={}; // populated from fields.json (exporter-owned schema)
 var view="som",field=0,logOn=false,lockOn=false,ilev=45,shells=1,iopac=55,saxis=2,spos=10,s3d=false,cmp=false;
 var PAN={A:{file:null,CUR:null,t:0,timer:null},B:{file:null,CUR:null,t:0,timer:null}};
 var linking=false;
@@ -57,17 +57,36 @@ function cspec(CUR,vals){
  var lo=base[0],hi=base[1];
  if(uselog){lo=Math.log10(Math.max(lo,1e-12));hi=Math.log10(Math.max(hi,1e-12));}
  var title=FN[field]+(uselog?" (log10)":"");
- if(field==9)return{vals:tv,cs:'Viridis',cmin:0,cmax:1.7321,title:title};
+ var fr=FMETA[field]&&FMETA[field].range;
+ if(fr)return{vals:tv,cs:'Viridis',cmin:fr[0],cmax:fr[1],title:title};
  if(signed){var M=Math.max(Math.abs(base[0]),Math.abs(base[1]))||1e-9;return{vals:tv,cs:'RdBu',cmin:-M,cmax:M,title:title};}
  return{vals:tv,cs:'Viridis',cmin:lo,cmax:hi,title:title};
 }
 function draw(P){
  var st=PAN[P],div=(P=='A'?'plotA':'plotB'); if(!st.CUR){return;}
- var s=st.CUR.snaps[st.t],vn=s.vn,nx=vn[0],ny=vn[1],nz=vn[2],arr=s.F[field],tr,lay;
+ var s=st.CUR.snaps[st.t]; if(!s.F){loadSnap(P,st.t,false);return;}
+ var vn=s.vn,nx=vn[0],ny=vn[1],nz=vn[2],arr=s.F[field],tr,lay;
+ var is2d=nz<=4; // quasi-2D convention: thin z-uniform dimension
  document.getElementById('tlab'+P).innerText=" t="+(s.t).toPrecision(3)+" ("+(st.t+1)+"/"+st.CUR.snaps.length+")";
- if(view=="som"){
-  var d=s.F[0],x=[],y=[],z=[],cv=[],col=s.F[field];
-  for(var i=0;i<d.length;i++){if(d[i]>5e-3){x.push(s.F[6][i]);y.push(s.F[7][i]);z.push(s.F[8][i]);cv.push(col[i]);}}
+ if(view=="som"&&is2d){
+  // 2D case: s101=s011=0 collapses the elliptope — show the x-marginal
+  // realizability plane (s300,s400) with the H200=0 boundary s400=1+s300^2.
+  var d=s.F[FI.density],xs=[],ys=[],cv=[],col=s.F[field],lim=nx*ny; // k=0 plane only (z-uniform)
+  var str=Math.max(1,Math.round(lim/65536));               // cap scatter at ~64k points
+  var Fsk=s.F[FI.skewness],Fku=s.F[FI.kurtosis];
+  for(var i=0;i<lim;i+=str){if(d[i]>5e-3){xs.push(Fsk[i]);ys.push(Fku[i]);cv.push(col[i]);}}
+  var cc=cspec(st.CUR,cv),bx=[],by=[];
+  var xr=rng(xs),xm=Math.max(Math.abs(xr[0]),Math.abs(xr[1]),1.2);
+  for(var q=0;q<=80;q++){var sk=-xm+2*xm*q/80;bx.push(sk);by.push(1+sk*sk);}
+  tr=[{type:'scatter',mode:'lines',x:bx,y:by,line:{dash:'dash',color:'#888'},hoverinfo:'skip',showlegend:false},
+      {type:'scattergl',mode:'markers',x:xs,y:ys,showlegend:false,
+       marker:{size:3,color:cc.vals,colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title,len:.7}}}];
+  lay={margin:{l:55,r:0,t:30,b:40},xaxis:{title:'skewness s300 (x-marginal)'},yaxis:{title:'kurtosis s400 (x-marginal)'},
+       title:{text:'moment space — dashed: H200=0 realizability boundary (s400 = 1 + s300²)',font:{size:12}}};
+ } else if(view=="som"){
+  var d=s.F[FI.density],x=[],y=[],z=[],cv=[],col=s.F[field];
+  var F110=s.F[FI.s110],F101=s.F[FI.s101],F011=s.F[FI.s011];
+  for(var i=0;i<d.length;i++){if(d[i]>5e-3){x.push(F110[i]);y.push(F101[i]);z.push(F011[i]);cv.push(col[i]);}}
   var cc=cspec(st.CUR,cv);
   tr=[Object.assign({z:SP},els),Object.assign({z:SM},els),
       {type:'scatter3d',mode:'markers',x:x,y:y,z:z,marker:{size:2,color:cc.vals,colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title,len:.7}}}];
@@ -81,40 +100,61 @@ function draw(P){
        colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title},caps:{x:{show:false},y:{show:false},z:{show:false}}}];
   lay={margin:{l:0,r:0,t:0,b:0},scene:{xaxis:{title:'x',range:[0,1]},yaxis:{title:'y',range:[0,1]},zaxis:{title:'z',range:[0,1]},aspectmode:'cube'}};
  } else {
-  var p2=Math.min(spos,vn[saxis]-1),cc=cspec(st.CUR,arr),grid=[],a,b,ax,bx;
+  var sax=is2d?2:saxis;
+  var p2=Math.min(is2d?0:spos,vn[sax]-1),cc=cspec(st.CUR,arr),grid=[],a,b,ax,bx,hlab,vlab;
   function val(i,j,k){return arr[i+nx*j+nx*ny*k];}
-  if(saxis==2){ax=nx;bx=ny;for(a=0;a<ax;a++){var rr=[];for(b=0;b<bx;b++)rr.push(val(a,b,p2));grid.push(rr);}}
-  else if(saxis==0){ax=ny;bx=nz;for(a=0;a<ax;a++){var rr=[];for(b=0;b<bx;b++)rr.push(val(p2,a,b));grid.push(rr);}}
-  else{ax=nx;bx=nz;for(a=0;a<ax;a++){var rr=[];for(b=0;b<bx;b++)rr.push(val(a,p2,b));grid.push(rr);}}
+  // rows = vertical axis, cols = horizontal axis (plotly heatmap z[row][col])
+  if(sax==2){ax=nx;bx=ny;hlab='x';vlab='y';for(b=0;b<bx;b++){var rr=[];for(a=0;a<ax;a++)rr.push(val(a,b,p2));grid.push(rr);}}
+  else if(sax==0){ax=ny;bx=nz;hlab='y';vlab='z';for(b=0;b<bx;b++){var rr=[];for(a=0;a<ax;a++)rr.push(val(p2,a,b));grid.push(rr);}}
+  else{ax=nx;bx=nz;hlab='x';vlab='z';for(b=0;b<bx;b++){var rr=[];for(a=0;a<ax;a++)rr.push(val(a,p2,b));grid.push(rr);}}
   var gtf = logOn&&!SIGNED[field] ? grid.map(function(r){return r.map(function(v){return Math.log10(Math.max(v,1e-12));});}) : grid;
-  if(s3d){ // slice as a colored plane in 3D
-   var xs=[],ys=[],zs=[];for(a=0;a<ax;a++){xs.push([]);ys.push([]);zs.push([]);for(b=0;b<bx;b++){
-     var P0=p2/Math.max(vn[saxis]-1,1),u=a/Math.max(ax-1,1),w=b/Math.max(bx-1,1);
-     if(saxis==2){xs[a].push(u);ys[a].push(w);zs[a].push(P0);}else if(saxis==0){xs[a].push(P0);ys[a].push(u);zs[a].push(w);}else{xs[a].push(u);ys[a].push(P0);zs[a].push(w);}}}
+  if(s3d&&!is2d){ // slice as a colored plane in 3D (grid rows = b, cols = a)
+   var xs=[],ys=[],zs=[];for(b=0;b<bx;b++){xs.push([]);ys.push([]);zs.push([]);for(a=0;a<ax;a++){
+     var P0=p2/Math.max(vn[sax]-1,1),u=a/Math.max(ax-1,1),w=b/Math.max(bx-1,1);
+     if(sax==2){xs[b].push(u);ys[b].push(w);zs[b].push(P0);}else if(sax==0){xs[b].push(P0);ys[b].push(u);zs[b].push(w);}else{xs[b].push(u);ys[b].push(P0);zs[b].push(w);}}}
    tr=[{type:'surface',x:xs,y:ys,z:zs,surfacecolor:gtf,colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title}}];
    lay={margin:{l:0,r:0,t:0,b:0},scene:{xaxis:{title:'x',range:[0,1]},yaxis:{title:'y',range:[0,1]},zaxis:{title:'z',range:[0,1]},aspectmode:'cube'}};
   } else {
-   tr=[{type:'heatmap',z:gtf,colorscale:cc.cs,zmin:cc.cmin,zmax:cc.cmax,colorbar:{title:cc.title}}];
-   lay={margin:{l:40,r:0,t:10,b:30},yaxis:{scaleanchor:'x'}};
+   var hx=[],vy=[];for(a=0;a<ax;a++)hx.push(a/Math.max(ax-1,1));for(b=0;b<bx;b++)vy.push(b/Math.max(bx-1,1));
+   tr=[{type:'heatmap',x:hx,y:vy,z:gtf,colorscale:cc.cs,zmin:cc.cmin,zmax:cc.cmax,colorbar:{title:cc.title}}];
+   lay={margin:{l:45,r:0,t:10,b:35},xaxis:{title:hlab},yaxis:{title:vlab,scaleanchor:'x'}};
   }
  }
  lay.uirevision='keep'; if(lay.scene)lay.scene.uirevision='keep';
  Plotly.react(div,tr,lay,{responsive:true});
+ if(st.CUR.format==2){var nx2=st.CUR.snaps[st.t+1];if(nx2&&!nx2.F&&!nx2._req)loadSnap(P,st.t+1,true);} // prefetch next
  var gd=document.getElementById(div);
  if(lay.scene && !gd._linked){gd._linked=true;gd.on('plotly_relayout',function(e){
    if(!cmp||linking||!('scene.camera' in e))return;linking=true;var o=(P=='A'?'plotB':'plotA');
    Plotly.relayout(o,{'scene.camera':e['scene.camera']}).then(function(){linking=false;});});}
 }
 function drawAll(){draw('A');if(cmp)draw('B');}
+// format 2: case JSON is metadata only (t, vn, bin filename, exporter-computed
+// grange); per-snapshot Float32 bins (field-major) are fetched lazily on draw.
+function loadSnap(P,ti,pre){var st=PAN[P],c=st.CUR,s=c&&c.snaps[ti];
+ if(!s||s.F||s._req)return;s._req=true;
+ if(!pre)document.getElementById('status').innerText="loading snapshot "+(ti+1)+"...";
+ fetch(s.bin).then(function(r){if(!r.ok)throw r.status;return r.arrayBuffer();}).then(function(ab){
+  var n=s.vn[0]*s.vn[1]*s.vn[2],all=new Float32Array(ab),F=[];
+  for(var q=0;q<FN.length;q++)F.push(all.subarray(q*n,(q+1)*n));
+  s.F=F;
+  if(!pre){document.getElementById('status').innerText=st.file;draw(P);}
+  else if(st.t==ti)draw(P);
+ }).catch(function(e){s._req=false;document.getElementById('status').innerText="ERR snap "+(ti+1)+": "+e;});}
 function loadCase(P,file){var st=PAN[P];st.file=file;document.getElementById('status').innerText="loading "+file+"...";
  fetch('case_'+file+'.json').then(function(r){return r.json();}).then(function(c){
-  c.grange={};for(var fi=0;fi<FN.length;fi++)c.grange[fi]=grange(c,fi);
+  if(c.format!=2){var gr={};for(var fi=0;fi<FN.length;fi++)gr[fi]=grange(c,fi);c.grange=gr;}
   st.CUR=c;st.t=0;var ts=document.getElementById('time'+P);ts.max=c.snaps.length-1;ts.value=0;
   document.getElementById('spos').max=c.snaps[0].vn[saxis]-1;
+  if(P=='A')showctl();
   document.getElementById('status').innerText=file+" ("+c.snaps.length+" snaps)";draw(P);updateURL();
  }).catch(function(e){document.getElementById('status').innerText="ERR "+file+": "+e;});}
-function showctl(){document.querySelector('.iso-c').classList.toggle('hide',view!='iso');
- document.querySelector('.slice-c').classList.toggle('hide',view!='slice');}
+function caseIs2d(){var c=PAN.A.CUR;return !!(c&&c.snaps[0].vn[2]<=4);}
+function showctl(){var is2d=caseIs2d();
+ if(is2d&&view=='iso'){view='slice';document.querySelectorAll('.vbtn').forEach(function(x){x.classList.toggle('on',x.dataset.v==view);});}
+ document.querySelector('.vbtn[data-v=iso]').classList.toggle('hide',is2d);
+ document.querySelector('.iso-c').classList.toggle('hide',view!='iso'||is2d);
+ document.querySelector('.slice-c').classList.toggle('hide',view!='slice'||is2d);}
 // controls
 function on(id,ev,fn){document.getElementById(id).addEventListener(ev,fn);}
 on('field','change',function(){field=+this.value;drawAll();updateURL();});
@@ -149,12 +189,16 @@ document.addEventListener('keydown',function(e){if(e.target.tagName=='SELECT'||e
 function updateURL(){location.hash="c="+encodeURIComponent(PAN.A.file||"")+"&v="+view+"&f="+field+"&t="+PAN.A.t;}
 function readURL(){var h={};location.hash.slice(1).split('&').forEach(function(kv){var p=kv.split('=');h[p[0]]=decodeURIComponent(p[1]||"");});return h;}
 // field dropdown + manifest
-fetch('fields.json').then(function(r){return r.json();}).then(function(f){FN=f;
+fetch('fields.json').then(function(r){return r.json();}).then(function(f){
+ FMETA=f.map(function(x){return typeof x=='string'?{name:x}:x;});
+ FN=FMETA.map(function(x){return x.name;});
+ FMETA.forEach(function(x,i){if(x.signed)SIGNED[i]=1;FI[x.name]=i;});
+ if(typeof f[0]=='string')SIGNED={2:1,3:1,4:1,6:1,7:1,8:1,10:1}; // legacy string-only fields.json
  var fs=document.getElementById('field');FN.forEach(function(n,i){var o=document.createElement('option');o.value=i;o.text=n;fs.appendChild(o);});
  return fetch('manifest.json');}).then(function(r){return r.json();}).then(function(m){
  [['caseA','A'],['caseB','B']].forEach(function(pp){var cs=document.getElementById(pp[0]);
   m.forEach(function(c){var o=document.createElement('option');o.value=c.file;
-   o.text=c.file.replace('.jld2','')+" ["+c.nx+"³"+(c.Ma!=null?", Ma="+c.Ma:"")+", "+c.nsnap+"]";cs.appendChild(o);});
+   o.text=c.file.replace('.jld2','')+" ["+c.nx+(c.nz<=4?"²":"³")+(c.Ma!=null?", Ma="+c.Ma:"")+", "+c.nsnap+"]";cs.appendChild(o);});
   cs.onchange=function(){loadCase(pp[1],this.value);};});
  var h=readURL();
  if(h.v){view=h.v;document.querySelectorAll('.vbtn').forEach(function(x){x.classList.toggle('on',x.dataset.v==view);});}
