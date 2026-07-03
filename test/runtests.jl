@@ -55,6 +55,7 @@ const TOL = 1e-10
         include("test_eigenvalue_ordering.jl")
         include("test_initial_conditions_properties.jl")
         include("test_numerical_accuracy.jl")
+        include("test_s3max.jl")
     end
     
     # Integration tests (Julia vs MATLAB golden files)

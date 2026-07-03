@@ -42,9 +42,10 @@ Interface flux from left/right face moment states. Each side is projected
 (realizable_3D_M4) and hyperbolicity-corrected before fluxing. The flux formula is
 chosen by `RIEMANN_SOLVER[]` (default `:hll`, byte-identical to the original scheme).
 """
-function face_flux_1d(M_L::AbstractVector, M_R::AbstractVector, axis::Int, Ma::Real)
-    ML = realizable_3D_M4(M_L, Ma)
-    MR = realizable_3D_M4(M_R, Ma)
+function face_flux_1d(M_L::AbstractVector, M_R::AbstractVector, axis::Int, Ma::Real;
+                      s3max::Real = 4.0 + abs(Ma) / 2.0)
+    ML = realizable_3D_M4(M_L, Ma, s3max)
+    MR = realizable_3D_M4(M_R, Ma, s3max)
     MLr, lminL, lmaxL = realize_and_speed(ML, axis, Ma)
     MRr, lminR, lmaxR = realize_and_speed(MR, axis, Ma)
     FL = _phys_flux(MLr, axis)

@@ -22,6 +22,7 @@ nx = parse(Int, m["nx"]); ny = parse(Int, m["ny"]); nz = parse(Int, m["nz"])
 dx = parse(Float64, m["dx"]); Ma = parse(Float64, m["Ma"]); Kn = parse(Float64, m["Kn"])
 tmax = parse(Float64, m["tmax"]); dtcap = parse(Float64, m["dtcap"])
 snap_int = parse(Int, m["snap_interval"]); tag = m["tag"]
+s3max = haskey(m, "s3max") ? parse(Float64, m["s3max"]) : max(40.0, 4.0 + abs(Ma) / 2.0)
 
 M0 = reshape(collect(reinterpret(Float64, read(joinpath(dir, "M0.f64")))), 35, nx, ny, nz)
 
@@ -36,7 +37,7 @@ out = "output/runs/$(tag)_gpu.jld2"
 t0 = time()
 run_gpu_3d(M0, dx, Ma, length(dts);
     snapshot_interval = snap_int, snapshot_filename = out,
-    dts = dts, Kn = Kn, scheme = :recommended, order = 2, vacuum_floor = 0.0,
+    dts = dts, Kn = Kn, scheme = :recommended, order = 2, vacuum_floor = 0.0, s3max = s3max,
     params = Dict{String,Any}("case" => tag, "Ma" => Ma, "Kn" => Kn, "tmax" => tmax,
                               "scheme" => "recommended",
                               "device" => CUDA.name(CUDA.device())),

@@ -30,7 +30,10 @@ function case()
         T_in = 1/rho_in, T_out = 1.0, u_out = Ma,                # uniform p=1, ambient flow
         scheme = :recommended,   # pressure recon + stage BGK (docs/design/scheme-graduation.md)
     )
+    # ~20 snapshots: estimate the effective dt as min(collision cap, CFL dt at
+    # the ambient state) — at Kn >= ~0.01 the CFL estimate is the binding one.
+    dt_est = min(dtcap, 0.3 / (Np * (abs(Ma) + 2.6)))
     return (tag = "bubble2d_Ma$(Ma)_Kn$(Kn)_Np$(Np)",
             params = params, dtcap = dtcap,
-            snap_interval = max(1, ceil(Int, tmax / (20 * dtcap))))   # ~20 snapshots
+            snap_interval = max(1, ceil(Int, tmax / (20 * dt_est))))
 end

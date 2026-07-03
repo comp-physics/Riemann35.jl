@@ -107,12 +107,12 @@ end
 # kernel + writeback). All buffers are `(35,n,n,nz)`; the `*m` are their
 # `reshape(_, 35, n*n*nz)` views for the batched projection.
 # ---------------------------------------------------------------------------
-@inline function _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Rint, dt, Maf, threads, L!, bgk!)
+@inline function _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Rint, dt, Maf, s3f, threads, L!, bgk!)
     # In-place projection: `_realize_kernel_scalar!` reads all 35 moments of a cell
     # into registers before storing them back (`realize_gpu.jl:60-66`), and threads
     # touch disjoint columns, so `Mout === Min` is safe. This removes the per-stage
     # `copyto!` writeback pass AND the `Pbuf` buffer (byte-identical).
-    proj!(Xm) = realizable_batched!(Xm, Xm, Maf; threads=threads)
+    proj!(Xm) = realizable_batched!(Xm, Xm, Maf; threads=threads, s3max=s3f)
     L!(Rint, M);  @. M1 = M + dt * Rint;                              proj!(M1m); bgk!(M1m, dt)
     L!(Rint, M1); @. M2 = 0.75*M + 0.25*(M1 + dt*Rint);               proj!(M2m); bgk!(M2m, dt)
     L!(Rint, M2); @. M3 = (1.0/3.0)*M + (2.0/3.0)*(M2 + dt*Rint);     proj!(M3m); bgk!(M3m, dt)
@@ -143,10 +143,10 @@ Returns the dt vector used.
 """
 function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                       dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
-                      pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf, threads::Int=128)
+                      pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf, s3max::Real=4.0 + abs(Ma) / 2.0, threads::Int=128)
     @assert size(M_dev, 1) == 35 "M_dev must be (35,nx,ny,nz)"
     nx = size(M_dev, 2); ny = size(M_dev, 3); nz = size(M_dev, 4)
-    dxf = Float64(dx); Maf = Float64(Ma); vacf = Float64(vacuum_floor)
+    dxf = Float64(dx); Maf = Float64(Ma); vacf = Float64(vacuum_floor); s3f = Float64(s3max)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     R = CUDA.zeros(Float64, 35, nx, ny, nz)
@@ -159,7 +159,7 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
     L! = (Rint, st) -> residual3d_box_gpu!(Rint, st, nx, ny, nz, dxf, Maf;
                                            vacuum_floor=vacf, project_faces=true,
                                            order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
-                                           pressure_recon=pressure_recon, threads=threads, flat=flat, vbuf=vbuf, tbuf=tbuf)
+                                           pressure_recon=pressure_recon, s3max=s3f, threads=threads, flat=flat, vbuf=vbuf, tbuf=tbuf)
     knf = Float64(Kn); nclM = nx * ny * nz
     bgk! = stage_bgk ?
         ((Xm, dtv) -> (@cuda threads=threads blocks=cld(nclM, threads) _bgk_kernel!(Xm, nclM, Float64(dtv), knf); nothing)) :
@@ -169,7 +169,7 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
     for s in 1:nstep
         dt = dts_host === nothing ? _cfl_from_vmax(_local_vmax(M, svec, nx, ny, nz; threads=threads), dxf) : dts_host[s]
         used[s] = dt
-        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, R, dt, Maf, threads, L!, bgk!)
+        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, R, dt, Maf, s3f, threads, L!, bgk!)
     end
     CUDA.synchronize()
     return used
@@ -185,6 +185,7 @@ unless `dts` is supplied. Returns the dt vector used.
 function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                            halo::Int=2, dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                            pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf,
+                           s3max::Real=4.0 + abs(Ma) / 2.0,
                            threads::Int=128)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(M, 1) == 35
@@ -194,7 +195,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
     nz_ext = nzloc + 2*halo
     left  = rank > 0          ? rank - 1 : MPI.PROC_NULL
     right = rank < nranks - 1 ? rank + 1 : MPI.PROC_NULL
-    dxf = Float64(dx); Maf = Float64(Ma); vacf = Float64(vacuum_floor)
+    dxf = Float64(dx); Maf = Float64(Ma); vacf = Float64(vacuum_floor); s3f = Float64(s3max)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     Mext = CUDA.zeros(Float64, 35, n, n, nz_ext)
@@ -232,7 +233,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
         end
         residual3d_box_gpu!(Rext, Mext, n, n, nz_ext, dxf, Maf;
                             vacuum_floor=vacf, project_faces=true, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
-                            pressure_recon=pressure_recon, threads=threads, flat=flat, vbuf=vbuf, tbuf=tbuf)
+                            pressure_recon=pressure_recon, s3max=s3f, threads=threads, flat=flat, vbuf=vbuf, tbuf=tbuf)
         @inbounds Rout .= @view Rext[:, :, :, halo+1:halo+nzloc]
         return nothing
     end
@@ -246,7 +247,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
             dt = dts_host[s]
         end
         used[s] = dt
-        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Rint, dt, Maf, threads, L!, bgk!)
+        _rk3_step!(M, M1, M2, M3, M1m, M2m, M3m, Rint, dt, Maf, s3f, threads, L!, bgk!)
     end
     CUDA.synchronize()
     return used
