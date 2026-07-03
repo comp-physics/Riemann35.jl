@@ -1,3 +1,6 @@
+[compat]
+JLD2 = "0.4"
+
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
@@ -5,5 +8,5 @@ MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
-[compat]
-JLD2 = "0.4"
+[extras]
+CUDA_Runtime_jll = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"

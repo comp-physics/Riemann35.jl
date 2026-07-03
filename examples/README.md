@@ -1,4 +1,30 @@
-# Examples - 3D Crossing Jets Simulations
+# Examples
+
+## Device-agnostic case runner (`run_case.jl` + `cases/`)
+
+Case definitions live in `examples/cases/*.jl` (physics-named; each defines
+`case() -> (tag, params, dtcap, snap_interval)` with env knobs documented in
+its header). One driver runs any of them on either device:
+
+```bash
+# CPU (serial or MPI)
+julia --project=. examples/run_case.jl examples/cases/riemann1d.jl
+CASE_NP=512 mpiexec -n 4 julia --project=. examples/run_case.jl examples/cases/bubble2d.jl
+
+# GPU — same case file, one flag (single rank, on a GPU node)
+CASE_NP=512 julia --project=. examples/run_case.jl examples/cases/bubble2d.jl --gpu
+```
+
+`--gpu` stages the runner-built IC and spawns the march in the CUDA project
+(`gpu/run_staged.jl`) as a subprocess, so case setup is defined exactly once.
+To stage and march on different machines (e.g. batch jobs), use
+`gpu/stage_case.jl` and `gpu/run_staged.jl` directly.
+
+Current cases: `riemann1d.jl` (1D uniform-pressure stationary contact),
+`bubble2d.jl` (quasi-2D uniform-pressure dense bubble) — both from R.O. Fox's
+July 2026 validation ladder.
+
+# 3D Crossing Jets Simulations
 
 All examples support **full parameter control** via both code defaults and command-line arguments.
 
