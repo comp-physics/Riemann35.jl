@@ -215,6 +215,8 @@ function simulation_runner(params)
     stage_bgk = get(params, :stage_bgk, scheme === :recommended)
 
     # riemann_solver (OPT-IN, default :hll): interface flux for the high-order path.
+    # :roeps3 = parity-split Roe (contact-exact by the parity theorem; sharper
+    # contacts, ~-8% Sod vs :hll in the 1D study). Single-source CPU/GPU.
     # :hll = original two-wave HLL (byte-identical default); :rusanov = robust local
     # Lax–Friedrichs fallback. (HLLC/HLLEM/kinetic removed — no benefit for the 35-moment
     # closure; see docs/riemann-solver-scope.md.)

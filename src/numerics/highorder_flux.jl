@@ -65,8 +65,17 @@ function face_flux_1d(M_L::AbstractVector, M_R::AbstractVector, axis::Int, Ma::R
         # local Lax–Friedrichs (Rusanov): robust, more diffusive than HLL.
         a = max(abs(sL), abs(sR))
         return 0.5 .* (FL .+ FR) .- 0.5a .* (MRr .- MLr)
+    elseif rs === :roeps3
+        # parity-split Roe (RoePS3): wave-resolved |λ| on the reflection-odd
+        # sector of the face-normal marginal block, constant q(u) on the even
+        # sector, scalar sector coefficients on the remaining components.
+        # Uniform-pressure contacts are preserved exactly (parity theorem);
+        # single source with the GPU path: src/numerics/roeps3_dev.jl.
+        D = roeps3_diss_dev(NTuple{35,Float64}(MLr), NTuple{35,Float64}(MRr),
+                            axis, Float64(sL), Float64(sR))
+        return 0.5 .* (FL .+ FR) .- 0.5 .* collect(D)
     else
-        throw(ArgumentError("unknown riemann_solver=$(rs); available: :hll (default), :rusanov"))
+        throw(ArgumentError("unknown riemann_solver=$(rs); available: :hll (default), :rusanov, :roeps3"))
     end
 end
 

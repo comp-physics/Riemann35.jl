@@ -52,6 +52,8 @@ include(joinpath(@__DIR__, "wavespeed_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "numerics", "flux_closure_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
 include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
+include(joinpath(@__DIR__, "..", "src", "numerics", "roeps3_dev.jl"))
+using .RoePS3Dev: roeps3_diss_dev
 using .WavespeedDev: realize_and_speed_Mr_dev
 using .FluxClosureDev: flux_closure35_dev, flux_closure35_central_dev
 
@@ -220,6 +222,13 @@ end
         a = max(abs(sL), abs(sR))
         return ntuple(Val(35)) do j
             0.5 * (FLall[off + j] + FRall[off + j]) - 0.5 * a * (MRr[j] - MLr[j])
+        end
+    end
+    if rs == 2
+        # RoePS3 parity-split dissipation (single source: src/numerics/roeps3_dev.jl)
+        D = roeps3_diss_dev(MLr, MRr, axis, sL, sR)
+        return ntuple(Val(35)) do j
+            0.5 * (FLall[off + j] + FRall[off + j]) - 0.5 * D[j]
         end
     end
     # HLL (default)
@@ -516,7 +525,8 @@ function residual3d_box_gpu!(R::CuArray{Float64,4}, M::CuArray{Float64,4},
     @assert size(R) == (35, nx, ny, nz) "R must be (35,nx,ny,nz)"
     Maf = Float64(Ma); dxf = Float64(dx); vacf = Float64(vacuum_floor); s3f = Float64(s3max)
     rs = riemann_solver === :hll ? 0 : riemann_solver === :rusanov ? 1 :
-         throw(ArgumentError("unknown riemann_solver=$riemann_solver; available :hll (default), :rusanov"))
+         riemann_solver === :roeps3 ? 2 :
+         throw(ArgumentError("unknown riemann_solver=$riemann_solver; available :hll (default), :rusanov, :roeps3"))
     lim = limiter ? 1 : 0
     prec = pressure_recon
     fx = (nx + 1) * ny * nz; fy = (ny + 1) * nx * nz; fz = (nz + 1) * nx * ny
