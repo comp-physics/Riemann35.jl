@@ -39,7 +39,7 @@
 </div>
 <div id="wrap"><div id="plotA" class="pane"></div><div id="plotB" class="pane hide"></div></div>
 <script>
-var FN=[],SIGNED={2:1,3:1,4:1,6:1,7:1,8:1,10:1};
+var FN=[],FMETA=[],FI={},SIGNED={}; // populated from fields.json (exporter-owned schema)
 var view="som",field=0,logOn=false,lockOn=false,ilev=45,shells=1,iopac=55,saxis=2,spos=10,s3d=false,cmp=false;
 var PAN={A:{file:null,CUR:null,t:0,timer:null},B:{file:null,CUR:null,t:0,timer:null}};
 var linking=false;
@@ -57,7 +57,8 @@ function cspec(CUR,vals){
  var lo=base[0],hi=base[1];
  if(uselog){lo=Math.log10(Math.max(lo,1e-12));hi=Math.log10(Math.max(hi,1e-12));}
  var title=FN[field]+(uselog?" (log10)":"");
- if(field==9)return{vals:tv,cs:'Viridis',cmin:0,cmax:1.7321,title:title};
+ var fr=FMETA[field]&&FMETA[field].range;
+ if(fr)return{vals:tv,cs:'Viridis',cmin:fr[0],cmax:fr[1],title:title};
  if(signed){var M=Math.max(Math.abs(base[0]),Math.abs(base[1]))||1e-9;return{vals:tv,cs:'RdBu',cmin:-M,cmax:M,title:title};}
  return{vals:tv,cs:'Viridis',cmin:lo,cmax:hi,title:title};
 }
@@ -70,9 +71,10 @@ function draw(P){
  if(view=="som"&&is2d){
   // 2D case: s101=s011=0 collapses the elliptope — show the x-marginal
   // realizability plane (s300,s400) with the H200=0 boundary s400=1+s300^2.
-  var d=s.F[0],xs=[],ys=[],cv=[],col=s.F[field],lim=nx*ny; // k=0 plane only (z-uniform)
+  var d=s.F[FI.density],xs=[],ys=[],cv=[],col=s.F[field],lim=nx*ny; // k=0 plane only (z-uniform)
   var str=Math.max(1,Math.round(lim/65536));               // cap scatter at ~64k points
-  for(var i=0;i<lim;i+=str){if(d[i]>5e-3){xs.push(s.F[10][i]);ys.push(s.F[11][i]);cv.push(col[i]);}}
+  var Fsk=s.F[FI.skewness],Fku=s.F[FI.kurtosis];
+  for(var i=0;i<lim;i+=str){if(d[i]>5e-3){xs.push(Fsk[i]);ys.push(Fku[i]);cv.push(col[i]);}}
   var cc=cspec(st.CUR,cv),bx=[],by=[];
   var xr=rng(xs),xm=Math.max(Math.abs(xr[0]),Math.abs(xr[1]),1.2);
   for(var q=0;q<=80;q++){var sk=-xm+2*xm*q/80;bx.push(sk);by.push(1+sk*sk);}
@@ -82,8 +84,9 @@ function draw(P){
   lay={margin:{l:55,r:0,t:30,b:40},xaxis:{title:'skewness s300 (x-marginal)'},yaxis:{title:'kurtosis s400 (x-marginal)'},
        title:{text:'moment space — dashed: H200=0 realizability boundary (s400 = 1 + s300²)',font:{size:12}}};
  } else if(view=="som"){
-  var d=s.F[0],x=[],y=[],z=[],cv=[],col=s.F[field];
-  for(var i=0;i<d.length;i++){if(d[i]>5e-3){x.push(s.F[6][i]);y.push(s.F[7][i]);z.push(s.F[8][i]);cv.push(col[i]);}}
+  var d=s.F[FI.density],x=[],y=[],z=[],cv=[],col=s.F[field];
+  var F110=s.F[FI.s110],F101=s.F[FI.s101],F011=s.F[FI.s011];
+  for(var i=0;i<d.length;i++){if(d[i]>5e-3){x.push(F110[i]);y.push(F101[i]);z.push(F011[i]);cv.push(col[i]);}}
   var cc=cspec(st.CUR,cv);
   tr=[Object.assign({z:SP},els),Object.assign({z:SM},els),
       {type:'scatter3d',mode:'markers',x:x,y:y,z:z,marker:{size:2,color:cc.vals,colorscale:cc.cs,cmin:cc.cmin,cmax:cc.cmax,colorbar:{title:cc.title,len:.7}}}];
@@ -186,7 +189,11 @@ document.addEventListener('keydown',function(e){if(e.target.tagName=='SELECT'||e
 function updateURL(){location.hash="c="+encodeURIComponent(PAN.A.file||"")+"&v="+view+"&f="+field+"&t="+PAN.A.t;}
 function readURL(){var h={};location.hash.slice(1).split('&').forEach(function(kv){var p=kv.split('=');h[p[0]]=decodeURIComponent(p[1]||"");});return h;}
 // field dropdown + manifest
-fetch('fields.json').then(function(r){return r.json();}).then(function(f){FN=f;
+fetch('fields.json').then(function(r){return r.json();}).then(function(f){
+ FMETA=f.map(function(x){return typeof x=='string'?{name:x}:x;});
+ FN=FMETA.map(function(x){return x.name;});
+ FMETA.forEach(function(x,i){if(x.signed)SIGNED[i]=1;FI[x.name]=i;});
+ if(typeof f[0]=='string')SIGNED={2:1,3:1,4:1,6:1,7:1,8:1,10:1}; // legacy string-only fields.json
  var fs=document.getElementById('field');FN.forEach(function(n,i){var o=document.createElement('option');o.value=i;o.text=n;fs.appendChild(o);});
  return fetch('manifest.json');}).then(function(r){return r.json();}).then(function(m){
  [['caseA','A'],['caseB','B']].forEach(function(pp){var cs=document.getElementById(pp[0]);

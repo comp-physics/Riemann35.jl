@@ -22,8 +22,17 @@ using JLD2
 
 export export_web, export_jld2_web, maybe_export_web
 
-const WEB_FIELDS = ["density","|velocity|","u","v","w","temperature","s110","s101","s011",
-                    "‖s‖","skewness","kurtosis","S2 margin","pressure","Mach","Tx","Ty","Tz"]
+# Field schema — the single source for the viewer (serialized to fields.json).
+# `s` (signed) selects the symmetric diverging colormap; `r` pins a fixed
+# color range. Order defines the .bin field-major layout.
+const WEB_FIELD_META = [
+    (n = "density",), (n = "|velocity|",), (n = "u", s = true), (n = "v", s = true),
+    (n = "w", s = true), (n = "temperature",), (n = "s110", s = true),
+    (n = "s101", s = true), (n = "s011", s = true), (n = "‖s‖", r = (0.0, 1.7321)),
+    (n = "skewness", s = true), (n = "kurtosis",), (n = "S2 margin",),
+    (n = "pressure",), (n = "Mach",), (n = "Tx",), (n = "Ty",), (n = "Tz",),
+]
+const WEB_FIELDS = [f.n for f in WEB_FIELD_META]
 const _ASSETS = joinpath(@__DIR__, "web")   # viewer.html, serve.sh
 
 _nf(x) = (r = round(Float64(x); digits=4); isfinite(r) ? r : 0.0)
@@ -53,7 +62,14 @@ function _ensure_assets(outdir)
     cp(joinpath(_ASSETS, "README.md"),   joinpath(outdir, "README.md");   force=true)
     try; chmod(joinpath(outdir, "serve.sh"), 0o755); catch; end
     open(joinpath(outdir, "fields.json"), "w") do io
-        print(io, "[\"", join(WEB_FIELDS, "\",\""), "\"]")
+        ent = map(WEB_FIELD_META) do f
+            e = "{\"name\":\"$(f.n)\""
+            get(f, :s, false) && (e *= ",\"signed\":true")
+            r = get(f, :r, nothing)
+            r === nothing || (e *= ",\"range\":[$(_nf(r[1])),$(_nf(r[2]))]")
+            e * "}"
+        end
+        print(io, "[", join(ent, ","), "]")
     end
 end
 
