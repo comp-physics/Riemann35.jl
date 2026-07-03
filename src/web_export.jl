@@ -94,7 +94,7 @@ end
 # would be ~700MB — unloadable; f32 bins are 4x smaller and parse-free.
 function _write_case(outdir, name, Ma, Kn, snaps; rescap=30, rescap2d=512)
     NF = length(WEB_FIELDS)
-    nx = ny = nz = 0; nsnap = length(snaps)
+    nx = ny = nz = 0; nsnap = 0
     smeta = String[]
     gl = fill(Inf, NF); gh = fill(-Inf, NF)
     for (si, (M, t)) in enumerate(snaps)
@@ -118,6 +118,7 @@ function _write_case(outdir, name, Ma, Kn, snaps; rescap=30, rescap2d=512)
         end
         push!(smeta, string("{\"t\":", round(Float64(t); digits=6),
                             ",\"vn\":[$vx,$vy,$vz],\"bin\":\"$bin\"}"))
+        nsnap += 1
     end
     open(joinpath(outdir, "case_$(name).json"), "w") do io
         print(io, "{\"name\":\"$name\",\"format\":2,\"Ma\":", _nn(Ma), ",\"Kn\":", _nn(Kn),
@@ -167,7 +168,10 @@ function export_jld2_web(jld2path, outdir; name=nothing, rescap=30, rescap2d=512
             mm = match(r"Ma([0-9.]+)", basename(jld2path)); Ma = mm === nothing ? nothing : parse(Float64, mm.captures[1])
         end
         sk = sort(collect(keys(f["snapshots"])))
-        snaps = [(f["snapshots"][k]["M"], f["snapshots"][k]["t"]) for k in sk]
+        # LAZY generator: one snapshot in memory at a time. A 1024^2 x 24-snapshot
+        # case is ~28GB fully materialized — eager loading OOM-killed a run's
+        # end-of-run export (2026-07-02).
+        snaps = ((f["snapshots"][k]["M"], f["snapshots"][k]["t"]) for k in sk)
         export_web(outdir, nm, snaps; Ma=Ma, Kn=Kn, rescap=rescap, rescap2d=rescap2d)
     end
 end
