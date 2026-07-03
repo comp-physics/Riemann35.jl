@@ -30,6 +30,9 @@ This is the core time-stepping loop that orchestrates all components:
   - `Nmom`: Number of moments (35)
   - `nnmax`: Maximum number of time steps
   - `dtmax`: Maximum time step size
+  - `s3max` (optional): realizability clamp on |S3| in the projection (default
+    `max(40, 4 + |Ma|/2)`; the legacy MATLAB-parity value is `4 + |Ma|/2`, which
+    R.O. Fox found too small at larger Kn — it caps the max wave speed / HLL dt)
   - IC parameters: `rhol`, `rhor`, `T`, `r110`, `r101`, `r011`
   - `symmetry_check_interval`: How often to check symmetry
   - `homogeneous_z`: Whether jets exist at all z levels (validation mode)
@@ -194,6 +197,13 @@ function simulation_runner(params)
     # lives in to_recon_vars/from_recon_vars (src/numerics/reconstruction.jl);
     # default path byte-identical.
     HO_PRESSURE_RECON[] = get(params, :ho_pressure_recon, scheme === :recommended)
+    # Realizability |S3| clamp (R.O. Fox, 2026-07: the MATLAB s3max was too small
+    # at larger Kn; his guidance is a user parameter with a LARGE default — see
+    # the JCP paper: s3max bounds the max wave speed / HLL time step). The
+    # runner default never lowers the legacy value 4+|Ma|/2 (Ma>=72 unchanged);
+    # function-level callers that don't pass s3max keep the legacy MATLAB-parity
+    # value, so golden/parity tests are unaffected. Set params.s3max to override.
+    s3max = Float64(get(params, :s3max, max(40.0, 4.0 + abs(Ma) / 2.0)))
 
     # stage_bgk (OPT-IN, default false; spatial_order=2 only): apply the
     # exact-exponential BGK relaxation after EVERY SSP-RK3 stage instead of once
@@ -811,7 +821,7 @@ function simulation_runner(params)
             # eigenvalues6-corrected Mr). That correction is per-cell and
             # density-preserving, so conservation and MPI-losslessness are
             # unaffected; the high-order step advances this hyperbolic state.
-            step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma;
+            step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma; s3max=s3max,
                                order=2, use_limiter=ho_realizability_limiter,
                                use_proj_recon=ho_proj_first_order,
                                stage_bgk_kn=(stage_bgk ? Kn : nothing))
@@ -856,7 +866,7 @@ function simulation_runner(params)
 
                         # Revised projection-based realizability: a single projection
                         # step (matches realizable_3D(MOM,Ma) in the MATLAB main loop).
-                        Mr = realizable_3D_M4(MOM, Ma)
+                        Mr = realizable_3D_M4(MOM, Ma, s3max)
 
                         Mnp[ih, jh, k, :] = Mr
                     end

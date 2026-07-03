@@ -30,9 +30,10 @@ This is the main closure function that orchestrates the entire moment pipeline:
 # Algorithm
 See Flux_closure35_and_realizable_3D.m for detailed algorithm description.
 """
-function Flux_closure35_and_realizable_3D(M4::AbstractVector, flag2D::Int, Ma::Real; debug_label="", debug_output=false)
+function Flux_closure35_and_realizable_3D(M4::AbstractVector, flag2D::Int, Ma::Real;
+                                          s3max::Real = 4.0 + abs(Ma) / 2.0,
+                                          debug_label="", debug_output=false)
     # Constants
-    s3max = 4.0 + abs(Ma) / 2.0
     h2min = 1.0e-8
     itrealmax = 6
     

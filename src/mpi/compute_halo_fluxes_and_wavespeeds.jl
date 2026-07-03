@@ -47,7 +47,8 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
                                             vpxmin::Matrix{T}, vpxmax::Matrix{T},
                                             vpymin::Matrix{T}, vpymax::Matrix{T},
                                             nx::Int, ny::Int, halo::Int,
-                                            flag2D::Int, Ma::Real, decomp=nothing) where T
+                                            flag2D::Int, Ma::Real, decomp=nothing;
+                                            s3max::Real = 4.0 + abs(Ma) / 2.0) where T
     # Create extended wave speed arrays (interior + halos)
     vpxmin_ext = zeros(T, nx+2*halo, ny)
     vpxmax_ext = zeros(T, nx+2*halo, ny)
@@ -75,10 +76,10 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             for j in 1:ny
                 jh = j + halo
                 MOM = M[i, jh, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 v6y_min, v6y_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 2, flag2D, Ma)
-                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma)
+                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma; s3max=s3max)
                 Fx[i, jh, :] = Mx
                 Fy[i, jh, :] = My
                 _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
@@ -94,7 +95,7 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
                 MOM = M[i, jh, :]
                 # Don't recompute Fx/Fy - they came from neighbor
                 # But still need wave speeds
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
                 vpxmin_ext[i, j] = min(v5x_min, v6x_min)
@@ -109,10 +110,10 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             for j in 1:ny
                 jh = j + halo
                 MOM = M[i, jh, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 v6y_min, v6y_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 2, flag2D, Ma)
-                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma)
+                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma; s3max=s3max)
                 Fx[i, jh, :] = Mx
                 Fy[i, jh, :] = My
                 _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
@@ -125,7 +126,7 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             for j in 1:ny
                 jh = j + halo
                 MOM = M[i, jh, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 _, v5x_min, v5x_max = closure_and_eigenvalues(Mr[[1,2,3,4,5]])
                 vpxmin_ext[i, j] = min(v5x_min, v6x_min)
@@ -140,10 +141,10 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             ih = i + halo
             for j in 1:halo
                 MOM = M[ih, j, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 v6y_min, v6y_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 2, flag2D, Ma)
-                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma)
+                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma; s3max=s3max)
                 Fx[ih, j, :] = Mx
                 Fy[ih, j, :] = My
                 _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
@@ -156,7 +157,7 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             ih = i + halo
             for j in 1:halo
                 MOM = M[ih, j, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 v6y_min, v6y_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 2, flag2D, Ma)
                 _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
@@ -172,10 +173,10 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             ih = i + halo
             for j in halo+ny+1:ny+2*halo
                 MOM = M[ih, j, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 v6y_min, v6y_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 2, flag2D, Ma)
-                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma)
+                Mx, My, _, Mr = Flux_closure35_and_realizable_3D(Mr, flag2D, Ma; s3max=s3max)
                 Fx[ih, j, :] = Mx
                 Fy[ih, j, :] = My
                 _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])
@@ -188,7 +189,7 @@ function compute_halo_fluxes_and_wavespeeds!(M::Array{T,3}, Fx::Array{T,3}, Fy::
             ih = i + halo
             for j in halo+ny+1:ny+2*halo
                 MOM = M[ih, j, :]
-                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma)
+                _, _, _, Mr = Flux_closure35_and_realizable_3D(MOM, flag2D, Ma; s3max=s3max)
                 v6x_min, v6x_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 1, flag2D, Ma)
                 v6y_min, v6y_max, Mr = eigenvalues6_hyperbolic_3D(Mr, 2, flag2D, Ma)
                 _, v5y_min, v5y_max = closure_and_eigenvalues(Mr[[1,6,10,13,15]])

@@ -46,21 +46,21 @@ export realizable_batched!, realizable_batched
     return nothing
 end
 
-@inline function _realize_one(Min, k, Ma)
+@inline function _realize_one(Min, k, Ma, s3max = 4.0 + abs(Ma) / 2.0)
     @inbounds realizable_3D_M4_dev(
         Min[1,k],  Min[2,k],  Min[3,k],  Min[4,k],  Min[5,k],  Min[6,k],  Min[7,k],
         Min[8,k],  Min[9,k],  Min[10,k], Min[11,k], Min[12,k], Min[13,k], Min[14,k],
         Min[15,k], Min[16,k], Min[17,k], Min[18,k], Min[19,k], Min[20,k], Min[21,k],
         Min[22,k], Min[23,k], Min[24,k], Min[25,k], Min[26,k], Min[27,k], Min[28,k],
         Min[29,k], Min[30,k], Min[31,k], Min[32,k], Min[33,k], Min[34,k], Min[35,k],
-        Ma)
+        Ma, s3max)
 end
 
 # scalar-Ma kernel
-function _realize_kernel_scalar!(Mout, Min, Ma::Float64, B::Int)
+function _realize_kernel_scalar!(Mout, Min, Ma::Float64, s3f::Float64, B::Int)
     k = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if k <= B
-        r = _realize_one(Min, k, Ma)
+        r = _realize_one(Min, k, Ma, s3f)
         _store!(Mout, k, r)
     end
     return nothing
@@ -86,12 +86,12 @@ Mach number for every cell) or a `CuVector{Float64}` of length B (per-cell). One
 thread per cell.
 """
 function realizable_batched!(Mout::CuMatrix{Float64}, Min::CuMatrix{Float64}, Ma::Real;
-                             threads::Int=128)
+                             threads::Int=128, s3max::Real = 4.0 + abs(Ma) / 2.0)
     B = size(Min, 2)
     @assert size(Min, 1) == 35 "Min must be (35, B)"
     @assert size(Mout) == size(Min) "Mout must match Min"
     nblocks = cld(B, threads)
-    @cuda threads=threads blocks=nblocks _realize_kernel_scalar!(Mout, Min, Float64(Ma), B)
+    @cuda threads=threads blocks=nblocks _realize_kernel_scalar!(Mout, Min, Float64(Ma), Float64(s3max), B)
     return nothing
 end
 

@@ -718,9 +718,8 @@ end
 @inline function realizable_3D_M4_corr_dev(
         m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12,m13,m14,m15,
         m16,m17,m18,m19,m20,m21,m22,m23,m24,m25,m26,m27,m28,m29,m30,
-        m31,m32,m33,m34,m35, Ma)
+        m31,m32,m33,m34,m35, Ma, s3max = 4.0 + abs(Ma)/2.0)
 
-    s3max = 4.0 + abs(Ma)/2.0
     h2min = 1.0e-6
     S2min = 1.0e-6
 
@@ -810,11 +809,11 @@ end
 @inline function realizable_3D_M4_dev(
         m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12,m13,m14,m15,
         m16,m17,m18,m19,m20,m21,m22,m23,m24,m25,m26,m27,m28,m29,m30,
-        m31,m32,m33,m34,m35, Ma)
+        m31,m32,m33,m34,m35, Ma, s3max = 4.0 + abs(Ma)/2.0)
     c = realizable_3D_M4_corr_dev(
         m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12,m13,m14,m15,
         m16,m17,m18,m19,m20,m21,m22,m23,m24,m25,m26,m27,m28,m29,m30,
-        m31,m32,m33,m34,m35, Ma)
+        m31,m32,m33,m34,m35, Ma, s3max)
     return from_recon_vars_dev(
         c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12],
         c[13], c[14], c[15], c[16], c[17], c[18], c[19], c[20], c[21], c[22], c[23],

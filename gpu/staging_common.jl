@@ -38,11 +38,12 @@ function stage_case(runner, c; dir = "output/stage_$(c.tag)")
     M0 = permutedims(M, (4, 1, 2, 3))         # (35,nx,ny,nz) device layout
     mkpath(dir)
     xmin = get(c.params, :xmin, -0.5); xmax = get(c.params, :xmax, 0.5)
+    extra = haskey(c.params, :s3max) ? (s3max = c.params.s3max,) : (;)
     write_stage_meta(joinpath(dir, "meta.txt");
         nx = size(M0, 2), ny = size(M0, 3), nz = size(M0, 4),
         dx = (xmax - xmin) / c.params.Nx,
         Ma = c.params.Ma, Kn = c.params.Kn, tmax = c.params.tmax,
-        dtcap = c.dtcap, snap_interval = c.snap_interval, tag = c.tag)
+        dtcap = c.dtcap, snap_interval = c.snap_interval, tag = c.tag, extra...)
     write(joinpath(dir, "M0.f64"), M0)
     return dir
 end

@@ -11,7 +11,7 @@ fallback to first order on nonpositive reconstructed density.
 """
 function residual_line(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
                        order::Int=2, g::Int=2, use_limiter::Bool=false,
-                       use_proj_recon::Bool=false)
+                       use_proj_recon::Bool=false, s3max::Real = 4.0 + abs(Ma) / 2.0)
     Ntot = size(Mext, 1)
     Ni = Ntot - 2g
     # interface fluxes at i+1/2 for interior interfaces: need faces at indices
@@ -22,7 +22,7 @@ function residual_line(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
     Vc = order >= 2 ? [to_recon_vars(@view Mext[i, :]) for i in axes(Mext, 1)] : Vector{Vector{Float64}}()
     if order == 1
         for iface in g:(g+Ni)            # interface between cell iface and iface+1
-            Fhat[iface] = face_flux_1d(Mext[iface, :], Mext[iface+1, :], axis, Ma)
+            Fhat[iface] = face_flux_1d(Mext[iface, :], Mext[iface+1, :], axis, Ma; s3max=s3max)
         end
     elseif use_proj_recon
         # Rodney's projection-triggered control: a cell flagged for the realizability
@@ -32,17 +32,17 @@ function residual_line(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
         for iL in g:(g+Ni)
             ML, MR = recon_faces_proj(flagged[iL], flagged[iL+1],
                                       Vc[iL-1], Vc[iL], Vc[iL+1], Vc[iL+2], Mext[iL, :], Mext[iL+1, :])
-            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma)
+            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma; s3max=s3max)
         end
     elseif use_limiter
         for iL in g:(g+Ni)
             ML, MR = recon_faces_limited(Vc[iL-1], Vc[iL], Vc[iL+1], Vc[iL+2])
-            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma)
+            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma; s3max=s3max)
         end
     else
         for iL in g:(g+Ni)
             ML, MR = recon_faces_default(Vc[iL-1], Vc[iL], Vc[iL+1], Vc[iL+2], Mext[iL, :], Mext[iL+1, :])
-            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma)
+            Fhat[iL] = face_flux_1d(ML, MR, axis, Ma; s3max=s3max)
         end
     end
     R = zeros(Ni, 35)
@@ -56,21 +56,22 @@ end
 function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
                          nx::Int, ny::Int, nz::Int, halo::Int,
                          dx::Real, dy::Real, dz::Real, Ma::Real;
-                         order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false)
+                         order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
+                         s3max::Real = 4.0 + abs(Ma) / 2.0)
     fill!(R, 0.0)
     g = halo
     # X: lines along i (have halos), for each interior (jh,k)
     for k in 1:nz, j in 1:ny
         jh = j + halo
         Mext = @view M[:, jh, k, :]                 # (nx+2halo, 35)
-        Rl = residual_line(Mext, dx, 1, Ma; order=order, g=g, use_limiter=use_limiter, use_proj_recon=use_proj_recon)   # (nx,35)
+        Rl = residual_line(Mext, dx, 1, Ma; order=order, g=g, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max)   # (nx,35)
         for i in 1:nx; R[i+halo, jh, k, :] .+= Rl[i, :]; end
     end
     # Y: lines along j, for each interior (ih,k)
     for k in 1:nz, i in 1:nx
         ih = i + halo
         Mext = @view M[ih, :, k, :]
-        Rl = residual_line(Mext, dy, 2, Ma; order=order, g=g, use_limiter=use_limiter, use_proj_recon=use_proj_recon)
+        Rl = residual_line(Mext, dy, 2, Ma; order=order, g=g, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max)
         for j in 1:ny; R[ih, j+halo, k, :] .+= Rl[j, :]; end
     end
     # Z: no halo in z -> pad with outflow ghosts (copy edge), for each interior (ih,jh)
@@ -78,7 +79,7 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
         ih = i + halo; jh = j + halo
         col = M[ih, jh, :, :]                        # (nz,35)
         Mext = vcat(repeat(col[1:1,:], g, 1), col, repeat(col[nz:nz,:], g, 1))  # outflow pad
-        Rl = residual_line(Mext, dz, 3, Ma; order=order, g=g, use_limiter=use_limiter, use_proj_recon=use_proj_recon)   # (nz,35)
+        Rl = residual_line(Mext, dz, 3, Ma; order=order, g=g, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max)   # (nz,35)
         for k in 1:nz; R[ih, jh, k, :] .+= Rl[k, :]; end
     end
     return R
@@ -115,7 +116,7 @@ before `_project_interior!` corrected them).  Only meaningful when
 """
 proj_correction_count() = _PROJ_CORRECTIONS[]
 
-function _project_interior!(M, nx,ny,nz,halo, Ma)
+function _project_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma) / 2.0)
     if _PROJ_COUNT_ENABLED[]
         for k in 1:nz, j in 1:ny, i in 1:nx
             ih=i+halo; jh=j+halo
@@ -123,12 +124,12 @@ function _project_interior!(M, nx,ny,nz,halo, Ma)
             if realizability_margin(@view M[ih,jh,k,:]) < 0
                 _PROJ_CORRECTIONS[] += 1
             end
-            M[ih,jh,k,:] = realizable_3D_M4(M[ih,jh,k,:], Ma)
+            M[ih,jh,k,:] = realizable_3D_M4(M[ih,jh,k,:], Ma, s3max)
         end
     else
         for k in 1:nz, j in 1:ny, i in 1:nx
             ih=i+halo; jh=j+halo
-            M[ih,jh,k,:] = realizable_3D_M4(M[ih,jh,k,:], Ma)
+            M[ih,jh,k,:] = realizable_3D_M4(M[ih,jh,k,:], Ma, s3max)
         end
     end
 end
@@ -136,13 +137,13 @@ end
 function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
-                            stage_bgk_kn=nothing)
+                            stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # stage helper: M_in (with halos) -> returns updated interior-only array (full M-shape, halos zero)
     function L!(Mwork)
         halo_exchange_3d!(Mwork, decomp, bc)
-        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon)
+        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max)
         return R
     end
     # stage_bgk (opt-in, `stage_bgk_kn` = Kn): exact-exponential BGK relaxation of
@@ -167,11 +168,11 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
     end
     M0 = copy(M)
     # stage 1: M1 = M + dt*L(M)
-    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; _project_interior!(M,nx,ny,nz,halo,Ma); bgk!(M)
+    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; _project_interior!(M,nx,ny,nz,halo,Ma,s3max); bgk!(M)
     # stage 2: M2 = 3/4 M0 + 1/4 (M1 + dt L(M1))
-    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma); bgk!(M)
+    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma,s3max); bgk!(M)
     # stage 3: M = 1/3 M0 + 2/3 (M2 + dt L(M2))
-    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma); bgk!(M)
+    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma,s3max); bgk!(M)
     halo_exchange_3d!(M, decomp, bc)
     return nothing
 end

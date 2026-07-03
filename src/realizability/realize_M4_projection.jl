@@ -37,6 +37,6 @@ inside `projection35_dev` uses an in-kernel 6x6 symmetric Jacobi sweep instead o
 `_geigvals`, but the (sign-only) branch decisions match, so the corrected standardized
 moments are byte-identical. Public signature/return type unchanged.
 """
-function realizable_3D_M4(M4::AbstractVector, Ma::Real)
-    return standardized_to_M4(realizable_3D_M4_corr_dev(M4..., Ma)...)
+function realizable_3D_M4(M4::AbstractVector, Ma::Real, s3max::Real = 4.0 + abs(Ma) / 2.0)
+    return standardized_to_M4(realizable_3D_M4_corr_dev(M4..., Ma, Float64(s3max))...)
 end

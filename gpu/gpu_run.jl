@@ -55,6 +55,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     snapshot_interval::Integer, snapshot_filename::AbstractString,
                     comm=nothing, halo::Int=2, dts=nothing, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                     scheme::Symbol=:recommended, pressure_recon=nothing, stage_bgk=nothing, Kn::Real=Inf,
+                    s3max::Real=max(40.0, 4.0 + abs(Ma) / 2.0),
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
                     params=Dict{String,Any}(), include_initial::Bool=true, web_dir=nothing)
     @assert size(M0, 1) == 35 "M0 must be (35,nx,ny,nz)"
@@ -117,9 +118,9 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
         used = multigpu ?
             march3d_slab_gpu!(Md, dx, Ma, k, comm; halo=halo, dts=seg,
                               vacuum_floor=vacuum_floor, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
-                              pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, threads=threads) :
+                              pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads) :
             march3d_gpu!(Md, dx, Ma, k; dts=seg, vacuum_floor=vacuum_floor, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
-                         pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, threads=threads)
+                         pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads)
         t += sum(used); step += k
         dump!()
     end
