@@ -49,10 +49,50 @@ export riemann_flux_dev, rs_code
 
 "selector symbol -> device code (single source of the accepted values)"
 rs_code(s::Symbol) =
-    s === :hll     ? 0 :
-    s === :rusanov ? 1 :
-    s === :roeps3  ? 2 :
-    throw(ArgumentError("unknown riemann_solver=$(s); available: :hll (default), :rusanov, :roeps3"))
+    s === :hll         ? 0 :
+    s === :rusanov     ? 1 :
+    s === :roeps3      ? 2 :
+    s === :roeps3theta ? 3 :
+    throw(ArgumentError("unknown riemann_solver=$(s); available: :hll (default), :rusanov, :roeps3, :roeps3theta"))
+
+# HLL flux (device-safe; the θ* limiter's realizability-preserving baseline)
+@inline function _hll_flux(MLr::NTuple{35,Float64}, MRr::NTuple{35,Float64},
+                           FL::NTuple{35,Float64}, FR::NTuple{35,Float64},
+                           sL::Float64, sR::Float64)
+    if sL >= 0.0
+        return FL
+    elseif sR <= 0.0
+        return FR
+    else
+        den = sR - sL; ss = sL * sR
+        return ntuple(Val(35)) do j
+            (sR * FL[j] - sL * FR[j] + ss * (MRr[j] - MLr[j])) / den
+        end
+    end
+end
+
+# Are BOTH HLL-form intermediate states of the blended flux
+# F(θ) = F_HLL + θ(F̂ − F_HLL) realizable? Device-safe helper (no captured
+# closure — must compile into CUDA kernels). See θ* limiter below.
+@inline _blend_flux(θ::Float64, FH::NTuple{35,Float64}, Fhat::NTuple{35,Float64}) =
+    ntuple(Val(35)) do j
+        FH[j] + θ * (Fhat[j] - FH[j])
+    end
+
+@inline function _blend_realizable(θ::Float64,
+                                   MLr::NTuple{35,Float64}, MRr::NTuple{35,Float64},
+                                   FL::NTuple{35,Float64}, FR::NTuple{35,Float64},
+                                   FH::NTuple{35,Float64}, Fhat::NTuple{35,Float64},
+                                   sL::Float64, sR::Float64)
+    msL = ntuple(Val(35)) do j
+        MLr[j] + ((FH[j] + θ * (Fhat[j] - FH[j])) - FL[j]) / sL
+    end
+    _state_realizable(msL) || return false
+    msR = ntuple(Val(35)) do j
+        MRr[j] + ((FH[j] + θ * (Fhat[j] - FH[j])) - FR[j]) / sR
+    end
+    _state_realizable(msR)
+end
 
 @inline function riemann_flux_dev(rs::Int, axis::Int,
                                   MLr::NTuple{35,Float64}, MRr::NTuple{35,Float64},
@@ -65,7 +105,24 @@ rs_code(s::Symbol) =
             0.5 * (FL[j] + FR[j]) - 0.5 * a * (MRr[j] - MLr[j])
         end
     end
-    if rs == 2
+    if rs == 2 || rs == 3
+        # rs==2 (:roeps3): RoePS3 with the BINARY realizability backstop —
+        # accept F̂ if both HLL-form intermediate states are realizable, else
+        # fall back to HLL.
+        # rs==3 (:roeps3theta): the SAME gate and dissipation, but the binary
+        # backstop is replaced by the EXACT convex limiter θ*
+        # (roe1d/theta-star-derivation.md, notes §10.7): return
+        # F_HLL + θ*(F̂ − F_HLL) with θ* the largest θ∈[0,1] keeping BOTH bar
+        # states realizable. θ*=1 recovers rs==2's accept; θ*=0 its HLL
+        # fallback; θ*∈(0,1) keeps the largest admissible fraction of the sharp
+        # flux the binary backstop discarded. θ* is found here by bisection
+        # (the bar states are affine in θ so the admissible set is the interval
+        # [0,θ*] — bisection converges to its edge); the closed-form Hankel-
+        # pencil solve of the derivation is the O(1) production alternative.
+        # θ* sits BEHIND the shape gate, not instead of it: the gate catches
+        # poison mode 1 (anti-diffusive mass-row term, invisible to the
+        # marginal realizability test), θ* sharpens mode 2 (near-vacuum cone
+        # excursions) — the two defenses are orthogonal (§9(m), §10.7).
         # RoePS3 parity-split treatment, applied ONLY at contact-like faces
         # (small velocity and pressure jumps relative to the wave scale) —
         # exactly where its validated benefits live (contact exactness +
@@ -135,8 +192,30 @@ rs_code(s::Symbol) =
                     mstarR = ntuple(Val(35)) do j
                         MRr[j] + (Fhat[j] - FR[j]) / sR
                     end
-                    if _state_realizable(mstarL) && _state_realizable(mstarR)
-                        return Fhat
+                    bothok = _state_realizable(mstarL) && _state_realizable(mstarR)
+                    if rs == 2
+                        bothok && return Fhat
+                    else
+                        # rs==3: θ* limiter. θ=1 admissible ⇒ no limiting.
+                        if bothok
+                            return Fhat
+                        end
+                        FH = _hll_flux(MLr, MRr, FL, FR, sL, sR)
+                        # bisect for θ* on [0,1]; θ=0 (HLL) is realizable by
+                        # convexity, θ=1 is not (just failed) ⇒ single edge.
+                        lo = 0.0; hi = 1.0
+                        for _ in 1:20
+                            mid = 0.5 * (lo + hi)
+                            if _blend_realizable(mid, MLr, MRr, FL, FR, FH, Fhat, sL, sR)
+                                lo = mid
+                            else
+                                hi = mid
+                            end
+                        end
+                        # blend via a helper (θ a plain arg) — do NOT capture the
+                        # loop-mutated `lo` in a closure, or Julia boxes it and
+                        # the kernel fails to compile.
+                        return _blend_flux(lo, FH, Fhat)
                     end
                 end
             end

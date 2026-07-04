@@ -113,6 +113,74 @@ using Riemann35.RoePS3Dev: roeps3_diss_dev, _marg_eigen5, _vandermonde_solve5!
         @test !_state_realizable(bad)
     end
 
+    @testset "theta* limiter (:roeps3theta) — opt-in convex-limited backstop" begin
+        using Riemann35: riemann_flux_dev, InitializeM4_35, _phys_flux
+        # (a) default :roeps3 (rs==2) is byte-identical to before the θ* branch
+        #     was added: on an interior state F(rs=2) is unchanged. Compare a
+        #     realizable-accept case against a hand-rolled reference is overkill;
+        #     the golden suite covers it. Here: rs==2 and rs==3 must AGREE
+        #     whenever the binary backstop accepts (θ*=1), and both must equal
+        #     the plain parity-split flux there.
+        MLc = Tuple(InitializeM4_35(1.0, 0.05, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0))
+        MRc = Tuple(InitializeM4_35(1.02, 0.05, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0))
+        FLc = Tuple(_phys_flux(collect(MLc), 1)); FRc = Tuple(_phys_flux(collect(MRc), 1))
+        sL, sR = -2.0, 2.0
+        F2 = riemann_flux_dev(2, 1, MLc, MRc, FLc, FRc, sL, sR)
+        F3 = riemann_flux_dev(3, 1, MLc, MRc, FLc, FRc, sL, sR)
+        @test all(F2 .=== F3)               # θ*=1 where the binary accepts
+
+        # (b) at a Maxwellian contact the parity flux is exact and its
+        #     intermediate states are strictly realizable ⇒ θ*=1 ⇒ rs==3 ==
+        #     rs==2 (both the sharp flux, NOT HLL).
+        MLk = Tuple(InitializeM4_35(1.0, 0, 0, 0, 1.0, 0, 0, 1.0, 0, 1.0))
+        MRk = Tuple(InitializeM4_35(1000.0, 0, 0, 0, 1e-3, 0, 0, 1e-3, 0, 1e-3))
+        FLk = Tuple(_phys_flux(collect(MLk), 1)); FRk = Tuple(_phys_flux(collect(MRk), 1))
+        @test all(riemann_flux_dev(3, 1, MLk, MRk, FLk, FRk, -2.5, 2.5) .===
+                  riemann_flux_dev(2, 1, MLk, MRk, FLk, FRk, -2.5, 2.5))
+
+        # (c) on the captured poison face (rs==2 falls back to HLL, part (a) of
+        #     the prior testset), rs==3 returns a convex blend of HLL and the
+        #     sharp flux whose intermediate states ARE realizable — i.e. θ*
+        #     recovers a realizable, at-least-as-sharp-as-HLL flux instead of
+        #     hard HLL. Reuse ML/MR/sL/sR from the poison testset.
+        MLp = (0.036202114813959956, -5.573644655450923e-7, 142.7503137104818,
+               -7898.911964371504, 999961.9684727857, -0.0028017859540235166,
+               142.62382520846108, -7902.958539427523, 999687.1177882002,
+               142.96790502915647, -7933.011847405899, 1.0027068374863835e6,
+               -7937.117830204303, 1.0024362207271369e6, 1.0054611712939047e6,
+               0.002800638209395703, 142.59120266437313, -7879.062226314581,
+               998236.2097305928, 143.03234941002378, -7892.439621415258,
+               1.0007159379035836e6, -7872.482462225589, 998984.7039345226,
+               1.001472412376428e6, 142.75820500502283, -7899.358214130146,
+               1.0000177776840269e6, -7913.152704724206, 1.0009778951137232e6,
+               1.0027643095322745e6, -7896.468333401173, 1.0004374049952858e6,
+               1.0007691641190496e6, 1.0034609489505584e6)
+        MRp = (0.03620214052497041, -5.573648613894697e-7, 142.75030035933113,
+               2631.2097945730193, 611387.1876379917, -0.0028017879438726498,
+               142.5912039898323, 2617.231627436366, 610502.1950244632,
+               143.03236660449994, 2614.3382305630853, 612188.4402291763,
+               2600.264190797183, 611302.1486446162, 612993.8989391038,
+               0.002800640198429764, 142.62383733634283, 2639.9243238734803,
+               611049.1515955298, 142.96790395900874, 2657.2882239139317,
+               612725.9192152589, 2666.069238246919, 612390.0560045339,
+               614070.7341811847, 142.75821286844172, 2631.356984651248,
+               611421.1010201691, 2623.04409475001, 611847.551382906,
+               612221.5208406678, 2643.3095729172874, 611838.253855129,
+               612760.4079732308, 613525.7780347761)
+        sLp, sRp = -96.28614047470464, 72.68375591847992
+        FLp = Tuple(_phys_flux(collect(MLp), 1)); FRp = Tuple(_phys_flux(collect(MRp), 1))
+        F3p = riemann_flux_dev(3, 1, MLp, MRp, FLp, FRp, sLp, sRp)
+        @test all(isfinite, F3p)
+        # its HLL-form intermediate states must be realizable (the whole point)
+        msL = ntuple(j -> MLp[j] + (F3p[j] - FLp[j]) / sLp, 35)
+        msR = ntuple(j -> MRp[j] + (F3p[j] - FRp[j]) / sRp, 35)
+        @test Riemann35.RiemannFluxDev._state_realizable(msL)
+        @test Riemann35.RiemannFluxDev._state_realizable(msR)
+
+        # (d) selector accepts :roeps3theta
+        @test Riemann35.RiemannFluxDev.rs_code(:roeps3theta) == 3
+    end
+
     @testset "selector rejects unknown solver" begin
         old = Riemann35.RIEMANN_SOLVER[]
         try
