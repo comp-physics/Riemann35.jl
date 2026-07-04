@@ -6,6 +6,14 @@
 include(joinpath(@__DIR__, "weno5_dev.jl"));       using .Weno5Dev: weno5z, deconv5, conv5, smooth5
 include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_star_update_dev
 
+# Device-safe validity of a reconstructed recon-var vector (the recon layout has
+# density at slot 1 = M000 and the three variances at slots 5,6,7 = C200,C020,C002).
+# from_recon_vars_dev takes sqrt of the three variances, so a WENO5 overshoot that
+# drives any variance ≤ 0 (or density ≤ 0) would sqrt a negative. We must test this
+# BEFORE the conversion — on the GPU there is no throw to catch, only a silent NaN.
+@inline _recon_vars_realizable(v::NTuple{35,Float64}) =
+    v[1] > 0.0 && v[5] > 0.0 && v[6] > 0.0 && v[7] > 0.0
+
 # ---------------------------------------------------------------------------
 # _face_flux_tup — NTuple{35} in, NTuple{35} HLL flux out.
 # Mirrors face_flux_1d exactly (same realizable_3D_M4 + realize_and_speed +
@@ -110,13 +118,17 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
                    Vavg[clamp(ir-1,1,n2g)][q], Vavg[clamp(ir-2,1,n2g)][q])
         end
 
-        mL = from_recon_vars_dev(vL...)
-        mR = from_recon_vars_dev(vR...)
-
         # Realizability fallback: if a reconstructed face state exits the moment
         # cone, replace it with the cell mean (first-order at that face state).
+        # STAGE 1 (pre-conversion, no throw / no NaN): a WENO5 overshoot can drive
+        # a reconstructed variance ≤ 0; from_recon_vars_dev would then sqrt a
+        # negative (CPU: DomainError; GPU: silent NaN). Guard the recon-var vector
+        # first and fall back to the cell mean BEFORE converting.
         cL = ntuple(q -> Mext[il, q], Val(35))
         cR = ntuple(q -> Mext[ir, q], Val(35))
+        mL = _recon_vars_realizable(vL) ? from_recon_vars_dev(vL...) : cL
+        mR = _recon_vars_realizable(vR) ? from_recon_vars_dev(vR...) : cR
+        # STAGE 2 (post-conversion): net any remaining out-of-cone raw face state.
         RiemannFluxDev._state_realizable(mL) || (mL = cL)
         RiemannFluxDev._state_realizable(mR) || (mR = cR)
 
