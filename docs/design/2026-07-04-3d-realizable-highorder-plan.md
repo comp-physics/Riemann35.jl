@@ -374,17 +374,54 @@ git commit -m "feat(hiorder3): spatial_order=3 CPU dispatch + 3D validation (ord
 
 ---
 
-## Task 5: GPU two-pass kernels (`order == 3`) + parity
+## Task 5: DRY the shared per-face/per-cell logic + GPU two-pass kernels + parity
+
+**DRY MANDATE (the whole point of this task): the GPU must consume the SAME
+device-safe per-face reconstruction and per-cell θ code as the CPU — one source,
+two consumers (the `riemann_flux_dev.jl` pattern), NOT a parallel GPU
+reimplementation.** Task 3 inlined the reconstruction pipeline inside the CPU
+`residual_line3` loop; Step 0 factors it out so both call it.
 
 **Files:**
-- Modify: `gpu/residual3d_gpu.jl` (add `order == 3` two-pass kernels; mirror the existing order-2 flux kernel), `gpu/timestep3d_gpu.jl` / `gpu/gpu_run.jl` (thread `order = 3`)
-- Ensure the GPU module tree `include`s `weno5_dev.jl` + `idp_limiter_dev.jl` (mirror the `riemann_flux_dev.jl` include already there).
-- Create: `gpu/validation/validate_hiorder3_parity.jl`
+- Create: `src/numerics/hiorder3_recon_dev.jl` — the extracted single-source
+  device-safe helpers (NTuple in/out, no allocation): `weno5_face_states_dev`
+  (9-cell raw stencil → `(mL, mR)` raw faces via the deconv→recon-var→conv→weno5→
+  realizability-fallback pipeline) and `idp_cell_thetas_dev` (Mlo + six G
+  corrections + six λ → six θ). Both are exactly the per-face/per-cell math Task 3
+  wrote inline.
+- Modify: `src/numerics/highorder_3d.jl` — REFACTOR `residual_line3`/
+  `residual_ho_3d_order3!` to CALL the new helpers (delete the inlined copies).
+  Re-run Task 3's CPU test — conservation and order must be unchanged (this proves
+  the refactor is behavior-preserving before the GPU consumes the same code).
+- Modify: `gpu/residual3d_gpu.jl` (order==3 kernels calling the SAME helpers),
+  `gpu/timestep3d_gpu.jl` / `gpu/gpu_run.jl` (thread `order = 3`).
+- Ensure both `src/Riemann35.jl` and the GPU module tree `include` the new
+  `hiorder3_recon_dev.jl` (mirror the dual-include of `riemann_flux_dev.jl`).
+- Create: `gpu/validation/validate_hiorder3_parity.jl`.
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–3 (device-safe already).
+- Produces: `weno5_face_states_dev(c₋₄..c₊₄::NTuple{35}, axis, Ma, s3max) -> (mL,mR)`
+  and `idp_cell_thetas_dev(Mlo, G⁻ˣ,G⁺ˣ,...,G⁺ᶻ, λx,λy,λz) -> (θ⁻ˣ,...,θ⁺ᶻ)`,
+  both device-safe, consumed by CPU `highorder_3d.jl` AND GPU `residual3d_gpu.jl`.
 
-- [ ] **Step 1:** In `gpu/residual3d_gpu.jl`, add `order == 3` kernels: a flux kernel that, per face, does the WENO5 reconstruction (the Task-3 device-safe pipeline, but reading from `CuDeviceArray` neighbors and writing `F_HO`,`F_LO` into two face-scratch buffers analogous to the existing `flat` buffer) and a limit+update kernel doing the per-cell joint 6-face θ and blended update. Reuse the order-2 kernel's indexing/halo pattern exactly; only the per-face computation and the two-pass split are new. Allocate the extra anchor face buffer alongside `flat`.
+- [ ] **Step 0 (DRY refactor, do FIRST):** Extract the per-face reconstruction and
+  the per-cell θ math from Task 3's `residual_line3`/`residual_ho_3d_order3!` into
+  `hiorder3_recon_dev.jl` as `weno5_face_states_dev` / `idp_cell_thetas_dev`
+  (NTuple, no allocation — device-safe). Rewrite the CPU functions to call them.
+  Run `test/test_hiorder3_cpu.jl` — conservation (9.7e-17) and order UNCHANGED.
+  Commit this refactor separately ("refactor(hiorder3): extract single-source
+  device-safe per-face/per-cell helpers"). Only then write the GPU kernels.
+
+- [ ] **Step 1:** In `gpu/residual3d_gpu.jl`, add `order == 3` kernels that CALL
+  `weno5_face_states_dev` and `idp_cell_thetas_dev` (the same functions the CPU
+  now uses — zero duplicated numerics). A flux kernel reads the 9-cell stencil
+  from `CuDeviceArray` neighbors, calls `weno5_face_states_dev`, computes
+  F_HO/F_LO (via the shared `riemann_flux_dev` rs=0), stores into two face-scratch
+  buffers (mirror the existing `flat` buffer; add the anchor buffer). A limit+
+  update kernel reads a cell's six face corrections, calls `idp_cell_thetas_dev`,
+  min-combines with neighbors, blends, updates. Reuse the order-2 kernel's
+  indexing/halo pattern exactly. Watch the @noinline/@fastmath device-helper
+  parity gotcha for any shared @fastmath helper.
 
 - [ ] **Step 2:** Thread `order` through `march3d_gpu!`/`march3d_slab_gpu!` (`gpu/timestep3d_gpu.jl`) and `run_gpu_3d` (`gpu/gpu_run.jl`) so `order = 3` selects the new kernels.
 
