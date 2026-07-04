@@ -36,3 +36,32 @@ chk("smooth5 false on jump", !smooth5(0.0,0.0,1.0,1000.0,1000.0))
 
 @printf("Task1: %d pass, %d fail\n", npass, nfail)
 nfail == 0 || exit(1)
+
+include(joinpath(@__DIR__, "..", "src", "numerics", "idp_limiter_dev.jl"))
+using .IdpLimiterDev
+using .IdpLimiterDev.RiemannFluxDev: _state_realizable
+# Maxwellian 35-moment builder (diagonal, isotropic T)
+mw(rho, T) = ntuple(35) do q
+    (q == 1) ? rho : (q in (3,10,20)) ? rho*T : (q in (12,22,35)) ? rho*T^2 :
+    (q in (5,15,25)) ? 3rho*T^2 : 0.0
+end
+Mlo = mw(1.0, 1.0)
+chk("theta*=1 interior (zero dM)", theta_star_update_dev(Mlo, ntuple(_->0.0,Val(35))) == 1.0)
+# dM lowering the x-kurtosis (slot 5) below the Hamburger bound => theta*<1
+baddM = ntuple(j -> j == 5 ? -0.7 * Mlo[5] : 0.0, Val(35))
+th = theta_star_update_dev(Mlo, baddM)
+chk("theta* in (0,1) at boundary", 0.0 < th < 1.0)
+chk("theta* endpoint realizable", _state_realizable(ntuple(j->Mlo[j]+th*baddM[j],Val(35))))
+# brute-force agreement
+function brute(Mlo, dM; n=20000)
+    best = 0.0
+    for k in 0:n
+        t = k/n
+        _state_realizable(ntuple(j->Mlo[j]+t*dM[j],Val(35))) ? (best=t) : break
+    end
+    best
+end
+chk("theta* matches brute (1e-3)", abs(th - brute(Mlo, baddM)) < 1e-3)
+
+@printf("Task2: %d pass, %d fail\n", npass, nfail)
+nfail == 0 || exit(1)
