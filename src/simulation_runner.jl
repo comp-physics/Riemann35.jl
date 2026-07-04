@@ -85,10 +85,16 @@ function simulation_runner(params)
     rank = MPI.Comm_rank(comm)
     nprocs = MPI.Comm_size(comm)
     
+    # Spatial order must be read first so halo can depend on it.
+    # (Also read again at line ~126 for documentation locality — idempotent.)
+    spatial_order = get(params, :spatial_order, 1)
+
     # Constants
-    halo = 2  # Required for pas_HLL stencil
+    # Order-3 (WENO5 + θ*-IDP) requires halo ≥ 4 for the deconvolution/WENO stencils.
+    # Orders 1 and 2 use halo = 2 (byte-identical to the original validated paths).
+    halo = (spatial_order == 3) ? 4 : 2
     bc = :copy
-    
+
     # Unpack parameters
     Nx = params.Nx
     Ny = params.Ny
@@ -813,8 +819,8 @@ function simulation_runner(params)
         
         t += dt
 
-        if spatial_order == 2
-            # --- HIGH-ORDER PATH (spatial_order=2) ---
+        if spatial_order == 2 || spatial_order == 3
+            # --- HIGH-ORDER PATH (spatial_order=2 or 3) ---
             # SSP-RK3 step with per-stage halo exchange + realizability projection.
             # step_highorder_3d! handles its own halos and projection internally;
             # it leaves M in a valid halo'd state ready for the next iteration.
@@ -823,8 +829,12 @@ function simulation_runner(params)
             # eigenvalues6-corrected Mr). That correction is per-cell and
             # density-preserving, so conservation and MPI-losslessness are
             # unaffected; the high-order step advances this hyperbolic state.
+            #
+            # spatial_order=3: WENO5 reconstruction + joint 6-face θ*-IDP limiter
+            # (two-pass; requires halo=4, set above). Passes order=spatial_order
+            # so residual_ho_3d! routes to residual_ho_3d_order3!.
             step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma; s3max=s3max,
-                               order=2, use_limiter=ho_realizability_limiter,
+                               order=spatial_order, use_limiter=ho_realizability_limiter,
                                use_proj_recon=ho_proj_first_order,
                                stage_bgk_kn=(stage_bgk ? Kn : nothing))
         else

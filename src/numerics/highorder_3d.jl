@@ -215,11 +215,15 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
         ih = i + halo;  jh = j + halo
         Mc = ntuple(q -> M[ih, jh, k, q], Val(35))
 
-        # First-order anchor state (Euler step with F_LO on all 6 faces)
-        Mlo = ntuple(Val(35)) do q
-            Mc[q]  -  λx * (FLO_x[i+1,j,k][q] - FLO_x[i,j,k][q])
-                   -  λy * (FLO_y[i,j+1,k][q] - FLO_y[i,j,k][q])
-                   -  λz * (FLO_z[i,j,k+1][q] - FLO_z[i,j,k][q])
+        # First-order anchor state (Euler step with F_LO on all 6 faces).
+        # Short-circuit for dt=0 (λ=0): Mlo = Mc exactly, avoiding IEEE -0.0
+        # sign issues from 0.0*(flux_diff) that would make _state_realizable fail.
+        Mlo = if iszero(λx) && iszero(λy) && iszero(λz)
+            Mc
+        else
+            ntuple(q -> Mc[q] - λx*(FLO_x[i+1,j,k][q]-FLO_x[i,j,k][q])
+                               - λy*(FLO_y[i,j+1,k][q]-FLO_y[i,j,k][q])
+                               - λz*(FLO_z[i,j,k+1][q]-FLO_z[i,j,k][q]), Val(35))
         end
 
         # High-order corrections G = F_HO - F_LO (per face)
