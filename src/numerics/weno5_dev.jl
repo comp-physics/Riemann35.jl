@@ -23,12 +23,24 @@ export weno5z, deconv5, conv5, smooth5
     abs(a - 2c + e) / s <= tol && abs(b - 2c + d) / s <= tol
 end
 
-"WENO5-Z reconstruction, right face of the center cell (mirror args for left)."
+"""
+WENO5-Z reconstruction (Borges et al. 2008), value at the RIGHT face of the
+center cell from its 5-cell average stencil (mirror args for the left face).
+Nonlinear (shock-capturing): the Z-weights bias away from a non-smooth substencil,
+so at a discontinuity the reconstruction is essentially non-oscillatory — this is
+the whole point (a linear interpolant would ring). On smooth data the weights
+approach the optimal (0.1,0.6,0.3) and the scheme is 5th order.
+"""
 @inline function weno5z(vm2, vm1, v0, vp1, vp2)
-    # 5-point Lagrange interpolation at x=0.5
-    # Coefficients: 9/384, -60/384, 270/384, 180/384, -15/384 (scaled to use integer numerators)
-    # Equivalently: (9*vm2 - 60*vm1 + 270*v0 + 180*vp1 - 15*vp2) / 384
-    (9*vm2 - 60*vm1 + 270*v0 + 180*vp1 - 15*vp2) / 384.0
+    q0 = (2vm2 - 7vm1 + 11v0) / 6
+    q1 = (-vm1 + 5v0 + 2vp1) / 6
+    q2 = (2v0 + 5vp1 - vp2) / 6
+    b0 = (13/12)*(vm2 - 2vm1 + v0)^2 + (1/4)*(vm2 - 4vm1 + 3v0)^2
+    b1 = (13/12)*(vm1 - 2v0 + vp1)^2 + (1/4)*(vm1 - vp1)^2
+    b2 = (13/12)*(v0 - 2vp1 + vp2)^2 + (1/4)*(3v0 - 4vp1 + vp2)^2
+    t5 = abs(b0 - b2); ep = 1e-40
+    a0 = 0.1 * (1 + t5/(b0+ep)); a1 = 0.6 * (1 + t5/(b1+ep)); a2 = 0.3 * (1 + t5/(b2+ep))
+    (a0*q0 + a1*q1 + a2*q2) / (a0 + a1 + a2)
 end
 
 end # module

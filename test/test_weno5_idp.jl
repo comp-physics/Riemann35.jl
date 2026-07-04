@@ -5,20 +5,25 @@ using Printf
 npass = 0; nfail = 0
 chk(nm, c) = (global npass, nfail; c ? (npass+=1) : (nfail+=1; @printf("FAIL: %s\n", nm)))
 
-# WENO5-Z recovers the face value of a smooth function to ~5th order.
-# f(x)=sin(2pi x); cell averages over [x-h/2, x+h/2] approximated by point values
-# is the wrong test — use the true right-face value f(x0+h/2) vs weno5z on point
-# values of a smooth cubic where WENO is exact to its formal order.
+# WENO5 reconstructs from cell AVERAGES, not point values. Cell average of f over
+# [xc-h/2, xc+h/2] via 3-pt Gauss; feed the 5-cell average stencil; compare the
+# right-face reconstruction to the exact face value f(x0 + h/2).
 f(x) = sin(2pi*x)
+const _g3 = ((-sqrt(3/5), 5/18), (0.0, 8/18), (sqrt(3/5), 5/18))
+favg(xc, h) = sum(w * f(xc + xi*h/2) for (xi, w) in _g3)
 function order_at(h)
     x0 = 0.13
-    v(k) = f(x0 + k*h)                       # point values (smooth => stand-in averages ok for a convergence slope)
-    fr = weno5z(v(-2), v(-1), v(0), v(1), v(2))
+    a(k) = favg(x0 + k*h, h)                  # cell averages
+    fr = weno5z(a(-2), a(-1), a(0), a(1), a(2))
     abs(fr - f(x0 + h/2))
 end
-e1 = order_at(0.02); e2 = order_at(0.01)
+e1 = order_at(0.01); e2 = order_at(0.005)
 p = log2(e1/e2)
 chk("weno5z order >= 4.5", p >= 4.5)
+# NON-OSCILLATORY guard (catches a linear-interpolant regression): at a strong
+# jump the Z-weights pick the smooth (all-zero) substencil, so weno5z(0,0,0,10,10)
+# is ~0; a 5-point Lagrange interpolant gives ~4.3.
+chk("weno5z shock-capturing (not linear)", abs(weno5z(0.0,0.0,0.0,10.0,10.0)) < 1.0)
 
 # deconv/conv are inverse to O(dx^6): round-trip a smooth quintic sample
 g(x) = 1 + 0.3x + 0.1x^2 - 0.05x^3
