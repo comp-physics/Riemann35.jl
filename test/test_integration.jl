@@ -159,9 +159,10 @@ function run_julia_simulation(Np, tmax)
         r011=r011,
         symmetry_check_interval=symmetry_check_interval,
         enable_memory_tracking=false,
-        debug_output=false
+        debug_output=false,
+        spatial_order=1,   # goldens are order-1 references; pin the regression to the order-1 path
     )
-    
+
     # Run simulation
     start_time = time()
     M_final, final_time, time_steps, grid_out = Riemann35.simulation_runner(params)
@@ -496,7 +497,8 @@ if !STANDALONE
                     symmetry_check_interval=10,
                     homogeneous_z=true,  # MATLAB golden file uses homogeneous z
                     enable_memory_tracking=false,
-                    debug_output=false
+                    debug_output=false,
+                    spatial_order=1,   # golden is an order-1 reference
                 )
                 
                 global M_julia, final_time_julia, time_steps_julia, grid_julia = 
