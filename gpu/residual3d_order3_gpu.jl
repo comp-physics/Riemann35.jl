@@ -332,12 +332,49 @@ function _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# First-order (HLL) six-face anchor of a HALO cell at cube position (px,py,pk),
+# read directly from the haloed cube G. GPU analogue of the CPU `halo_cell_mlo`
+# (highorder_3d.jl PASS 2a'): the SAME cheap anchor the neighbour rank evaluates
+# for that (there interior) cell, so — with the g=8 z-halo exchange + x/y outflow
+# clamp giving bit-identical adjacent cells — the two ranks agree bit-for-bit.
+# dt=0 (all λ zero) short-circuits to the raw cell state, exactly as CPU.
+# Used ONLY at z RANK boundaries (see `_blend_residual!`); z-slab decomposition is
+# the only axis with rank boundaries on the GPU (x/y are always global here).
+# ---------------------------------------------------------------------------
+@inline function _halo_zcell_mlo(G, px::Int, py::Int, pk::Int,
+                                 λx::Float64, λy::Float64, λz::Float64,
+                                 Ma::Float64, s3f::Float64)
+    C = _cellG(G, px, py, pk)
+    (λx == 0.0 && λy == 0.0 && λz == 0.0) && return C
+    FxL = _hll_states(_cellG(G, px-1, py, pk), C, 1, Ma, s3f)
+    FxR = _hll_states(C, _cellG(G, px+1, py, pk), 1, Ma, s3f)
+    FyD = _hll_states(_cellG(G, px, py-1, pk), C, 2, Ma, s3f)
+    FyU = _hll_states(C, _cellG(G, px, py+1, pk), 2, Ma, s3f)
+    FzB = _hll_states(_cellG(G, px, py, pk-1), C, 3, Ma, s3f)
+    FzF = _hll_states(C, _cellG(G, px, py, pk+1), 3, Ma, s3f)
+    return ntuple(q -> C[q] - λx*(FxR[q]-FxL[q]) - λy*(FyU[q]-FyD[q])
+                            - λz*(FzF[q]-FzB[q]), Val(35))
+end
+
 # ===========================================================================
 # PASS 2b — interface θ = min over the two adjacent cells; blend F; residual.
+#
+# z RANK boundaries (zlo/zhi true): the shared z-interface θ = min(own interior
+# cell θ, the z-neighbour HALO cell's θ). The halo cell's θ is computed HERE from
+# its cheap first-order anchor (`_halo_zcell_mlo`, read from the haloed cube) and
+# the SHARED interface's G = F_HO−F_LO (identical across ranks) — the exact GPU
+# analogue of the CPU order-3 rank-boundary θ layer, applied to z. Both ranks
+# arrive at the same min ⇒ conservative + rank-consistent + bit-identical to the
+# single-GPU march (the wide g=8 halo makes every reconstruction footprint real).
+# At GLOBAL z boundaries (zlo/zhi false) the own-cell θ is kept (default; the
+# single-GPU cube march passes both false ⇒ byte-identical to before).
 # ===========================================================================
 function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                           nx::Int, ny::Int, nz::Int,
-                          dx::Float64, dy::Float64, dz::Float64)
+                          dx::Float64, dy::Float64, dz::Float64,
+                          G, g::Int, λx::Float64, λy::Float64, λz::Float64,
+                          Ma::Float64, s3f::Float64, zlo::Bool, zhi::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -348,8 +385,33 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
             θxl = (i > 1)  ? min(Th[2,i,j,k], Th[1,i-1,j,k]) : Th[2,i,j,k]
             θyr = (j < ny) ? min(Th[3,i,j,k], Th[4,i,j+1,k]) : Th[3,i,j,k]
             θyl = (j > 1)  ? min(Th[4,i,j,k], Th[3,i,j-1,k]) : Th[4,i,j,k]
-            θzr = (k < nz) ? min(Th[5,i,j,k], Th[6,i,j,k+1]) : Th[5,i,j,k]
-            θzl = (k > 1)  ? min(Th[6,i,j,k], Th[5,i,j,k-1]) : Th[6,i,j,k]
+
+            # z-right face: interior neighbour, or (top rank boundary) the halo cell
+            # just past interior nz at cube pk = g+nz+1; else global-boundary own-θ.
+            if k < nz
+                θzr = min(Th[5,i,j,k], Th[6,i,j,k+1])
+            elseif zhi
+                Mlo = _halo_zcell_mlo(G, g+i, g+j, g+nz+1, λx, λy, λz, Ma, s3f)
+                Gsh = _face3(FHOz, i, j, nz+1)
+                Gsl = _face3(FLOz, i, j, nz+1)
+                θh  = theta_star_update_dev(Mlo, ntuple(q ->  6λz*(Gsh[q]-Gsl[q]), Val(35)))
+                θzr = min(Th[5,i,j,nz], θh)
+            else
+                θzr = Th[5,i,j,k]
+            end
+            # z-left face: interior neighbour, or (bottom rank boundary) the halo cell
+            # just before interior 1 at cube pk = g; else global-boundary own-θ.
+            if k > 1
+                θzl = min(Th[6,i,j,k], Th[5,i,j,k-1])
+            elseif zlo
+                Mlo2 = _halo_zcell_mlo(G, g+i, g+j, g, λx, λy, λz, Ma, s3f)
+                Gsh2 = _face3(FHOz, i, j, 1)
+                Gsl2 = _face3(FLOz, i, j, 1)
+                θh2  = theta_star_update_dev(Mlo2, ntuple(q -> -6λz*(Gsh2[q]-Gsl2[q]), Val(35)))
+                θzl = min(Th[6,i,j,1], θh2)
+            else
+                θzl = Th[6,i,j,k]
+            end
 
             FHxr = _face3(FHOx, i+1, j, k); FLxr = _face3(FLOx, i+1, j, k)
             FHxl = _face3(FHOx, i,   j, k); FLxl = _face3(FLOx, i,   j, k)
@@ -379,7 +441,8 @@ end
 function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4},
                                     nx::Int, ny::Int, nz::Int, g::Int,
                                     dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
-                                    s3max::Real = 40.0, threads::Int = 128)
+                                    s3max::Real = 40.0, threads::Int = 128,
+                                    rank_bnd = (zlo=false, zhi=false))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
     @assert g >= 4 "order-3 residual requires halo g ≥ 4; got g=$g"
     @assert size(G) == (35, nfx, nfy, nfz) "G must be (35,nx+2g,ny+2g,nz+2g)"
@@ -417,7 +480,9 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                                                    nx, ny, nz, g, λx, λy, λz)
     @cuda threads=threads blocks=bint _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
-                                                       nx, ny, nz, dxf, dyf, dzf)
+                                                       nx, ny, nz, dxf, dyf, dzf,
+                                                       G, g, λx, λy, λz, Maf, s3f,
+                                                       Bool(rank_bnd.zlo), Bool(rank_bnd.zhi))
     return nothing
 end
 

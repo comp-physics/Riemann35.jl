@@ -89,10 +89,12 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     # (halos are refilled internally per stage) and syncs the interior back into `Md`
     # so snapshots/return keep the standard (35,nx,ny,nz) layout. Order-1/2 paths are
     # untouched (this whole block is skipped unless order==3).
+    # order-3 single-GPU builds the cube here; order-3 MULTI-GPU is handled by the
+    # z-slab march (march3d_slab_gpu!(order=3)) in the segment loop below.
     order3 = (order == 3)
+    order3_single = order3 && !multigpu
     G3 = nothing
-    if order3
-        multigpu && error("order-3 GPU is single-GPU only for now (pass comm=nothing); got a communicator")
+    if order3_single
         (size(M0, 3) == n && nzloc == n) ||
             error("order-3 GPU requires a cubic interior (nx==ny==nz); got interior $(size(M0)[2:4])")
         (limiter || proj_first_order || riemann_solver !== :hll) &&
@@ -137,7 +139,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     while step < nstep
         k = min(snapshot_interval, nstep - step)
         seg = dts_host === nothing ? nothing : dts_host[step+1:step+k]
-        used = if order3
+        used = if order3_single
             u = march3d_order3_gpu!(G3, dx, Ma, k; dts=seg, s3max=s3max,
                                     stage_bgk=stage_bgk, Kn=Kn, threads=threads)
             interior_from_cube!(Md, G3; threads=threads)   # sync interior for the snapshot

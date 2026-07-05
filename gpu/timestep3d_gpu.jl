@@ -31,9 +31,11 @@ using CUDA, MPI
 
 include(joinpath(@__DIR__, "residual3d_gpu.jl"))
 include(joinpath(@__DIR__, "realize_gpu.jl"))
+include(joinpath(@__DIR__, "timestep3d_order3_gpu.jl"))   # order-3 WENO5+θ*-IDP single- AND multi-GPU (z-slab) marches
 using .Residual3DGPU: residual3d_gpu!, residual3d_box_gpu!
 using .Residual3DGPU.ReconDev: bgk_relax_tup
 using .RealizeGPU: realizable_batched!
+using .Timestep3DOrder3GPU: march3d_slab_order3_gpu!
 
 export march3d_gpu!, march3d_slab_gpu!, HO_VACUUM_FLOOR_DEFAULT
 
@@ -187,6 +189,15 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
                            pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf,
                            s3max::Real=4.0 + abs(Ma) / 2.0,
                            threads::Int=128)
+    # order==3: route to the z-slab WENO5+θ*-IDP march (its own g=8 haloed-cube path
+    # with z rank-boundary θ). The order-1/2 slab path below is untouched (byte-identical).
+    if order == 3
+        (proj_first_order || limiter || riemann_solver !== :hll) &&
+            error("order-3 z-slab GPU does not support the order-1/2 flux options " *
+                  "(limiter/proj_first_order/riemann_solver); it uses WENO5 + θ*-IDP")
+        return march3d_slab_order3_gpu!(M, dx, Ma, nstep, comm; dts=dts, s3max=s3max,
+                                        stage_bgk=stage_bgk, Kn=Kn, threads=threads)
+    end
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(M, 1) == 35
     n = size(M, 2); nzloc = size(M, 4)

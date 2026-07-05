@@ -7,7 +7,7 @@ using Riemann35
 DATA = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "..", "data"))
 mkpath(DATA)
 
-n = 24; g = 4; Ma = 2.0; dx = 1.0 / n; s3max = 40.0
+n = 24; g = 8; Ma = 2.0; dx = 1.0 / n; s3max = 40.0   # g=8 matches the GPU order-3 halo (HALO3)
 dtN = 2.0 * dx                       # large λ=2 → factor-6 bound (6λ=12) drives θ*<1 in steep cells
 
 # --- Realizable interior field U (35,n,n,n): Maxwellian with a mild 3D sinusoid ---
