@@ -37,7 +37,7 @@ using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
 using .Residual3DOrder3GPU.RealizeDev: realizable_3D_M4_dev
 using .Residual3DOrder3GPU.ReconDev: bgk_relax_tup
 
-export march3d_order3_gpu!
+export march3d_order3_gpu!, build_haloed_cube, interior_from_cube!
 
 const HALO3 = 4
 
@@ -74,6 +74,19 @@ function _copy_interior!(G0, G, n::Int, g::Int)
             i = (idx - 1) % n + 1; r = (idx - 1) ÷ n
             j = r % n + 1;         k = r ÷ n + 1
             for m in 1:35; G0[m, i, j, k] = G[m, g + i, g + j, g + k]; end
+        end
+    end
+    return nothing
+end
+
+# write a compact interior (35,n,n,n) into the interior region of a haloed cube.
+function _set_interior!(G, Mi, n::Int, g::Int)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= n * n * n
+        @inbounds begin
+            i = (idx - 1) % n + 1; r = (idx - 1) ÷ n
+            j = r % n + 1;         k = r ÷ n + 1
+            for m in 1:35; G[m, g + i, g + j, g + k] = Mi[m, i, j, k]; end
         end
     end
     return nothing
@@ -159,6 +172,43 @@ function _speed_interior!(svec, G, n::Int, g::Int)
         end
     end
     return nothing
+end
+
+"""
+    build_haloed_cube(Mi::CuArray{Float64,4}; threads=128) -> CuArray{Float64,4}
+
+Build a `g=HALO3` outflow-haloed cube `(35, n+2g, n+2g, n+2g)` from a device interior
+`(35, n, n, n)`: the interior is copied in and the halos are clamp-filled (outflow,
+nearest-interior). This is the SINGLE source of the interior→haloed-cube bridge shared
+by every `march3d_order3_gpu!` caller (the standalone validation driver AND the standard
+`run_gpu_3d` order-3 path) — the host clamp-fill that used to live in
+`gpu/validation/run_hiorder3_ma100_gpu.jl` produced the exact same cube.
+"""
+function build_haloed_cube(Mi::CuArray{Float64,4}; threads::Int=128)
+    @assert size(Mi, 1) == 35 "interior must be (35,n,n,n)"
+    n = size(Mi, 2)
+    @assert size(Mi) == (35, n, n, n) "interior must be a cube (35,n,n,n); got $(size(Mi))"
+    g = HALO3; nf = n + 2g
+    G = CUDA.zeros(Float64, 35, nf, nf, nf)
+    @cuda threads=threads blocks=cld(n * n * n, threads) _set_interior!(G, Mi, n, g)
+    @cuda threads=threads blocks=cld(nf * nf * nf, threads) _refill_halo!(G, nf, g, n)
+    CUDA.synchronize()
+    return G
+end
+
+"""
+    interior_from_cube!(Mi::CuArray{Float64,4}, G::CuArray{Float64,4}; threads=128) -> Mi
+
+Copy the interior `(35, n, n, n)` out of a `g=HALO3` haloed cube `G` into `Mi`, in place
+(the inverse of `build_haloed_cube`). Reuses the same `_copy_interior!` kernel the march
+uses for its RK `M0` snapshot.
+"""
+function interior_from_cube!(Mi::CuArray{Float64,4}, G::CuArray{Float64,4}; threads::Int=128)
+    n = size(Mi, 2); g = HALO3
+    @assert size(Mi) == (35, n, n, n) "interior must be a cube (35,n,n,n); got $(size(Mi))"
+    @assert size(G) == (35, n + 2g, n + 2g, n + 2g) "G must be the matching haloed cube"
+    @cuda threads=threads blocks=cld(n * n * n, threads) _copy_interior!(Mi, G, n, g)
+    return Mi
 end
 
 """

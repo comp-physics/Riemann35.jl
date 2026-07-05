@@ -25,6 +25,8 @@ module GPURun
 using CUDA, JLD2, MPI
 include(joinpath(@__DIR__, "timestep3d_gpu.jl"))
 using .Timestep3DGPU: march3d_gpu!, march3d_slab_gpu!, HO_VACUUM_FLOOR_DEFAULT
+include(joinpath(@__DIR__, "timestep3d_order3_gpu.jl"))   # order-3 WENO5+θ*-IDP single-GPU march (opt-in via order=3)
+using .Timestep3DOrder3GPU: march3d_order3_gpu!, build_haloed_cube, interior_from_cube!
 include(joinpath(@__DIR__, "..", "src", "web_export.jl"))   # browser-viewable export (single source; shared with the CPU path)
 using .WebExport: maybe_export_web
 
@@ -81,6 +83,26 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     Md = CuArray(M0)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
+    # --- order-3 (WENO5 + θ*-IDP) single-GPU setup ------------------------------
+    # The order-3 march operates on a g=4 outflow-haloed CUBE, not the interior
+    # field. Build the cube ONCE from the interior; each segment marches it in place
+    # (halos are refilled internally per stage) and syncs the interior back into `Md`
+    # so snapshots/return keep the standard (35,nx,ny,nz) layout. Order-1/2 paths are
+    # untouched (this whole block is skipped unless order==3).
+    order3 = (order == 3)
+    G3 = nothing
+    if order3
+        multigpu && error("order-3 GPU is single-GPU only for now (pass comm=nothing); got a communicator")
+        (size(M0, 3) == n && nzloc == n) ||
+            error("order-3 GPU requires a cubic interior (nx==ny==nz); got interior $(size(M0)[2:4])")
+        (limiter || proj_first_order || riemann_solver !== :hll) &&
+            error("order-3 GPU path does not support the order-1/2 flux options " *
+                  "(limiter/proj_first_order/riemann_solver); got limiter=$limiter " *
+                  "proj_first_order=$proj_first_order riemann_solver=:$riemann_solver. " *
+                  "Order-3 uses WENO5 reconstruction + a θ*-IDP Riemann layer.")
+        G3 = build_haloed_cube(Md; threads=threads)   # shared interior→haloed-cube bridge
+    end
+
     # --- gather this rank's slab to a global (nx,ny,Nz,35) host array on rank 0 ---
     function gather_global()
         if !multigpu
@@ -115,12 +137,19 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     while step < nstep
         k = min(snapshot_interval, nstep - step)
         seg = dts_host === nothing ? nothing : dts_host[step+1:step+k]
-        used = multigpu ?
+        used = if order3
+            u = march3d_order3_gpu!(G3, dx, Ma, k; dts=seg, s3max=s3max,
+                                    stage_bgk=stage_bgk, Kn=Kn, threads=threads)
+            interior_from_cube!(Md, G3; threads=threads)   # sync interior for the snapshot
+            u
+        elseif multigpu
             march3d_slab_gpu!(Md, dx, Ma, k, comm; halo=halo, dts=seg,
                               vacuum_floor=vacuum_floor, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
-                              pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads) :
+                              pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads)
+        else
             march3d_gpu!(Md, dx, Ma, k; dts=seg, vacuum_floor=vacuum_floor, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
                          pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads)
+        end
         t += sum(used); step += k
         dump!()
     end

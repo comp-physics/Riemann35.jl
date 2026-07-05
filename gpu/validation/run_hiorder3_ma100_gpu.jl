@@ -31,16 +31,10 @@ if any(f -> !isfile(joinpath(DATA, f)), need)
     run(setenv(`$(Base.julia_cmd()) --project=$repo $dump`, ENV))
 end
 
-# build an outflow-haloed cube (35,nf,nf,nf) from an interior (35,n,n,n): clamp.
-function haloed_cube(Mint::Array{Float64,4}, n::Int, g::Int)
-    nf = n + 2g
-    G = zeros(35, nf, nf, nf)
-    cl(a) = a < 1 ? 1 : (a > n ? n : a)
-    @inbounds for c in 1:nf, b in 1:nf, a in 1:nf
-        @views G[:, a, b, c] .= Mint[:, cl(a-g), cl(b-g), cl(c-g)]
-    end
-    return G
-end
+# interior (35,n,n,n) -> outflow-haloed cube (35,nf,nf,nf): the SINGLE shared bridge
+# (`build_haloed_cube` in Timestep3DOrder3GPU); clamp-fill the halos on device.
+haloed_cube(Mint::Array{Float64,4}, n::Int, g::Int) =
+    Array(build_haloed_cube(CuArray(Mint)))
 
 # ===========================================================================
 # GATE A — GPU march vs CPU step_highorder_3d! (order=3), matched dt, K steps.
