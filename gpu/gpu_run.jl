@@ -84,7 +84,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     # --- order-3 (WENO5 + θ*-IDP) single-GPU setup ------------------------------
-    # The order-3 march operates on a g=4 outflow-haloed CUBE, not the interior
+    # The order-3 march operates on a g=8 outflow-haloed CUBE, not the interior
     # field. Build the cube ONCE from the interior; each segment marches it in place
     # (halos are refilled internally per stage) and syncs the interior back into `Md`
     # so snapshots/return keep the standard (35,nx,ny,nz) layout. Order-1/2 paths are
