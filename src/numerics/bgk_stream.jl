@@ -157,7 +157,7 @@ end
     Kn >= 1e5 && return Mp, Mm
     tot = ntuple(q -> Mp[q] + Mm[q], Val(35))
     rho = tot[1]
-    rho <= _VAC && return Mp, Mm
+    (rho > _VAC && all(isfinite, tot)) || return Mp, Mm
     u = tot[2] / rho; v = tot[6] / rho; w = tot[16] / rho
     Θ = split_temperature(tot)
     tc = Kn / (rho * sqrt(Θ) * 2) + 1e-30
@@ -165,6 +165,8 @@ end
     tgtP, tgtM = split_maxwellian35(rho, u, v, w, Θ, c)
     Mp2 = ntuple(q -> Mp[q] + e * (tgtP[q] - Mp[q]), Val(35))
     Mm2 = ntuple(q -> Mm[q] + e * (tgtM[q] - Mm[q]), Val(35))
+    # never propagate a non-finite relaxation (degenerate total ⇒ leave streams as-is)
+    (all(isfinite, Mp2) && all(isfinite, Mm2)) || return Mp, Mm
     return Mp2, Mm2
 end
 

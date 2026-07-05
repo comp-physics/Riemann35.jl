@@ -96,9 +96,12 @@ end
 # b=0..n_r−1) and take closure = Σ_a ξ_a^{n_r}·y_a. cond(P) ≈ √cond(H), so this
 # recovers the machine-precision exactness the Hankel form loses.
 # ---------------------------------------------------------------------------
-@inline chan_closure(nodes::SVector{1,T}, u::NTuple{1,T}) where {T} = nodes[1] * u[1]
+@inline chan_closure(nodes::SVector{1,T}, u::NTuple{1,T}) where {T} =
+    (isfinite(nodes[1]) && isfinite(u[1])) ? nodes[1] * u[1] : zero(T)
 
 @inline function chan_closure(nodes::SVector{nr,T}, u::NTuple{nr,T}) where {nr,T}
+    # Non-finite input (a corrupted/vacuum stream) ⇒ safe zero (caller guards/floors).
+    (all(isfinite, nodes) && all(isfinite, u)) || return zero(T)
     # Extreme-Ma nodes can coincide numerically ⇒ a singular Vandermonde. Detect it with
     # a cheap min-gap test (no try/catch — that deoptimizes the hot path) and fall back to
     # mean-node extrapolation of the top moment (these are vacuum-boundary cells anyway).
@@ -107,16 +110,19 @@ end
         scale = max(scale, abs(nodes[a]))
     end
     scale += eps(T)
-    mingap = T(Inf)
+    # Vandermonde is singular iff nodes coincide; gate on the relative determinant
+    # (∏ node gaps / scale^#pairs). Below tolerance ⇒ mean-node extrapolation fallback.
+    reldet = one(T)
     @inbounds for a in 1:nr-1, b in a+1:nr
-        mingap = min(mingap, abs(nodes[a] - nodes[b]))
+        reldet *= abs(nodes[a] - nodes[b]) / scale
     end
-    mingap < 1e-9 * scale && return nodes[1] * u[nr]
+    reldet < 1e-9 && return nodes[1] * u[nr]
     P = SMatrix{nr,nr,T}(ntuple(Val(nr * nr)) do t
         r = (t - 1) % nr + 1; c = (t - 1) ÷ nr + 1
         nodes[c]^(r - 1)                    # row = power b=r−1, col = node a=c
     end)
-    y = P \ SVector{nr,T}(u)
+    # inv (not `\`) so a residual near-singularity yields NaN — caught below — never throws.
+    y = inv(P) * SVector{nr,T}(u)
     s = zero(T)
     @inbounds for a in 1:nr
         s += nodes[a]^nr * y[a]

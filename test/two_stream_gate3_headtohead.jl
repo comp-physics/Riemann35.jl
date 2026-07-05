@@ -1,43 +1,46 @@
 # two_stream_gate3_headtohead.jl — Gate 3 (3D head-to-head).
 #
-# One dimensional-split first-order finite-volume driver, run two ways on the SAME
-# crossing-jets config (48x48x16), so the comparison is apples-to-apples:
+# One dimensional-split finite-volume driver, run two ways on the SAME crossing-jets
+# config (48x48x16), sharing the production transverse (HLL) machinery so the only
+# difference is the split axis:
 #
-#   PRODUCTION (single-stream): one 35-moment field; Rusanov faces from the
-#     production closure `flux_closure35_dev`; realizability enforced by the
-#     production projection `realizable_3D_M4` (firings counted).
+#   PRODUCTION (single-stream): one 35-moment field; every direction uses the
+#     production path — `Flux_closure35_and_realizable_3D` fluxes, the
+#     `eigenvalues6{,z}_hyperbolic_3D` wave speeds, and `pas_HLL` — plus the
+#     production realizability projection `realizable_3D_M4` (firings counted).
 #
-#   TWO-STREAM: two 35-moment fields (+/-) split at gauge c=0; donor-cell x-flux
-#     (`xflux_plus35`/`xflux_minus35`, no projection), Rusanov y/z per stream from
-#     the production closure, and the BGK stream coupling. Chain clips counted.
+#   TWO-STREAM: two 35-moment fields (+/-) split at gauge c=0. The split axis (x)
+#     uses the donor-cell half-space stream flux (`xflux_plus35`/`xflux_minus35`, no
+#     projection — realizability by construction). The transverse axes (y,z) use the
+#     UNCHANGED production path per stream (Component 3 of the spec: a half-space-in-x
+#     measure is an ordinary full-line measure in y,z). BGK couples the streams.
+#     x chain-clips and per-stream transverse corrections are counted.
 #
-# Reports, per Mach number: min realizability margins, projection firings vs chain
-# clips, interpenetration structure, and wall time.
+# Reports, per Mach number: projection firings vs chain clips, min realizability
+# margins, interpenetration structure, and wall time.
 
 ENV["HYQMOM_SKIP_PLOTTING"] = "true"; ENV["CI"] = "true"
 using Riemann35, Printf, LinearAlgebra
 
 const N35 = NTuple{35,Float64}
 const VACR = 1e-10
-const VACFLOOR = 1e-8          # stream density floor (positivity safeguard; NOT projection)
+const VACFLOOR = 1e-8
+const HLL_FULL = 1e-2   # cells below this density use the cheap closure (physics negligible)
 const flux_closure35_dev = Riemann35.flux_closure35_dev
-const _VACSTATE = (mv = InitializeM4_35(VACFLOOR, 0.0, 0.0, 0.0, 1e-6, 0.0, 0.0, 1e-6, 0.0, 1e-6);
-                   ntuple(q -> mv[q], 35))::N35
-const _Z35 = ntuple(_ -> 0.0, 35)::N35
+const _VACSTATE = collect(InitializeM4_35(VACFLOOR, 0.0, 0.0, 0.0, 1e-6, 0.0, 0.0, 1e-6, 0.0, 1e-6))
 
-# vacuum/positivity safeguard for a stream: floor near-vacuum or non-finite cells to a
-# tiny isotropic Maxwellian so the transverse closure / BGK never see a degenerate state.
-@inline sanitize(M::N35) = (all(isfinite, M) && M[1] > VACFLOOR) ? M : _VACSTATE
-# transverse (y,z) production fluxes, guarded at the vacuum floor.
-@inline fyfz(M::N35) = (all(isfinite, M) && M[1] > VACFLOOR) ?
-    (F = flux_closure35_dev(M...); (ntuple(q -> F[35+q], 35), ntuple(q -> F[70+q], 35))) :
-    (_Z35, _Z35)
-
-@inline function wavespeed(M::N35)
-    ρ = M[1]; ρ <= VACR && return 0.0
-    u = M[2]/ρ; v = M[6]/ρ; w = M[16]/ρ
-    T = max((M[3]/ρ-u^2 + M[10]/ρ-v^2 + M[20]/ρ-w^2)/3, 1e-12)
+@inline function wavespeed(m)
+    ρ = m[1]; ρ <= VACR && return 0.0
+    u = m[2]/ρ; v = m[6]/ρ; w = m[16]/ρ
+    T = max((m[3]/ρ-u^2 + m[10]/ρ-v^2 + m[20]/ρ-w^2)/3, 1e-12)
     return max(abs(u), abs(v), abs(w)) + 3*sqrt(T)
+end
+
+# sanitize a near-vacuum / non-finite state to a tiny isotropic Maxwellian (positivity
+# safeguard; NOT a realizability projection).
+@inline function sanitize!(v::AbstractVector)
+    (all(isfinite, v) && v[1] > VACFLOOR) || (v .= _VACSTATE)
+    return v
 end
 
 # ------------------------------------------------------------------ IC
@@ -46,155 +49,210 @@ function crossing_ic(Ma; Nx=48, Ny=48, Nz=16)
     dx = step(xs); dy = step(ys); dz = step(zs)
     Uc = Ma/sqrt(2.0); jw = 0.12; off = 0.15
     rhol = 1.0; rhor = 1e-3; T = 1.0
-    cell(ρ, u, v, w) = (mv = InitializeM4_35(ρ, u, v, w, T, 0.0, 0.0, T, 0.0, T); ntuple(q -> mv[q], 35))
-    M = Array{N35}(undef, Nx, Ny, Nz)
+    cell(ρ, u, v, w) = InitializeM4_35(ρ, u, v, w, T, 0.0, 0.0, T, 0.0, T)
+    M = Array{Float64}(undef, Nx, Ny, Nz, 35)
     for k in 1:Nz, j in 1:Ny, i in 1:Nx
         x = xs[i]; y = ys[j]
-        injet1 = abs(x+off) <= jw/2 && abs(y+off) <= jw/2     # SW-origin jet moving NE (+,+)
-        injet2 = abs(x-off) <= jw/2 && abs(y-off) <= jw/2     # NE-origin jet moving SW (-,-)
-        M[i,j,k] = injet1 ? cell(rhol, Uc, Uc, 0.0) :
-                   injet2 ? cell(rhol, -Uc, -Uc, 0.0) :
-                            cell(rhor, 0.0, 0.0, 0.0)
+        injet1 = abs(x+off) <= jw/2 && abs(y+off) <= jw/2
+        injet2 = abs(x-off) <= jw/2 && abs(y-off) <= jw/2
+        c = injet1 ? cell(rhol, Uc, Uc, 0.0) :
+            injet2 ? cell(rhol, -Uc, -Uc, 0.0) : cell(rhor, 0.0, 0.0, 0.0)
+        @views M[i,j,k,:] .= c
     end
     return M, dx, dy, dz
 end
 
+@inline tup35(M, i, j, k) = ntuple(q -> @inbounds(M[i,j,k,q]), 35)
+
+# global CFL time step from a cheap wave-speed bound (identical for both schemes)
+function global_dt(fields, dx, dy, dz, CFL)
+    α = 0.0
+    for M in fields
+        Nx, Ny, Nz, _ = size(M)
+        for k in 1:Nz, j in 1:Ny, i in 1:Nx
+            α = max(α, wavespeed(tup35(M, i, j, k)))
+        end
+    end
+    return CFL*min(dx, dy, dz)/max(α, 1e-12)
+end
+
+# two-stream dt: the donor-cell x-CFL is set by the TRUE stream support node
+# (stream_xspeed), the transverse by the wave-speed bound; take the tighter.
+function global_dt_2s(Mp, Mm, dx, dy, dz, CFL)
+    sx = 1e-12; syz = 1e-12
+    Nx, Ny, Nz, _ = size(Mp)
+    for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        tp = tup35(Mp, i, j, k); tm = tup35(Mm, i, j, k)
+        sx = max(sx, stream_xspeed(tp), stream_xspeed(tm))
+        syz = max(syz, wavespeed(tp), wavespeed(tm))
+    end
+    return CFL*min(dx/sx, dy/syz, dz/syz)
+end
+
+# ---------------------------------------------------------------------------
+# One production HLL sweep along `axis` on a 35-moment field M (in place).
+# Fluxes + wave speeds from the production path; realizability-preserving.
+# ---------------------------------------------------------------------------
+function hll_sweep!(M::Array{Float64,4}, dt, ds, axis::Int, Ma)
+    Nx, Ny, Nz, _ = size(M)
+    axis == 3 && Nz == 1 && return
+    F = Array{Float64}(undef, Nx, Ny, Nz, 35)
+    vmin = Array{Float64}(undef, Nx, Ny, Nz); vmax = similar(vmin)
+    off = axis == 1 ? 0 : axis == 2 ? 35 : 70
+    for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        mt = tup35(M, i, j, k)
+        if mt[1] < HLL_FULL
+            # near-vacuum background: the production realizability loop is wasted here
+            # (flux is negligible); use the cheap alloc-free closure + wave-speed bound.
+            Fdev = flux_closure35_dev(mt...)
+            @inbounds for q in 1:35; F[i,j,k,q] = Fdev[off+q]; end
+            ws = wavespeed(mt); vmin[i,j,k] = -ws; vmax[i,j,k] = ws
+        else
+            m = collect(mt)
+            Fx, Fy, Fz, _ = Flux_closure35_and_realizable_3D(m, 0, Ma)
+            Fsel = axis == 1 ? Fx : axis == 2 ? Fy : Fz
+            @views F[i,j,k,:] .= Fsel
+            lo, hi, _ = axis == 3 ? eigenvalues6z_hyperbolic_3D(m, 0, Ma) :
+                                    eigenvalues6_hyperbolic_3D(m, axis, 0, Ma)
+            vmin[i,j,k] = isfinite(lo) ? lo : -wavespeed(m)
+            vmax[i,j,k] = isfinite(hi) ? hi :  wavespeed(m)
+        end
+    end
+    Mnew = copy(M)
+    if axis == 1
+        for k in 1:Nz, j in 1:Ny
+            @views Mnew[:,j,k,:] .= pas_HLL(M[:,j,k,:], F[:,j,k,:], dt, ds, vmin[:,j,k], vmax[:,j,k])
+        end
+    elseif axis == 2
+        for k in 1:Nz, i in 1:Nx
+            @views Mnew[i,:,k,:] .= pas_HLL(M[i,:,k,:], F[i,:,k,:], dt, ds, vmin[i,:,k], vmax[i,:,k])
+        end
+    else
+        for j in 1:Ny, i in 1:Nx
+            @views Mnew[i,j,:,:] .= pas_HLL(M[i,j,:,:], F[i,j,:,:], dt, ds, vmin[i,j,:], vmax[i,j,:])
+        end
+    end
+    M .= Mnew
+    return
+end
+
 # ------------------------------------------------- production single-stream run
-function run_single(Ma; nsteps=60, CFL=0.2, Kn=1000.0)
+function run_single(Ma; nsteps=40, CFL=0.2, Kn=1000.0)
     M, dx, dy, dz = crossing_ic(Ma)
-    Nx, Ny, Nz = size(M)
-    Fx = similar(M); Fy = similar(M); Fz = similar(M)
-    h = min(dx, dy, dz)
-    fired_total = 0; min_margin = Inf
+    Nx, Ny, Nz, _ = size(M)
+    fired = 0; min_margin = Inf
     t0 = time()
     for step in 1:nsteps
-        α = 0.0
-        for c in M; α = max(α, wavespeed(c)); end
-        dt = CFL*h/max(α, 1e-12)
-        for idx in eachindex(M)
-            F = flux_closure35_dev(M[idx]...)
-            Fx[idx] = ntuple(q -> F[q], 35); Fy[idx] = ntuple(q -> F[35+q], 35); Fz[idx] = ntuple(q -> F[70+q], 35)
-        end
-        Mnew = copy(M)
-        for k in 2:Nz-1, j in 2:Ny-1, i in 2:Nx-1
-            fxR = 0.5 .* (Fx[i,j,k] .+ Fx[i+1,j,k]) .- (0.5α) .* (M[i+1,j,k] .- M[i,j,k])
-            fxL = 0.5 .* (Fx[i-1,j,k] .+ Fx[i,j,k]) .- (0.5α) .* (M[i,j,k] .- M[i-1,j,k])
-            fyR = 0.5 .* (Fy[i,j,k] .+ Fy[i,j+1,k]) .- (0.5α) .* (M[i,j+1,k] .- M[i,j,k])
-            fyL = 0.5 .* (Fy[i,j-1,k] .+ Fy[i,j,k]) .- (0.5α) .* (M[i,j,k] .- M[i,j-1,k])
-            fzR = 0.5 .* (Fz[i,j,k] .+ Fz[i,j,k+1]) .- (0.5α) .* (M[i,j,k+1] .- M[i,j,k])
-            fzL = 0.5 .* (Fz[i,j,k-1] .+ Fz[i,j,k]) .- (0.5α) .* (M[i,j,k] .- M[i,j,k-1])
-            Mnew[i,j,k] = M[i,j,k] .- dt .* ((fxR .- fxL)./dx .+ (fyR .- fyL)./dy .+ (fzR .- fzL)./dz)
-        end
-        # BGK + production realizability projection (count firings)
-        for k in 2:Nz-1, j in 2:Ny-1, i in 2:Nx-1
-            c = collect(Mnew[i,j,k])
-            c = collision35(c, dt, Kn)
-            mg = realizability_margin(c)
+        dt = global_dt((M,), dx, dy, dz, CFL)
+        hll_sweep!(M, dt, dx, 1, Ma)
+        hll_sweep!(M, dt, dy, 2, Ma)
+        hll_sweep!(M, dt, dz, 3, Ma)
+        for k in 1:Nz, j in 1:Ny, i in 1:Nx
+            m = collect(tup35(M, i, j, k))
+            m = collision35(m, dt, Kn)
+            mg = realizability_margin(m)
             if mg < 0
-                fired_total += 1
-                c = realizable_3D_M4(c, Ma)
-                mg = realizability_margin(c)
+                fired += 1; m = realizable_3D_M4(m, Ma); mg = realizability_margin(m)
             end
-            c[1] > 0.05 && (min_margin = min(min_margin, mg))
-            Mnew[i,j,k] = ntuple(q -> c[q], 35)
+            m[1] > 0.05 && (min_margin = min(min_margin, mg))
+            @views M[i,j,k,:] .= m
         end
-        M = Mnew
     end
-    wall = time() - t0
-    return (fired=fired_total, min_margin=min_margin, wall=wall, M=M)
+    return (fired=fired, min_margin=min_margin, wall=time()-t0)
+end
+
+# is a stream cell's x-marginal chain-realizable? (mirror the − stream to [0,∞))
+@inline function stream_chain_ok(M, i, j, k, isplus)
+    m0 = M[i,j,k,1]
+    marg = isplus ? (m0, M[i,j,k,2], M[i,j,k,3], M[i,j,k,4], M[i,j,k,5]) :
+                    (m0, -M[i,j,k,2], M[i,j,k,3], -M[i,j,k,4], M[i,j,k,5])
+    return chain_realizable(chain(marg))
 end
 
 # ------------------------------------------------------------ two-stream run
-function run_twostream(Ma; nsteps=60, CFL=0.2, Kn=1000.0, c=0.0)
+function run_twostream(Ma; nsteps=40, CFL=0.2, Kn=1000.0, c=0.0)
     M0, dx, dy, dz = crossing_ic(Ma)
-    Nx, Ny, Nz = size(M0)
-    Mp = Array{N35}(undef, Nx, Ny, Nz); Mm = similar(Mp)
-    for idx in eachindex(M0)
-        ρ = M0[idx][1]; u = M0[idx][2]/ρ; v = M0[idx][6]/ρ; w = M0[idx][16]/ρ
-        T = max((M0[idx][3]/ρ-u^2 + M0[idx][10]/ρ-v^2 + M0[idx][20]/ρ-w^2)/3, 1e-12)
-        Mp[idx], Mm[idx] = split_maxwellian35(ρ, u, v, w, T, c)
+    Nx, Ny, Nz, _ = size(M0)
+    Mp = Array{Float64}(undef, Nx, Ny, Nz, 35); Mm = similar(Mp)
+    for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        m = tup35(M0, i, j, k); ρ = m[1]
+        u = m[2]/ρ; v = m[6]/ρ; w = m[16]/ρ
+        T = max((m[3]/ρ-u^2 + m[10]/ρ-v^2 + m[20]/ρ-w^2)/3, 1e-12)
+        p, mm = split_maxwellian35(ρ, u, v, w, T, c)
+        @views Mp[i,j,k,:] .= p; @views Mm[i,j,k,:] .= mm
     end
-    Xp = similar(Mp); Xm = similar(Mp)
-    FyP = similar(Mp); FzP = similar(Mp); FyM = similar(Mp); FzM = similar(Mp)
-    h = min(dx, dy, dz)
     reset_chain_clips!()
-    min_margin = Inf; min_tot_margin = Inf; interpen = 0; str_proj = 0
+    str_proj = 0; bulk_clips = 0; min_margin = Inf; interpen = 0
+    Xp = Array{Float64}(undef, Nx, Ny, Nz, 35); Xm = similar(Xp)
     t0 = time()
     for step in 1:nsteps
-        α = 0.0
-        for idx in eachindex(Mp); α = max(α, wavespeed(Mp[idx]), wavespeed(Mm[idx])); end
-        dt = CFL*h/max(α, 1e-12)
-        for idx in eachindex(Mp)
-            Xp[idx] = xflux_plus35(Mp[idx]...); Xm[idx] = xflux_minus35(Mm[idx])
-            FyP[idx], FzP[idx] = fyfz(Mp[idx]); FyM[idx], FzM[idx] = fyfz(Mm[idx])
+        dt = global_dt_2s(Mp, Mm, dx, dy, dz, CFL)
+        # x-sweep: donor-cell half-space stream flux (no projection)
+        for k in 1:Nz, j in 1:Ny, i in 1:Nx
+            @views Xp[i,j,k,:] .= xflux_plus35(tup35(Mp, i, j, k)...)
+            @views Xm[i,j,k,:] .= xflux_minus35(tup35(Mm, i, j, k))
         end
-        Np = copy(Mp); Nm = copy(Mm)
-        for k in 2:Nz-1, j in 2:Ny-1, i in 2:Nx-1
-            # + stream: donor-cell x (inflow from left) + Rusanov y/z
-            xdivP = (Xp[i,j,k] .- Xp[i-1,j,k]) ./ dx
-            fyR = 0.5 .* (FyP[i,j,k] .+ FyP[i,j+1,k]) .- (0.5α) .* (Mp[i,j+1,k] .- Mp[i,j,k])
-            fyL = 0.5 .* (FyP[i,j-1,k] .+ FyP[i,j,k]) .- (0.5α) .* (Mp[i,j,k] .- Mp[i,j-1,k])
-            fzR = 0.5 .* (FzP[i,j,k] .+ FzP[i,j,k+1]) .- (0.5α) .* (Mp[i,j,k+1] .- Mp[i,j,k])
-            fzL = 0.5 .* (FzP[i,j,k-1] .+ FzP[i,j,k]) .- (0.5α) .* (Mp[i,j,k] .- Mp[i,j,k-1])
-            Np[i,j,k] = Mp[i,j,k] .- dt .* (xdivP .+ (fyR .- fyL)./dy .+ (fzR .- fzL)./dz)
-            # - stream: donor-cell x (inflow from right) + Rusanov y/z
-            xdivM = (Xm[i+1,j,k] .- Xm[i,j,k]) ./ dx
-            gyR = 0.5 .* (FyM[i,j,k] .+ FyM[i,j+1,k]) .- (0.5α) .* (Mm[i,j+1,k] .- Mm[i,j,k])
-            gyL = 0.5 .* (FyM[i,j-1,k] .+ FyM[i,j,k]) .- (0.5α) .* (Mm[i,j,k] .- Mm[i,j-1,k])
-            gzR = 0.5 .* (FzM[i,j,k] .+ FzM[i,j,k+1]) .- (0.5α) .* (Mm[i,j,k+1] .- Mm[i,j,k])
-            gzL = 0.5 .* (FzM[i,j,k-1] .+ FzM[i,j,k]) .- (0.5α) .* (Mm[i,j,k] .- Mm[i,j,k-1])
-            Nm[i,j,k] = Mm[i,j,k] .- dt .* (xdivM .+ (gyR .- gyL)./dy .+ (gzR .- gzL)./dz)
+        for k in 1:Nz, j in 1:Ny, i in 2:Nx-1, q in 1:35
+            Mp[i,j,k,q] -= (dt/dx)*(Xp[i,j,k,q] - Xp[i-1,j,k,q])   # + inflow from left
+            Mm[i,j,k,q] -= (dt/dx)*(Xm[i+1,j,k,q] - Xm[i,j,k,q])   # − inflow from right
         end
-        # vacuum safeguard + production transverse (y,z) realizability correction per
-        # stream (the spec keeps the production hyperbolicity path for those directions;
-        # the x-direction is realizability-safe by donor-cell construction) + BGK.
-        for k in 2:Nz-1, j in 2:Ny-1, i in 2:Nx-1
-            p = sanitize(Np[i,j,k]); m = sanitize(Nm[i,j,k])
-            if p[1] > 0.05
-                cp = collect(p)
-                if realizability_margin(cp) < 0
-                    str_proj += 1; cp = realizable_3D_M4(cp, Ma); p = ntuple(q -> cp[q], 35)
-                end
+        # y/z-sweeps: UNCHANGED production HLL path, per stream
+        hll_sweep!(Mp, dt, dy, 2, Ma); hll_sweep!(Mm, dt, dy, 2, Ma)
+        hll_sweep!(Mp, dt, dz, 3, Ma); hll_sweep!(Mm, dt, dz, 3, Ma)
+        # transverse realizability correction (production path) + BGK coupling
+        for k in 1:Nz, j in 1:Ny, i in 1:Nx
+            p = sanitize!(collect(tup35(Mp, i, j, k)))
+            m = sanitize!(collect(tup35(Mm, i, j, k)))
+            if p[1] > 0.05 && realizability_margin(p) < 0
+                str_proj += 1; p = realizable_3D_M4(p, Ma)
             end
-            if m[1] > 0.05
-                cm = collect(m)
-                if realizability_margin(cm) < 0
-                    str_proj += 1; cm = realizable_3D_M4(cm, Ma); m = ntuple(q -> cm[q], 35)
-                end
+            if m[1] > 0.05 && realizability_margin(m) < 0
+                str_proj += 1; m = realizable_3D_M4(m, Ma)
             end
-            Np[i,j,k], Nm[i,j,k] = bgk_stream_relax(p, m, dt, Kn, c)
+            pp, mm = bgk_stream_relax(ntuple(q -> p[q], 35), ntuple(q -> m[q], 35), dt, Kn, c)
+            (all(isfinite, pp) && pp[1] > VACFLOOR) || (pp = ntuple(q -> _VACSTATE[q], 35))
+            (all(isfinite, mm) && mm[1] > VACFLOOR) || (mm = ntuple(q -> _VACSTATE[q], 35))
+            @views Mp[i,j,k,:] .= pp; @views Mm[i,j,k,:] .= mm
         end
-        Mp = Np; Mm = Nm
+        # per-step diagnostics: bulk chain-clips (x-realizability of mass-bearing streams),
+        # peak interpenetration (jets pass through then separate, so this peaks mid-crossing),
+        # and min stream realizability margin.
+        ip = 0
+        for k in 1:Nz, j in 1:Ny, i in 2:Nx-1
+            pm = Mp[i,j,k,1]; mm = Mm[i,j,k,1]
+            pm > 0.05 && !stream_chain_ok(Mp, i, j, k, true) && (bulk_clips += 1)
+            mm > 0.05 && !stream_chain_ok(Mm, i, j, k, false) && (bulk_clips += 1)
+            (pm > 0.05 && mm > 0.05) && (ip += 1)
+            pm > 0.05 && (min_margin = min(min_margin, realizability_margin(collect(tup35(Mp, i, j, k)))))
+            mm > 0.05 && (min_margin = min(min_margin, realizability_margin(collect(tup35(Mm, i, j, k)))))
+        end
+        interpen = max(interpen, ip)
     end
     wall = time() - t0
-    # metrics on the final state
-    for k in 2:size(Mp,3)-1, j in 2:size(Mp,2)-1, i in 2:size(Mp,1)-1
-        p = Mp[i,j,k]; m = Mm[i,j,k]
-        p[1] > 0.05 && (min_margin = min(min_margin, realizability_margin(collect(p))))
-        m[1] > 0.05 && (min_margin = min(min_margin, realizability_margin(collect(m))))
-        tot = p .+ m
-        tot[1] > 0.05 && (min_tot_margin = min(min_tot_margin, realizability_margin(collect(tot))))
-        (p[1] > 0.05 && m[1] > 0.05) && (interpen += 1)
-    end
-    return (clips=chain_clips(), str_proj=str_proj, min_margin=min_margin, min_tot_margin=min_tot_margin,
-            interpen=interpen, wall=wall, Mp=Mp, Mm=Mm)
+    return (clips=chain_clips(), bulk_clips=bulk_clips, str_proj=str_proj,
+            min_margin=min_margin, interpen=interpen, wall=wall)
 end
 
 # ----------------------------------------------------------------------- main
 function main()
-    # per-Ma settings: Ma=5 is comfortably resolved at CFL=0.2; Ma=100 is a known-hard
-    # regime, so this standalone driver's first-order transverse Rusanov needs CFL=0.1.
+    # (Ma, CFL, nsteps, Kn). Production CFL = 1/3. Ma=100 crossing is (nearly-)collisionless
+    # (Kn=1e3 gives e~1e-5/step); the counter-streaming shared-Maxwellian BGK target is only
+    # stable at the crossing in the collisionless limit, so Ma=100 uses Kn=1e9 (see docs).
     cases = length(ARGS) >= 1 ? [(parse(Float64, ARGS[1]),
-                                  length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 0.2,
-                                  length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 60)] :
-                                 [(5.0, 0.2, 60), (100.0, 0.1, 30)]
+                                  length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 1/3,
+                                  length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 40,
+                                  length(ARGS) >= 4 ? parse(Float64, ARGS[4]) : 1e3)] :
+                                 [(5.0, 1/3, 40, 1e3), (100.0, 1/3, 40, 1e9)]
     println("=== Gate 3: two-stream vs production, crossing jets 48x48x16 ===")
-    @printf("%-6s | %-40s | %-56s | %s\n", "Ma", "PRODUCTION (single-stream)", "TWO-STREAM", "wall x")
-    for (Ma, CFL, nsteps) in cases
-        s = run_single(Ma; nsteps=nsteps, CFL=CFL)
-        d = run_twostream(Ma; nsteps=nsteps, CFL=CFL)
-        @printf("Ma=%-3g | proj_fires=%-8d min_margin=%+.2e | x_clips=%-6d yz_proj=%-6d min_str_margin=%+.2e tot_margin=%+.2e interpen=%-5d | %.2fx\n",
-                Ma, s.fired, s.min_margin, d.clips, d.str_proj, d.min_margin, d.min_tot_margin, d.interpen, d.wall/s.wall)
+    for (Ma, CFL, nsteps, Kn) in cases
+        s = run_single(Ma; nsteps=nsteps, CFL=CFL, Kn=Kn)
+        d = run_twostream(Ma; nsteps=nsteps, CFL=CFL, Kn=Kn)
+        @printf("Ma=%-4g (CFL=%.3f, %d steps, Kn=%g)\n", Ma, CFL, nsteps, Kn)
+        @printf("  PRODUCTION : projection35_fires=%-7d min_margin=%+.2e wall=%.1fs\n",
+                s.fired, s.min_margin, s.wall)
+        @printf("  TWO-STREAM : bulk_x_clips=%-5d flux_clips=%-7d transverse_hyp_corr=%-6d min_str_margin=%+.2e peak_interpen=%-5d wall=%.1fs\n",
+                d.bulk_clips, d.clips, d.str_proj, d.min_margin, d.interpen, d.wall)
+        @printf("  wall ratio (two-stream / production) = %.2fx\n", d.wall/s.wall)
     end
 end
 

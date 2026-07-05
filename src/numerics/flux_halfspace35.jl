@@ -50,8 +50,17 @@ const _ZERO35 = ntuple(_ -> 0.0, Val(35))
         M031,M012,M112,M013,M022)
 
     (isfinite(M000) && M000 > VAC_CHAIN) || return _ZERO35
-    # (a cheap finiteness guard on the marginal; full-vector check done by caller)
-    (isfinite(M100) && isfinite(M200) && isfinite(M300) && isfinite(M400)) || return _ZERO35
+    # full finiteness guard (spec gotcha: check all(isfinite, M) before closures)
+    allfin = isfinite(M100) & isfinite(M200) & isfinite(M300) & isfinite(M400) &
+             isfinite(M010) & isfinite(M110) & isfinite(M210) & isfinite(M310) &
+             isfinite(M020) & isfinite(M120) & isfinite(M220) & isfinite(M030) &
+             isfinite(M130) & isfinite(M040) & isfinite(M001) & isfinite(M101) &
+             isfinite(M201) & isfinite(M301) & isfinite(M002) & isfinite(M102) &
+             isfinite(M202) & isfinite(M003) & isfinite(M103) & isfinite(M004) &
+             isfinite(M011) & isfinite(M111) & isfinite(M211) & isfinite(M021) &
+             isfinite(M121) & isfinite(M031) & isfinite(M012) & isfinite(M112) &
+             isfinite(M013) & isfinite(M022)
+    allfin || return _ZERO35
 
     zraw = chain((M000, M100, M200, M300, M400))
     z, nc = clip_chain(zraw)
