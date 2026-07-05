@@ -3,48 +3,11 @@
 # default order=1,2 code path (byte-identical guarantee). The modules create
 # sub-modules of Riemann35 and their names are brought into this file's scope.
 # ---------------------------------------------------------------------------
-include(joinpath(@__DIR__, "weno5_dev.jl"));       using .Weno5Dev: weno5z, deconv5, conv5, smooth5
 include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_star_update_dev
-
-# Device-safe validity of a reconstructed recon-var vector (the recon layout has
-# density at slot 1 = M000 and the three variances at slots 5,6,7 = C200,C020,C002).
-# from_recon_vars_dev takes sqrt of the three variances, so a WENO5 overshoot that
-# drives any variance ≤ 0 (or density ≤ 0) would sqrt a negative. We must test this
-# BEFORE the conversion — on the GPU there is no throw to catch, only a silent NaN.
-@inline _recon_vars_realizable(v::NTuple{35,Float64}) =
-    v[1] > 0.0 && v[5] > 0.0 && v[6] > 0.0 && v[7] > 0.0
-
-# ---------------------------------------------------------------------------
-# weno_scaled_face_dev — continuous Zhang–Shu / Fan–Huang–Wu realizability
-# scaling of a WENO5 face (the principled replacement for a binary drop-to-mean).
-# Blend the reconstructed recon-var face `vW` toward the cell's recon-var vector
-# `Vc` (whose raw image is the cell mean, kept realizable by the per-cell
-# projection) by the LARGEST θ ∈ [0,1] for which the converted raw face is
-# realizable:  v(θ) = Vc + θ(vW − Vc).  θ = 1 in smooth regions (full 5th order,
-# BYTE-IDENTICAL to the unlimited path); θ → 0 only where realizability forces it
-# — a graceful, local order-drop instead of a first-order cliff. The admissible
-# set is taken as [0, θ*] (same assumption as `scaling_limited_faces`; θ = 0 is
-# the realizable cell mean, so a feasible θ always exists). Device-safe: NTuple,
-# no allocation, bisection, NO throw (GPU-reusable — Task 5 extracts this).
-@inline function weno_scaled_face_dev(vW::NTuple{35,Float64}, Vc::NTuple{35,Float64},
-                                      cmean::NTuple{35,Float64}; nb::Int = 20)
-    # fast path: unlimited WENO already realizable → identical to the old behaviour
-    if _recon_vars_realizable(vW)
-        mW = from_recon_vars_dev(vW...)
-        RiemannFluxDev._state_realizable(mW) && return mW
-    end
-    # bisection for the largest feasible θ
-    lo = 0.0; hi = 1.0
-    for _ in 1:nb
-        mid = 0.5 * (lo + hi)
-        vθ = ntuple(q -> Vc[q] + mid * (vW[q] - Vc[q]), Val(35))
-        ok = _recon_vars_realizable(vθ) &&
-             RiemannFluxDev._state_realizable(from_recon_vars_dev(vθ...))
-        ok ? (lo = mid) : (hi = mid)
-    end
-    vθ = ntuple(q -> Vc[q] + lo * (vW[q] - Vc[q]), Val(35))
-    _recon_vars_realizable(vθ) ? from_recon_vars_dev(vθ...) : cmean
-end
+# Single-source device-safe order-3 reconstruction primitives, shared VERBATIM with
+# the GPU order-3 kernels (hiorder3_recon_dev.jl) — residual_line3 just composes them.
+include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
+    recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev, recon_vars_realizable
 
 # ---------------------------------------------------------------------------
 # _face_flux_tup — NTuple{35} in, NTuple{35} HLL flux out.
@@ -96,17 +59,13 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
     # smooth, apply deconv5 (O(h^6) avg→point); otherwise keep the cell average.
     # Cells within 2 of the array boundary cannot access a full ±2 stencil:
     # fall back to the cell average for those (they are ghost cells anyway).
+    _cellrow(k) = ntuple(q -> Mext[k, q], Val(35))
     Ppt = Vector{NTuple{35,Float64}}(undef, n2g)
     for k in 1:n2g
-        rawpt = ntuple(Val(35)) do q
-            if k >= 3 && k <= n2g - 2
-                a, b, c, d, e = Mext[k-2,q], Mext[k-1,q], Mext[k,q], Mext[k+1,q], Mext[k+2,q]
-                smooth5(a, b, c, d, e) ? deconv5(a, b, c, d, e) : c
-            else
-                Mext[k, q]          # boundary: stencil OOB → cell average fallback
-            end
-        end
-        Ppt[k] = to_recon_vars_dev(rawpt...)
+        Ppt[k] = (k >= 3 && k <= n2g - 2) ?
+            recon_point_dev(_cellrow(k-2), _cellrow(k-1), _cellrow(k),
+                            _cellrow(k+1), _cellrow(k+2)) :
+            to_recon_vars_dev(_cellrow(k)...)   # boundary: OOB stencil → cell average
     end
 
     # --- Step 2: forward-convolve recon-var point values → recon-var averages --
@@ -115,12 +74,10 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
     # (skipping this step caps effective order at 2). Stencil indices are
     # clamped to [1..n2g] at the array boundary (replicates the outermost
     # ghost Ppt value — only affects the outermost 2 cells, which are ghosts).
+    _pp(k) = Ppt[clamp(k, 1, n2g)]
     Vavg = Vector{NTuple{35,Float64}}(undef, n2g)
     for k in 1:n2g
-        Vavg[k] = ntuple(Val(35)) do q
-            p(j) = Ppt[clamp(k + j, 1, n2g)][q]
-            conv5(p(-2), p(-1), p(0), p(1), p(2))
-        end
+        Vavg[k] = recon_avg_dev(_pp(k-2), _pp(k-1), _pp(k), _pp(k+1), _pp(k+2))
     end
 
     # --- Step 3: WENO5 face reconstruction + F_HO / F_LO per interface ------
@@ -131,37 +88,17 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
     #   uses Vavg[ir-2..ir+2]; for f=n+1, ir=g+n → indices g+n-2..g+n+2 ≤ n2g-2 — valid.
     # Clamping guards against the two outermost ghost positions (indices 1 and n2g)
     # being accessed by Vavg's conv5; it does NOT widen the face stencil itself.
+    _vv(k) = Vavg[clamp(k, 1, n2g)]
     F_HO = Vector{NTuple{35,Float64}}(undef, n + 1)
     F_LO = Vector{NTuple{35,Float64}}(undef, n + 1)
     for f in 1:n+1
-        il = g + f - 1    # left cell in Mext (1-indexed)
-        ir = il + 1
-
-        # WENO5 left-side reconstruction (right-going, 5-cell stencil centred at il)
-        vL = ntuple(Val(35)) do q
-            weno5z(Vavg[clamp(il-2,1,n2g)][q], Vavg[clamp(il-1,1,n2g)][q],
-                   Vavg[il][q],
-                   Vavg[clamp(il+1,1,n2g)][q], Vavg[clamp(il+2,1,n2g)][q])
-        end
-        # WENO5 right-side reconstruction (left-going, stencil reversed around ir)
-        vR = ntuple(Val(35)) do q
-            weno5z(Vavg[clamp(ir+2,1,n2g)][q], Vavg[clamp(ir+1,1,n2g)][q],
-                   Vavg[ir][q],
-                   Vavg[clamp(ir-1,1,n2g)][q], Vavg[clamp(ir-2,1,n2g)][q])
-        end
-
-        # Realizability limiting of the WENO faces: continuous Zhang–Shu scaling
-        # toward the cell mean by the largest realizable θ (weno_scaled_face_dev).
-        # θ=1 (smooth) recovers the unlimited WENO face byte-for-byte; θ→0 only at
-        # the realizability front. Vc = the cell's recon-var vector (θ=0 anchor,
-        # raw image = the realizable cell mean). NO throw / NaN — GPU-safe.
-        cL  = ntuple(q -> Mext[il, q], Val(35))
-        cR  = ntuple(q -> Mext[ir, q], Val(35))
-        VcL = to_recon_vars_dev(cL...)
-        VcR = to_recon_vars_dev(cR...)
-        mL  = weno_scaled_face_dev(vL, VcL, cL)
-        mR  = weno_scaled_face_dev(vR, VcR, cR)
-
+        il = g + f - 1                  # left cell of interface f (Mext row)
+        cL = _cellrow(il)
+        cR = _cellrow(il + 1)
+        # WENO5 L/R faces (Vavg[il-2..il+3] straddle the interface) + continuous
+        # Zhang–Shu realizability scaling toward the cell mean — all in weno_faces_dev.
+        mL, mR = weno_faces_dev(_vv(il-2), _vv(il-1), _vv(il),
+                                _vv(il+1), _vv(il+2), _vv(il+3), cL, cR)
         F_HO[f] = _face_flux_tup(mL, mR, axis, Ma, s3max)
         F_LO[f] = _face_flux_tup(cL, cR, axis, Ma, s3max)
     end
