@@ -15,6 +15,38 @@ include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_s
     v[1] > 0.0 && v[5] > 0.0 && v[6] > 0.0 && v[7] > 0.0
 
 # ---------------------------------------------------------------------------
+# weno_scaled_face_dev — continuous Zhang–Shu / Fan–Huang–Wu realizability
+# scaling of a WENO5 face (the principled replacement for a binary drop-to-mean).
+# Blend the reconstructed recon-var face `vW` toward the cell's recon-var vector
+# `Vc` (whose raw image is the cell mean, kept realizable by the per-cell
+# projection) by the LARGEST θ ∈ [0,1] for which the converted raw face is
+# realizable:  v(θ) = Vc + θ(vW − Vc).  θ = 1 in smooth regions (full 5th order,
+# BYTE-IDENTICAL to the unlimited path); θ → 0 only where realizability forces it
+# — a graceful, local order-drop instead of a first-order cliff. The admissible
+# set is taken as [0, θ*] (same assumption as `scaling_limited_faces`; θ = 0 is
+# the realizable cell mean, so a feasible θ always exists). Device-safe: NTuple,
+# no allocation, bisection, NO throw (GPU-reusable — Task 5 extracts this).
+@inline function weno_scaled_face_dev(vW::NTuple{35,Float64}, Vc::NTuple{35,Float64},
+                                      cmean::NTuple{35,Float64}; nb::Int = 20)
+    # fast path: unlimited WENO already realizable → identical to the old behaviour
+    if _recon_vars_realizable(vW)
+        mW = from_recon_vars_dev(vW...)
+        RiemannFluxDev._state_realizable(mW) && return mW
+    end
+    # bisection for the largest feasible θ
+    lo = 0.0; hi = 1.0
+    for _ in 1:nb
+        mid = 0.5 * (lo + hi)
+        vθ = ntuple(q -> Vc[q] + mid * (vW[q] - Vc[q]), Val(35))
+        ok = _recon_vars_realizable(vθ) &&
+             RiemannFluxDev._state_realizable(from_recon_vars_dev(vθ...))
+        ok ? (lo = mid) : (hi = mid)
+    end
+    vθ = ntuple(q -> Vc[q] + lo * (vW[q] - Vc[q]), Val(35))
+    _recon_vars_realizable(vθ) ? from_recon_vars_dev(vθ...) : cmean
+end
+
+# ---------------------------------------------------------------------------
 # _face_flux_tup — NTuple{35} in, NTuple{35} HLL flux out.
 # Mirrors face_flux_1d exactly (same realizable_3D_M4 + realize_and_speed +
 # riemann_flux_dev(rs=0) chain) but operates on NTuples to stay alloc-friendly
@@ -118,19 +150,17 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
                    Vavg[clamp(ir-1,1,n2g)][q], Vavg[clamp(ir-2,1,n2g)][q])
         end
 
-        # Realizability fallback: if a reconstructed face state exits the moment
-        # cone, replace it with the cell mean (first-order at that face state).
-        # STAGE 1 (pre-conversion, no throw / no NaN): a WENO5 overshoot can drive
-        # a reconstructed variance ≤ 0; from_recon_vars_dev would then sqrt a
-        # negative (CPU: DomainError; GPU: silent NaN). Guard the recon-var vector
-        # first and fall back to the cell mean BEFORE converting.
-        cL = ntuple(q -> Mext[il, q], Val(35))
-        cR = ntuple(q -> Mext[ir, q], Val(35))
-        mL = _recon_vars_realizable(vL) ? from_recon_vars_dev(vL...) : cL
-        mR = _recon_vars_realizable(vR) ? from_recon_vars_dev(vR...) : cR
-        # STAGE 2 (post-conversion): net any remaining out-of-cone raw face state.
-        RiemannFluxDev._state_realizable(mL) || (mL = cL)
-        RiemannFluxDev._state_realizable(mR) || (mR = cR)
+        # Realizability limiting of the WENO faces: continuous Zhang–Shu scaling
+        # toward the cell mean by the largest realizable θ (weno_scaled_face_dev).
+        # θ=1 (smooth) recovers the unlimited WENO face byte-for-byte; θ→0 only at
+        # the realizability front. Vc = the cell's recon-var vector (θ=0 anchor,
+        # raw image = the realizable cell mean). NO throw / NaN — GPU-safe.
+        cL  = ntuple(q -> Mext[il, q], Val(35))
+        cR  = ntuple(q -> Mext[ir, q], Val(35))
+        VcL = to_recon_vars_dev(cL...)
+        VcR = to_recon_vars_dev(cR...)
+        mL  = weno_scaled_face_dev(vL, VcL, cL)
+        mR  = weno_scaled_face_dev(vR, VcR, cR)
 
         F_HO[f] = _face_flux_tup(mL, mR, axis, Ma, s3max)
         F_LO[f] = _face_flux_tup(cL, cR, axis, Ma, s3max)
