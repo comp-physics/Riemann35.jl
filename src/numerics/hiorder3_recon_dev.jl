@@ -17,7 +17,8 @@ Pipeline, per axis line (all four steps device-safe):
 module HiOrder3ReconDev
 
 include(joinpath(@__DIR__, "weno5_dev.jl"));       using .Weno5Dev: weno5z, deconv5, conv5, smooth5
-include(joinpath(@__DIR__, "recon_dev.jl"));       using .ReconDev: to_recon_vars_dev, from_recon_vars_dev
+include(joinpath(@__DIR__, "recon_dev.jl"));       using .ReconDev: to_recon_vars_dev, from_recon_vars_dev,
+    to_recon_vars_tup, from_recon_vars_tup
 include(joinpath(@__DIR__, "riemann_flux_dev.jl")); using .RiemannFluxDev: _state_realizable
 
 export recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev,
@@ -34,9 +35,9 @@ export recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev,
 # point value. Per component: deconv5 where smooth, else keep the cell average.
 @inline recon_point_dev(cm2::NTuple{35,Float64}, cm1::NTuple{35,Float64},
                         c0::NTuple{35,Float64},  cp1::NTuple{35,Float64},
-                        cp2::NTuple{35,Float64}) = to_recon_vars_dev(
+                        cp2::NTuple{35,Float64}) = to_recon_vars_tup(
     ntuple(q -> smooth5(cm2[q], cm1[q], c0[q], cp1[q], cp2[q]) ?
-                deconv5(cm2[q], cm1[q], c0[q], cp1[q], cp2[q]) : c0[q], Val(35))...)
+                deconv5(cm2[q], cm1[q], c0[q], cp1[q], cp2[q]) : c0[q], Val(35)))
 
 # Step 2: forward-convolve a 5-cell recon-var POINT stencil → recon-var cell average.
 @inline recon_avg_dev(pm2::NTuple{35,Float64}, pm1::NTuple{35,Float64},
@@ -53,18 +54,22 @@ export recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev,
 @inline function weno_scaled_face_dev(vW::NTuple{35,Float64}, Vc::NTuple{35,Float64},
                                       cmean::NTuple{35,Float64}; nb::Int = 20)
     if recon_vars_realizable(vW)
-        mW = from_recon_vars_dev(vW...)
+        mW = from_recon_vars_tup(vW)
         _state_realizable(mW) && return mW
     end
     lo = 0.0; hi = 1.0
     for _ in 1:nb
         mid = 0.5 * (lo + hi)
         vθ = ntuple(q -> Vc[q] + mid * (vW[q] - Vc[q]), Val(35))
-        ok = recon_vars_realizable(vθ) && _state_realizable(from_recon_vars_dev(vθ...))
+        ok = recon_vars_realizable(vθ) && _state_realizable(from_recon_vars_tup(vθ))
         ok ? (lo = mid) : (hi = mid)
     end
-    vθ = ntuple(q -> Vc[q] + lo * (vW[q] - Vc[q]), Val(35))
-    recon_vars_realizable(vθ) ? from_recon_vars_dev(vθ...) : cmean
+    # `lo` is loop-mutated; copy into a fresh, never-reassigned binding before the
+    # final ntuple so the closure captures a plain Float64 (a captured loop-mutated
+    # variable is boxed → dynamic dispatch → InvalidIR on the GPU). CPU-identical.
+    θf = lo
+    vθf = ntuple(q -> Vc[q] + θf * (vW[q] - Vc[q]), Val(35))
+    recon_vars_realizable(vθf) ? from_recon_vars_tup(vθf) : cmean
 end
 
 # Step 3: the two realizability-scaled raw face states at an interface. W1..W6 are
@@ -78,8 +83,8 @@ end
                                 cL::NTuple{35,Float64}, cR::NTuple{35,Float64})
     vL = ntuple(q -> weno5z(W1[q], W2[q], W3[q], W4[q], W5[q]), Val(35))
     vR = ntuple(q -> weno5z(W6[q], W5[q], W4[q], W3[q], W2[q]), Val(35))
-    mL = weno_scaled_face_dev(vL, to_recon_vars_dev(cL...), cL)
-    mR = weno_scaled_face_dev(vR, to_recon_vars_dev(cR...), cR)
+    mL = weno_scaled_face_dev(vL, to_recon_vars_tup(cL), cL)
+    mR = weno_scaled_face_dev(vR, to_recon_vars_tup(cR), cR)
     (mL, mR)
 end
 
