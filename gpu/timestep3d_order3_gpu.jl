@@ -342,7 +342,10 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
     nfx = n + 2g; nfz = nzloc + 2g
     down = rank > 0          ? rank - 1 : MPI.PROC_NULL   # lower-z neighbour
     up   = rank < nranks - 1 ? rank + 1 : MPI.PROC_NULL   # upper-z neighbour
-    rb   = (zlo = rank > 0, zhi = rank < nranks - 1)      # rank-boundary z flags
+    # rank-boundary flags: multi-GPU decomposes z only, so x/y stay false (their
+    # axis-generic branches in the residual are present but DORMANT on the GPU).
+    rb   = (xlo = false, xhi = false, ylo = false, yhi = false,
+            zlo = rank > 0, zhi = rank < nranks - 1)
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))

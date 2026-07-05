@@ -10,12 +10,13 @@
 #                          interior diff → ~0 / bit-identical).
 #   Gate 2 (conservation): total mass (Σ rho) identical, 1-rank vs gathered 2-rank.
 #
-# NOTE: this node has ONE H100. Both MPI ranks bind device 0 (rank % ndevices == 0), so
-# this validates the EXCHANGE + rank-θ LOGIC on a single physical GPU (2 ranks share it).
-# The z-slab exchange is device-count-agnostic; a true 2-DEVICE run needs an a100:2 / v100:2
-# allocation and is UNTESTED here on 2 physical GPUs.
+# DEVICE BINDING: each rank binds device `rank % CUDA.ndevices()`. On a 2-GPU allocation
+# the two ranks land on distinct physical GPUs (a true 2-device run); on a 1-GPU node they
+# share device 0 (validating the EXCHANGE + rank-θ LOGIC). The z-slab exchange is
+# device-count-agnostic; the SUMMARY line reports the ACTUAL per-rank device (name + short
+# UUID) so the message is truthful either way.
 #
-# Run under gpuenv2 (2 ranks sharing device 0):
+# Run under gpuenv2:
 #   export JULIA_DEPOT_PATH=/storage/scratch1/6/sbryngelson3/julia_depot:$HOME/.julia
 #   source /storage/scratch1/6/sbryngelson3/vizwork/env.sh
 #   export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader
@@ -76,6 +77,16 @@ sb = vec(Array(Mslab)); counts = fill(35 * N * N * nzloc, nranks)
 rbuf = rank == 0 ? Vector{Float64}(undef, 35 * N^3) : Float64[]
 MPI.Gatherv!(sb, rank == 0 ? MPI.VBuffer(rbuf, counts) : nothing, comm; root=0)
 
+# --- gather each rank's ACTUAL bound CUDA device (name + short UUID) to rank 0,
+#     so the summary reports the true hardware whether run on 1 or 2 physical GPUs ---
+const _DEVW = 80
+mydev  = string("rank", rank, "→", CUDA.name(CUDA.device()), " ",
+                first(string(CUDA.uuid(CUDA.device())), 8))
+devbuf = fill(UInt8(' '), _DEVW)
+let b = codeunits(mydev); devbuf[1:min(_DEVW, length(b))] .= @view b[1:min(_DEVW, length(b))]; end
+alldev = rank == 0 ? Vector{UInt8}(undef, _DEVW * nranks) : UInt8[]
+MPI.Gather!(devbuf, rank == 0 ? MPI.UBuffer(alldev, _DEVW) : nothing, comm; root=0)
+
 if rank == 0
     Mmulti = reshape(rbuf, 35, N, N, N)
     df  = maximum(abs.(Mmulti .- Mref_host))
@@ -96,8 +107,11 @@ if rank == 0
     gate2 = dmass <= 1e-9 * max(abs(mass_ref), 1.0)
     @printf("  Gate 2 (conservation) = %s\n", gate2 ? "PASS" : "FAIL")
     ok = gate1 && gate2
-    @printf("SUMMARY: %s  (validated on 1 physical GPU, 2 ranks sharing device 0; 2-device run untested)\n",
-            ok ? "ALL PASS" : "FAIL")
+    devs  = [strip(String(@view alldev[(r-1)*_DEVW+1 : r*_DEVW])) for r in 1:nranks]
+    ndist = length(unique(split(d)[end] for d in devs))   # distinct UUID prefixes
+    @printf("SUMMARY: %s  (%d rank(s): %s; %d distinct physical GPU%s)\n",
+            ok ? "ALL PASS" : "FAIL", nranks, join(devs, ", "),
+            ndist, ndist == 1 ? "" : "s")
     MPI.Barrier(comm); MPI.Finalize()
     ok || error("z-slab order-3 validation FAILED")
     println("All gates passed.")
