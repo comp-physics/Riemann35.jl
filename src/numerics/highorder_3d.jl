@@ -117,7 +117,8 @@ end
 function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 nx::Int, ny::Int, nz::Int, halo::Int,
                                 dx::Real, dy::Real, dz::Real, Ma::Real,
-                                dt::Real; s3max::Real = 40.0)
+                                dt::Real; s3max::Real = 40.0,
+                                rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false))
     @assert halo >= 4 "order=3 residual requires halo ≥ 4; got halo=$halo"
     fill!(R, 0.0)
     g  = halo
@@ -223,6 +224,83 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     end
 
     # =========================================================================
+    # PASS 2a': rank-boundary θ. At an x/y RANK boundary the shared interface's θ
+    # must be min(Θ_own, Θ_neighbour) computed identically on both ranks — but the
+    # neighbour cell is the first HALO cell, not an interior Θ_* entry. Its per-face
+    # θ is cheap and local: theta_star_update_dev(Mlo_halo, ±6λ·G_shared), where
+    #   Mlo_halo = the halo cell's first-order (HLL, all-6-face) anchor — the SAME
+    #     function the neighbour rank evaluates for that (there interior) cell, so
+    #     the two agree bit-for-bit (halo=8 exchange + corner-consistent ghosts give
+    #     identical adjacent cells), and
+    #   G_shared = F_HO − F_LO at the shared interface (identical across ranks; the
+    #     wide halo makes the reconstruction footprint fully real data).
+    # These are computed ONLY for sides flagged as rank boundaries (rank_bnd.*);
+    # global-domain boundaries keep the current "own cell only" θ (serial-identical,
+    # NEVER in z — z is not decomposed). `crow` reads the haloed array directly.
+    # =========================================================================
+    crow(px, py, pk) = ntuple(q -> M[px, py, pk, q], Val(35))
+    # First-order (HLL) anchor of the cell at haloed position (px,py,k), over all 6
+    # faces; copy-rule (HLL of the cell with itself) at the z ends — mirrors the
+    # interior Mlo exactly. dt=0 (λ all zero) short-circuits to the cell state.
+    function halo_cell_mlo(px::Int, py::Int, k::Int)
+        C = crow(px, py, k)
+        (iszero(λx) && iszero(λy) && iszero(λz)) && return C
+        FxL = _face_flux_tup(crow(px-1,py,k), C, 1, Ma, s3max)
+        FxR = _face_flux_tup(C, crow(px+1,py,k), 1, Ma, s3max)
+        FyD = _face_flux_tup(crow(px,py-1,k), C, 2, Ma, s3max)
+        FyU = _face_flux_tup(C, crow(px,py+1,k), 2, Ma, s3max)
+        zb  = (k > 1)  ? crow(px,py,k-1) : C
+        zf  = (k < nz) ? crow(px,py,k+1) : C
+        FzB = _face_flux_tup(zb, C, 3, Ma, s3max)
+        FzF = _face_flux_tup(C, zf, 3, Ma, s3max)
+        return ntuple(q -> C[q] - λx*(FxR[q]-FxL[q]) - λy*(FyU[q]-FyD[q])
+                                 - λz*(FzF[q]-FzB[q]), Val(35))
+    end
+
+    # Boundary halo-cell θ, allocated (and computed) only for rank sides.
+    Θ_xl_hi = rank_bnd.xhi ? Array{Float64}(undef, ny, nz) : Array{Float64}(undef, 0, 0)
+    Θ_xr_lo = rank_bnd.xlo ? Array{Float64}(undef, ny, nz) : Array{Float64}(undef, 0, 0)
+    Θ_yl_hi = rank_bnd.yhi ? Array{Float64}(undef, nx, nz) : Array{Float64}(undef, 0, 0)
+    Θ_yr_lo = rank_bnd.ylo ? Array{Float64}(undef, nx, nz) : Array{Float64}(undef, 0, 0)
+
+    if rank_bnd.xhi
+        px = nx + halo + 1                        # halo cell just past interior nx
+        for k in 1:nz, j in 1:ny
+            jh = j + halo
+            Mlo = halo_cell_mlo(px, jh, k)
+            G   = ntuple(q -> FHO_x[nx+1,j,k][q] - FLO_x[nx+1,j,k][q], Val(35))  # its LEFT face
+            Θ_xl_hi[j,k] = theta_star_update_dev(Mlo, ntuple(q ->  6λx * G[q], Val(35)))
+        end
+    end
+    if rank_bnd.xlo
+        px = halo                                 # halo cell just before interior 1
+        for k in 1:nz, j in 1:ny
+            jh = j + halo
+            Mlo = halo_cell_mlo(px, jh, k)
+            G   = ntuple(q -> FHO_x[1,j,k][q] - FLO_x[1,j,k][q], Val(35))         # its RIGHT face
+            Θ_xr_lo[j,k] = theta_star_update_dev(Mlo, ntuple(q -> -6λx * G[q], Val(35)))
+        end
+    end
+    if rank_bnd.yhi
+        py = ny + halo + 1
+        for k in 1:nz, i in 1:nx
+            ih = i + halo
+            Mlo = halo_cell_mlo(ih, py, k)
+            G   = ntuple(q -> FHO_y[i,ny+1,k][q] - FLO_y[i,ny+1,k][q], Val(35))   # its DOWN face
+            Θ_yl_hi[i,k] = theta_star_update_dev(Mlo, ntuple(q ->  6λy * G[q], Val(35)))
+        end
+    end
+    if rank_bnd.ylo
+        py = halo
+        for k in 1:nz, i in 1:nx
+            ih = i + halo
+            Mlo = halo_cell_mlo(ih, py, k)
+            G   = ntuple(q -> FHO_y[i,1,k][q] - FLO_y[i,1,k][q], Val(35))         # its UP face
+            Θ_yr_lo[i,k] = theta_star_update_dev(Mlo, ntuple(q -> -6λy * G[q], Val(35)))
+        end
+    end
+
+    # =========================================================================
     # PASS 2b+2c: interface θ = min over the two adjacent cells, blend fluxes,
     # accumulate residual R = -Σ_axis (F_right - F_left) / ds_axis.
     # Conservation: both cells sharing an interface see the SAME blended flux
@@ -231,12 +309,18 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     for k in 1:nz, j in 1:ny, i in 1:nx
         ih = i + halo;  jh = j + halo
 
-        # Interface θ = min(this cell, neighbour cell); boundary faces use only
-        # the one adjacent interior cell (ghost cells do not constrain θ here).
-        θxr = (i < nx)  ? min(Θ_xr[i,j,k], Θ_xl[i+1,j,k]) : Θ_xr[i,j,k]
-        θxl = (i > 1)   ? min(Θ_xl[i,j,k], Θ_xr[i-1,j,k]) : Θ_xl[i,j,k]
-        θyr = (j < ny)  ? min(Θ_yr[i,j,k], Θ_yl[i,j+1,k]) : Θ_yr[i,j,k]
-        θyl = (j > 1)   ? min(Θ_yl[i,j,k], Θ_yr[i,j-1,k]) : Θ_yl[i,j,k]
+        # Interface θ = min(this cell, neighbour cell). Interior interfaces use the
+        # adjacent interior cell; RANK-boundary interfaces use the halo cell's θ
+        # (single-valued/conservative across ranks); GLOBAL boundaries keep the one
+        # adjacent interior cell only (serial-identical). z never has rank boundaries.
+        θxr = (i < nx)      ? min(Θ_xr[i,j,k], Θ_xl[i+1,j,k]) :
+              rank_bnd.xhi  ? min(Θ_xr[i,j,k], Θ_xl_hi[j,k])  : Θ_xr[i,j,k]
+        θxl = (i > 1)       ? min(Θ_xl[i,j,k], Θ_xr[i-1,j,k]) :
+              rank_bnd.xlo  ? min(Θ_xl[i,j,k], Θ_xr_lo[j,k])  : Θ_xl[i,j,k]
+        θyr = (j < ny)      ? min(Θ_yr[i,j,k], Θ_yl[i,j+1,k]) :
+              rank_bnd.yhi  ? min(Θ_yr[i,j,k], Θ_yl_hi[i,k])  : Θ_yr[i,j,k]
+        θyl = (j > 1)       ? min(Θ_yl[i,j,k], Θ_yr[i,j-1,k]) :
+              rank_bnd.ylo  ? min(Θ_yl[i,j,k], Θ_yr_lo[i,k])  : Θ_yl[i,j,k]
         θzr = (k < nz)  ? min(Θ_zr[i,j,k], Θ_zl[i,j,k+1]) : Θ_zr[i,j,k]
         θzl = (k > 1)   ? min(Θ_zl[i,j,k], Θ_zr[i,j,k-1]) : Θ_zl[i,j,k]
 
@@ -317,12 +401,13 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
                          dx::Real, dy::Real, dz::Real, Ma::Real;
                          order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                          s3max::Real = 4.0 + abs(Ma) / 2.0,
-                         dt::Real = 0.0)
+                         dt::Real = 0.0,
+                         rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false))
     # order==3: two-pass WENO5 + joint 6-face θ*-IDP (separate implementation,
     # leaves the order==1,2 path below byte-identical).
     if order == 3
         return residual_ho_3d_order3!(R, M, nx, ny, nz, halo,
-                                      dx, dy, dz, Ma, dt; s3max=s3max)
+                                      dx, dy, dz, Ma, dt; s3max=s3max, rank_bnd=rank_bnd)
     end
     fill!(R, 0.0)
     g = halo
@@ -406,10 +491,18 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
+    # A side is a RANK boundary iff a real neighbour rank sits there (encoded as a
+    # non-negative rank; -1 = MPI_PROC_NULL sentinel = global domain boundary). Only
+    # order==3 consumes rank_bnd (order 1/2 ignore the kwarg → byte-identical). z is
+    # never decomposed, so it has no rank-boundary flags.
+    rank_bnd = (xlo = decomp.neighbors.left  != -1,
+                xhi = decomp.neighbors.right != -1,
+                ylo = decomp.neighbors.down  != -1,
+                yhi = decomp.neighbors.up    != -1)
     # stage helper: M_in (with halos) -> returns updated interior-only array (full M-shape, halos zero)
     function L!(Mwork)
         halo_exchange_3d!(Mwork, decomp, bc)
-        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max, dt=Float64(dt))
+        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max, dt=Float64(dt), rank_bnd=rank_bnd)
         return R
     end
     # stage_bgk (opt-in, `stage_bgk_kn` = Kn): exact-exponential BGK relaxation of

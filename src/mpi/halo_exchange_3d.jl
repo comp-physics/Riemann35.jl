@@ -84,40 +84,58 @@ function halo_exchange_3d!(A::Array{T,4}, decomp, bc::Symbol) where T
     # Y-direction exchange using non-blocking send/receive
     down_neighbor = decomp.neighbors.down
     up_neighbor = decomp.neighbors.up
-    
+
     reqs = MPI.Request[]
-    
+
+    # Corner-consistent exchange for the order-3 path (halo > 2): the second (y)
+    # phase carries the FULL x-extent — including the x-ghost columns just filled by
+    # the x-phase — so the diagonal/corner ghosts (x-ghost ∩ y-ghost) are propagated
+    # from the diagonal neighbour. Orders 1/2 always call with h == 2 and keep the
+    # historical interior-x-only y-exchange (byte-identical). Corner ghosts are read
+    # only by the order-3 rank-boundary θ layer, never by the order-1/2 residual.
+    xr = (h > 2) ? (1:nx+2h) : (h+1:h+nx)
+    nxs = length(xr)
+
     # Send interior boundary data to neighbors (includes all z and all variables)
     if down_neighbor != -1
-        send_buf = A[h+1:h+nx, h+1:h+h, :, :]
+        send_buf = A[xr, h+1:h+h, :, :]
         req = MPI.Isend(send_buf, comm; dest=down_neighbor, tag=2)
         push!(reqs, req)
     end
-    
+
     if up_neighbor != -1
-        send_buf = A[h+1:h+nx, h+ny-h+1:h+ny, :, :]
+        send_buf = A[xr, h+ny-h+1:h+ny, :, :]
         req = MPI.Isend(send_buf, comm; dest=up_neighbor, tag=3)
         push!(reqs, req)
     end
-    
+
     # Receive halo data from neighbors
     if down_neighbor != -1
-        recv_buf = similar(A, nx, h, nz, size(A, 4))
+        recv_buf = similar(A, nxs, h, nz, size(A, 4))
         req = MPI.Irecv!(recv_buf, comm; source=down_neighbor, tag=3)
         MPI.Wait(req)
-        A[h+1:h+nx, 1:h, :, :] = recv_buf
+        A[xr, 1:h, :, :] = recv_buf
     end
-    
+
     if up_neighbor != -1
-        recv_buf = similar(A, nx, h, nz, size(A, 4))
+        recv_buf = similar(A, nxs, h, nz, size(A, 4))
         req = MPI.Irecv!(recv_buf, comm; source=up_neighbor, tag=2)
         MPI.Wait(req)
-        A[h+1:h+nx, h+ny+1:h+ny+h, :, :] = recv_buf
+        A[xr, h+ny+1:h+ny+h, :, :] = recv_buf
     end
-    
+
     # Wait for all sends to complete
     MPI.Waitall(reqs)
-    
+
+    # Re-apply physical BC after the exchange (order-3 only, h > 2) so that corners
+    # at a GLOBAL transverse boundary copy the now-fresh interior edge (the pre-
+    # exchange BC copied stale x-ghost values into those corners). This makes every
+    # ghost cell — corners included — identical to the value the owning/boundary rank
+    # computes, which the rank-boundary θ layer relies on. No-op for orders 1/2.
+    if h > 2
+        apply_physical_bc_3d!(A, decomp, bc)
+    end
+
     return A
 end
 

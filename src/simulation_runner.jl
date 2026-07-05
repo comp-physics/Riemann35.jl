@@ -90,9 +90,14 @@ function simulation_runner(params)
     spatial_order = get(params, :spatial_order, 3)   # DEFAULT: order-3 WENO5 + θ*-IDP (opt down to 1/2)
 
     # Constants
-    # Order-3 (WENO5 + θ*-IDP) requires halo ≥ 4 for the deconvolution/WENO stencils.
+    # Order-3 (WENO5 + θ*-IDP) uses halo = 8 for MPI rank-consistency: the WENO5
+    # reconstruction footprint at the rightmost interior interface reaches il+7, so
+    # every interior interface must reconstruct from real exchanged neighbor data
+    # (not a cell-average fallback) to be identical across ranks and to serial. It
+    # also gives the rank-boundary θ layer the one extra haloed cell (+ its cheap
+    # first-order anchor) it needs. See residual_ho_3d_order3!.
     # Orders 1 and 2 use halo = 2 (byte-identical to the original validated paths).
-    halo = (spatial_order == 3) ? 4 : 2
+    halo = (spatial_order == 3) ? 8 : 2
     bc = :copy
 
     # Unpack parameters
