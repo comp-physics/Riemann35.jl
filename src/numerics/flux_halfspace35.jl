@@ -57,6 +57,9 @@ const _ZERO35 = ntuple(_ -> 0.0, Val(35))
     z, nc = clip_chain(zraw)
     nc > 0 && (CHAIN_CLIPS[] += nc)
     z1, z2, z3, z4 = z
+    # A clipped chain still has ζ > ZFLOOR > 0, so its h-functional Gauss nodes are (almost
+    # always) distinct and the accurate node-form closure below runs normally; the rare
+    # genuinely-coincident-node case is caught per-channel inside `chan_closure`.
     h = hseq(M000, z1, z2, z3, z4)
     # n_r-point Gauss nodes of the h-functional (computed once per cell, reused
     # across every channel of that order — stable node-form channel closure).

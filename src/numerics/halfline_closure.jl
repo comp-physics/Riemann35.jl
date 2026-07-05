@@ -99,6 +99,19 @@ end
 @inline chan_closure(nodes::SVector{1,T}, u::NTuple{1,T}) where {T} = nodes[1] * u[1]
 
 @inline function chan_closure(nodes::SVector{nr,T}, u::NTuple{nr,T}) where {nr,T}
+    # Extreme-Ma nodes can coincide numerically ⇒ a singular Vandermonde. Detect it with
+    # a cheap min-gap test (no try/catch — that deoptimizes the hot path) and fall back to
+    # mean-node extrapolation of the top moment (these are vacuum-boundary cells anyway).
+    scale = zero(T)
+    @inbounds for a in 1:nr
+        scale = max(scale, abs(nodes[a]))
+    end
+    scale += eps(T)
+    mingap = T(Inf)
+    @inbounds for a in 1:nr-1, b in a+1:nr
+        mingap = min(mingap, abs(nodes[a] - nodes[b]))
+    end
+    mingap < 1e-9 * scale && return nodes[1] * u[nr]
     P = SMatrix{nr,nr,T}(ntuple(Val(nr * nr)) do t
         r = (t - 1) % nr + 1; c = (t - 1) ÷ nr + 1
         nodes[c]^(r - 1)                    # row = power b=r−1, col = node a=c
@@ -108,7 +121,7 @@ end
     @inbounds for a in 1:nr
         s += nodes[a]^nr * y[a]
     end
-    return s
+    return isfinite(s) ? s : nodes[1] * u[nr]
 end
 
 # ---------------------------------------------------------------------------

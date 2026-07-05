@@ -63,6 +63,12 @@ export realizability_margin, is_realizable
 export closure_and_eigenvalues, eigenvalues6_hyperbolic_3D, eigenvalues6z_hyperbolic_3D
 export Flux_closure35_and_realizable_3D, Flux_closure35_3D
 export flux_HLL, pas_HLL, collision35
+# Two-stream half-space mode (opt-in, additive)
+export chain, clip_chain, chain_realizable
+export hseq, chan_closure, marg_closure, xspeed, gauss_nodes
+export xflux_plus35, xflux_minus35, stream_flux_plus35, stream_flux_minus35, stream_xspeed
+export reset_chain_clips!, chain_clips
+export split_maxwellian35, bgk_stream_relax, split_temperature
 export moment_idx, M4_to_vars, M5_to_vars
 export delta2star3D, delta2star3D_permutation, jacobian6, M4toC4_3D, C4toM4_3D, S4toC4_3D_r, C5toM5_3D
 export axis_moment_slice
@@ -106,6 +112,10 @@ include("moments/hyqmom_quadrature_1d.jl")
 include("moments/chyqmom_nodes_3d.jl")
 include("moments/enforce_univariate.jl")
 
+# Two-stream half-space mode (opt-in, additive): the all-mean chain coordinates.
+include("moments/chain.jl")
+using .Chain
+
 # Reconstruction variables (must precede realizability, which calls standardized_to_M4)
 include("numerics/recon_dev.jl")
 using .ReconDev: to_recon_vars_dev, from_recon_vars_dev,
@@ -131,6 +141,11 @@ include("numerics/eigenvalues6_hyperbolic_3D.jl")
 include("numerics/eigenvalues6z_hyperbolic_3D.jl")
 include("numerics/flux_closure_dev.jl")
 using .FluxClosureDev: flux_closure35_dev
+# Two-stream half-space mode (opt-in, additive): half-line closure + half-space x-flux.
+include("numerics/halfline_closure.jl")
+using .HalflineClosure
+include("numerics/flux_halfspace35.jl")
+using .FluxHalfspace35
 include("numerics/Flux_closure35_and_realizable_3D.jl")
 include("numerics/Flux_closure35_3D.jl")
 include("numerics/riemann_flux_dev.jl")
@@ -140,6 +155,9 @@ include("numerics/highorder_flux.jl")
 include("numerics/ssp_rk.jl")
 include("numerics/highorder_3d.jl")
 include("numerics/collision35.jl")
+# Two-stream half-space mode (opt-in, additive): the BGK stream coupling.
+include("numerics/bgk_stream.jl")
+using .BGKStream
 include("numerics/flux_HLL.jl")
 include("numerics/pas_HLL.jl")
 include("numerics/apply_flux_update.jl")
