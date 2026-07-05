@@ -77,7 +77,8 @@ for config_name in configs_to_generate
         Kn = 1.0,
         Ma = 0.0,
         flag2D = 0,
-        CFL = 0.5
+        CFL = 0.5,
+        spatial_order = 1,   # goldens are order-1 references (default is now order-3)
     )
     
     M_final = results[:M]

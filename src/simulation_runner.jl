@@ -87,7 +87,7 @@ function simulation_runner(params)
     
     # Spatial order must be read first so halo can depend on it.
     # (Also read again at line ~126 for documentation locality — idempotent.)
-    spatial_order = get(params, :spatial_order, 1)
+    spatial_order = get(params, :spatial_order, 3)   # DEFAULT: order-3 WENO5 + θ*-IDP (opt down to 1/2)
 
     # Constants
     # Order-3 (WENO5 + θ*-IDP) requires halo ≥ 4 for the deconvolution/WENO stencils.
@@ -129,7 +129,7 @@ function simulation_runner(params)
     debug_output = params.debug_output
     
     # Spatial order (1 = first-order HLL/Euler, 2 = high-order SSP-RK3)
-    spatial_order = get(params, :spatial_order, 1)
+    spatial_order = get(params, :spatial_order, 3)   # DEFAULT: order-3 WENO5 + θ*-IDP (opt down to 1/2)
 
     # Near-vacuum density floor for high-order reconstruction (0 = off). Below this
     # density, the high-order path falls back to first order to avoid the
