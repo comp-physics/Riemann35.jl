@@ -109,8 +109,8 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     order3_single = order3 && !multigpu
     G3 = nothing
     if order3_single
-        (size(M0, 3) == n && nzloc == n) ||
-            error("order-3 GPU requires a cubic interior (nx==ny==nz); got interior $(size(M0)[2:4])")
+        (size(M0, 3) == n) ||
+            error("order-3 GPU requires a square in-plane interior (nx==ny); got interior $(size(M0)[2:4])")
         (limiter || proj_first_order || riemann_solver !== :hll) &&
             error("order-3 GPU path does not support the order-1/2 flux options " *
                   "(limiter/proj_first_order/riemann_solver); got limiter=$limiter " *

@@ -62,15 +62,18 @@ const HALO3 = 8
 # ever read interior cells no thread mutates — race-free.  Equivalent to
 # `apply_physical_bc_3d!(:copy)` in x/y and the per-line z-outflow pad on the CPU.
 # ---------------------------------------------------------------------------
-function _refill_halo!(G, nf::Int, g::Int, n::Int)
+# Outflow (clamp) halo refill for a square-in-plane, arbitrary-z haloed cube
+# (35, nfxy, nfxy, nfz) with interior (n,n,nz). Cubic is the special case nfxy==nfz,
+# n==nz -> byte-identical to the former (nf,g,n) form.
+function _refill_halo!(G, nfxy::Int, nfz::Int, g::Int, n::Int, nz::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nf * nf * nf
+    if idx <= nfxy * nfxy * nfz
         @inbounds begin
-            a = (idx - 1) % nf + 1; r = (idx - 1) ÷ nf
-            b = r % nf + 1;         c = r ÷ nf + 1
+            a = (idx - 1) % nfxy + 1; r = (idx - 1) ÷ nfxy
+            b = r % nfxy + 1;         c = r ÷ nfxy + 1
             ca = _clampi(a, g + 1, g + n)
             cb = _clampi(b, g + 1, g + n)
-            cc = _clampi(c, g + 1, g + n)
+            cc = _clampi(c, g + 1, g + nz)
             if a != ca || b != cb || c != cc
                 for m in 1:35; G[m, a, b, c] = G[m, ca, cb, cc]; end
             end
@@ -199,13 +202,13 @@ by every `march3d_order3_gpu!` caller (the standalone validation driver AND the 
 `gpu/validation/run_hiorder3_ma100_gpu.jl` produced the exact same cube.
 """
 function build_haloed_cube(Mi::CuArray{Float64,4}; threads::Int=128)
-    @assert size(Mi, 1) == 35 "interior must be (35,n,n,n)"
-    n = size(Mi, 2)
-    @assert size(Mi) == (35, n, n, n) "interior must be a cube (35,n,n,n); got $(size(Mi))"
-    g = HALO3; nf = n + 2g
-    G = CUDA.zeros(Float64, 35, nf, nf, nf)
-    @cuda threads=threads blocks=cld(n * n * n, threads) _set_interior!(G, Mi, n, n, g)
-    @cuda threads=threads blocks=cld(nf * nf * nf, threads) _refill_halo!(G, nf, g, n)
+    @assert size(Mi, 1) == 35 "interior must be (35,n,n,nz)"
+    n = size(Mi, 2); nz = size(Mi, 4)
+    @assert size(Mi) == (35, n, n, nz) "interior must be square in-plane (35,n,n,nz); got $(size(Mi))"
+    g = HALO3; nfxy = n + 2g; nfz = nz + 2g
+    G = CUDA.zeros(Float64, 35, nfxy, nfxy, nfz)
+    @cuda threads=threads blocks=cld(n * n * nz, threads) _set_interior!(G, Mi, n, nz, g)
+    @cuda threads=threads blocks=cld(nfxy * nfxy * nfz, threads) _refill_halo!(G, nfxy, nfz, g, n, nz)
     CUDA.synchronize()
     return G
 end
@@ -218,10 +221,10 @@ Copy the interior `(35, n, n, n)` out of a `g=HALO3` haloed cube `G` into `Mi`, 
 uses for its RK `M0` snapshot.
 """
 function interior_from_cube!(Mi::CuArray{Float64,4}, G::CuArray{Float64,4}; threads::Int=128)
-    n = size(Mi, 2); g = HALO3
-    @assert size(Mi) == (35, n, n, n) "interior must be a cube (35,n,n,n); got $(size(Mi))"
-    @assert size(G) == (35, n + 2g, n + 2g, n + 2g) "G must be the matching haloed cube"
-    @cuda threads=threads blocks=cld(n * n * n, threads) _copy_interior!(Mi, G, n, n, g)
+    n = size(Mi, 2); nz = size(Mi, 4); g = HALO3
+    @assert size(Mi) == (35, n, n, nz) "interior must be square in-plane (35,n,n,nz); got $(size(Mi))"
+    @assert size(G) == (35, n + 2g, n + 2g, nz + 2g) "G must be the matching haloed cube"
+    @cuda threads=threads blocks=cld(n * n * nz, threads) _copy_interior!(Mi, G, n, nz, g)
     return Mi
 end
 
@@ -238,22 +241,22 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
                              theta_closed::Bool = true)
-    @assert size(G, 1) == 35 "G must be (35,nf,nf,nf)"
-    nf = size(G, 2)
-    @assert size(G) == (35, nf, nf, nf) "G must be a cube (35,nf,nf,nf)"
+    @assert size(G, 1) == 35 "G must be (35,nfxy,nfxy,nfz)"
+    nf = size(G, 2); nfz = size(G, 4)
+    @assert size(G) == (35, nf, nf, nfz) "G must be square in-plane (35,nfxy,nfxy,nfz); got $(size(G))"
     g = HALO3
-    n = nf - 2g
-    @assert n >= 1 "interior extent n = nf-2g must be ≥ 1 (got n=$n)"
+    n = nf - 2g; nz = nfz - 2g
+    @assert n >= 1 && nz >= 1 "interior extents must be ≥ 1 (got n=$n, nz=$nz)"
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
-    R    = CUDA.zeros(Float64, 35, n, n, n)
-    G0   = CUDA.zeros(Float64, 35, n, n, n)
-    svec = CUDA.zeros(Float64, n * n * n)
+    R    = CUDA.zeros(Float64, 35, n, n, nz)
+    G0   = CUDA.zeros(Float64, 35, n, n, nz)
+    svec = CUDA.zeros(Float64, n * n * nz)
 
-    bcube = cld(nf * nf * nf, threads)
-    bint  = cld(n * n * n, threads)
+    bcube = cld(nf * nf * nfz, threads)
+    bint  = cld(n * n * nz, threads)
 
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
     stages = ((1.0, 0.0, 1.0), (0.75, 0.25, 0.25), (1.0/3.0, 2.0/3.0, 2.0/3.0))
@@ -261,7 +264,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     used = Vector{Float64}(undef, nstep)
     for s in 1:nstep
         if dts_host === nothing
-            @cuda threads=threads blocks=bint _speed_interior!(svec, G, n, n, g)
+            @cuda threads=threads blocks=bint _speed_interior!(svec, G, n, nz, g)
             vmax = CUDA.@allowscalar maximum(svec)
             dt = (1.0/3.0) * dxf / max(vmax, 1e-12)
         else
@@ -269,19 +272,19 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         end
         used[s] = dt
 
-        @cuda threads=threads blocks=bint _copy_interior!(G0, G, n, n, g)
+        @cuda threads=threads blocks=bint _copy_interior!(G0, G, n, nz, g)
         for (a, b, c) in stages
-            @cuda threads=threads blocks=bcube _refill_halo!(G, nf, g, n)
-            residual3d_order3_box_gpu!(R, G, n, n, n, g, dxf, dxf, dxf, Maf, dt;
+            @cuda threads=threads blocks=bcube _refill_halo!(G, nf, nfz, g, n, nz)
+            residual3d_order3_box_gpu!(R, G, n, n, nz, g, dxf, dxf, dxf, Maf, dt;
                                        s3max=s3f, threads=threads, theta_closed=theta_closed)
-            @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, g, a, b, c * dt)
-            @cuda threads=threads blocks=bint _proj_interior!(G, n, n, g, Maf, s3f)
+            @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, nz, g, a, b, c * dt)
+            @cuda threads=threads blocks=bint _proj_interior!(G, n, nz, g, Maf, s3f)
             if stage_bgk
-                @cuda threads=threads blocks=bint _bgk_interior!(G, n, n, g, dt, knf)
+                @cuda threads=threads blocks=bint _bgk_interior!(G, n, nz, g, dt, knf)
             end
         end
     end
-    @cuda threads=threads blocks=bcube _refill_halo!(G, nf, g, n)
+    @cuda threads=threads blocks=bcube _refill_halo!(G, nf, nfz, g, n, nz)
     CUDA.synchronize()
     return used
 end
