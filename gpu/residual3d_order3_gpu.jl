@@ -73,7 +73,7 @@ export residual3d_order3_box_gpu!, residual3d_order3_gpu
 #   → riemann_flux_dev(0, axis, …).  No math is reimplemented here.
 # ---------------------------------------------------------------------------
 @inline function _hll_states(mL::NTuple{35,Float64}, mR::NTuple{35,Float64},
-                             axis::Int, Ma::Float64, s3f::Float64)
+                             axis::Int, Ma::Float64, s3f::Float64, full::Bool=false)
     MLf = realizable_3D_M4_dev(
         mL[1],  mL[2],  mL[3],  mL[4],  mL[5],  mL[6],  mL[7],
         mL[8],  mL[9],  mL[10], mL[11], mL[12], mL[13], mL[14],
@@ -105,13 +105,13 @@ export residual3d_order3_box_gpu!, residual3d_order3_gpu
         MLr[8],  MLr[9],  MLr[10], MLr[11], MLr[12], MLr[13], MLr[14],
         MLr[15], MLr[16], MLr[17], MLr[18], MLr[19], MLr[20], MLr[21],
         MLr[22], MLr[23], MLr[24], MLr[25], MLr[26], MLr[27], MLr[28],
-        MLr[29], MLr[30], MLr[31], MLr[32], MLr[33], MLr[34], MLr[35])
+        MLr[29], MLr[30], MLr[31], MLr[32], MLr[33], MLr[34], MLr[35], full)
     FRall = flux_closure35_dev(
         MRr[1],  MRr[2],  MRr[3],  MRr[4],  MRr[5],  MRr[6],  MRr[7],
         MRr[8],  MRr[9],  MRr[10], MRr[11], MRr[12], MRr[13], MRr[14],
         MRr[15], MRr[16], MRr[17], MRr[18], MRr[19], MRr[20], MRr[21],
         MRr[22], MRr[23], MRr[24], MRr[25], MRr[26], MRr[27], MRr[28],
-        MRr[29], MRr[30], MRr[31], MRr[32], MRr[33], MRr[34], MRr[35])
+        MRr[29], MRr[30], MRr[31], MRr[32], MRr[33], MRr[34], MRr[35], full)
 
     off = (axis - 1) * 35
     sL = min(lminL, lminR)
@@ -225,7 +225,7 @@ end
 # Step 3: per interface, WENO5 L/R faces + HLL → F_HO and F_LO.
 # Interface f (1..nx+1) between cube cells il = g+f-1 and il+1 at interior (j,k).
 function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::Int,
-                       Ma::Float64, s3f::Float64)
+                       Ma::Float64, s3f::Float64, full::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nx + 1
     if idx <= nf * ny * nz
@@ -238,8 +238,8 @@ function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::I
             W3 = _cellG(V, _clamp(il,   nfx), b, c); W4 = _cellG(V, _clamp(il+1, nfx), b, c)
             W5 = _cellG(V, _clamp(il+2, nfx), b, c); W6 = _cellG(V, _clamp(il+3, nfx), b, c)
             mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
-            FH = _hll_states(mL, mR, 1, Ma, s3f)
-            FL = _hll_states(cL, cR, 1, Ma, s3f)
+            FH = _hll_states(mL, mR, 1, Ma, s3f, full)
+            FL = _hll_states(cL, cR, 1, Ma, s3f, full)
             for m in 1:35; FHO[m, f, j, k] = FH[m]; FLO[m, f, j, k] = FL[m]; end
         end
     end
@@ -247,7 +247,7 @@ function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::I
 end
 
 function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::Int,
-                       Ma::Float64, s3f::Float64)
+                       Ma::Float64, s3f::Float64, full::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = ny + 1
     if idx <= nf * nx * nz
@@ -260,8 +260,8 @@ function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::I
             W3 = _cellG(V, a, _clamp(jl,   nfy), c); W4 = _cellG(V, a, _clamp(jl+1, nfy), c)
             W5 = _cellG(V, a, _clamp(jl+2, nfy), c); W6 = _cellG(V, a, _clamp(jl+3, nfy), c)
             mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
-            FH = _hll_states(mL, mR, 2, Ma, s3f)
-            FL = _hll_states(cL, cR, 2, Ma, s3f)
+            FH = _hll_states(mL, mR, 2, Ma, s3f, full)
+            FL = _hll_states(cL, cR, 2, Ma, s3f, full)
             for m in 1:35; FHO[m, i, f, k] = FH[m]; FLO[m, i, f, k] = FL[m]; end
         end
     end
@@ -269,7 +269,7 @@ function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::I
 end
 
 function _weno_flux_z!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfz::Int,
-                       Ma::Float64, s3f::Float64)
+                       Ma::Float64, s3f::Float64, full::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nz + 1
     if idx <= nf * nx * ny
@@ -282,8 +282,8 @@ function _weno_flux_z!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfz::I
             W3 = _cellG(V, a, b, _clamp(kl,   nfz)); W4 = _cellG(V, a, b, _clamp(kl+1, nfz))
             W5 = _cellG(V, a, b, _clamp(kl+2, nfz)); W6 = _cellG(V, a, b, _clamp(kl+3, nfz))
             mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
-            FH = _hll_states(mL, mR, 3, Ma, s3f)
-            FL = _hll_states(cL, cR, 3, Ma, s3f)
+            FH = _hll_states(mL, mR, 3, Ma, s3f, full)
+            FL = _hll_states(cL, cR, 3, Ma, s3f, full)
             for m in 1:35; FHO[m, i, j, f] = FH[m]; FLO[m, i, j, f] = FL[m]; end
         end
     end
@@ -498,6 +498,7 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
                                     s3max::Real = 40.0, threads::Int = 128,
                                     theta_closed::Bool = true,
+                                    full_s32::Bool = false,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                                 zlo=false, zhi=false))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
@@ -523,15 +524,15 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     # --- Pass 1: per axis Ppt → Vavg → faces ---
     @cuda threads=threads blocks=bcube _ppt_x!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_x!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f)
+    @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, full_s32)
 
     @cuda threads=threads blocks=bcube _ppt_y!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_y!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f)
+    @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, full_s32)
 
     @cuda threads=threads blocks=bcube _ppt_z!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_z!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f)
+    @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, full_s32)
 
     # --- Pass 2: θ* per cell, then blend + residual ---
     @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,

@@ -73,6 +73,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     s3max::Real=max(40.0, 4.0 + abs(Ma) / 2.0),
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
                     theta_closed::Bool=true,
+                    full_s32::Bool=false,
                     params=Dict{String,Any}(), include_initial::Bool=true, web_dir=nothing)
     @assert size(M0, 1) == 35 "M0 must be (35,nx,ny,nz)"
     @assert snapshot_interval >= 1 "snapshot_interval must be >= 1"
@@ -156,7 +157,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
         used = if order3_single
             u = march3d_order3_gpu!(G3, dx, Ma, k; dts=seg, s3max=s3max,
                                     stage_bgk=stage_bgk, Kn=Kn, threads=threads,
-                                    theta_closed=theta_closed)
+                                    theta_closed=theta_closed, full_s32=full_s32)
             interior_from_cube!(Md, G3; threads=threads)   # sync interior for the snapshot
             u
         elseif multigpu
