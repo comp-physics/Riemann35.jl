@@ -37,6 +37,11 @@ julia --project=gpu/gpuenv2 gpu/validation/gpu_chyqmom_nodes_3d_dev.jl
 julia --project=. gpu/validation/parity_kfvs_measure_update.jl
 # Increment B — GPU storage pass + measure_update on the full 128^3 field:
 julia --project=gpu/gpuenv2 gpu/validation/gpu_kfvs_measure_update.jl
+
+# Increment D — full-cone theta* blend on real stencils (no GPU) + the marginal A/B:
+julia --project=. gpu/validation/parity_kfvs_blend.jl
+# Increment D — GPU cost (registers + us/cell) of the full-cone blend limiter:
+julia --project=gpu/gpuenv2 gpu/validation/gpu_kfvs_blend.jl
 ```
 
 ## FIX 1 — faithful condition gate (the fidelity fix)
@@ -164,6 +169,59 @@ the storage split is exactly the right structure — invert-and-store once/stage
 below 0.4 — the certificate held on every one of the 2M+ real interior stencils
 at CFL 0.4 exactly as the theorem predicts.
 
+## Increment D — full-cone θ* blend limiter
+
+`gpu/kfvs_blend_dev.jl` (module `KFVSBlendDev`). The convex-limited blend of a
+high-order update toward the anchor:
+`U(θ) = (1−θ)·U_anchor + θ·U_highorder`, `θ*` = largest θ ∈ [0,1] keeping `U(θ)`
+**full-cone realizable**. `U_anchor` = `measure_update_3d_dev` (increment B),
+full-cone realizable by construction.
+
+**Full-cone predicate used (and why): `state_realizable_fullcone_dev`.** This is the
+SAME predicate the solver's `projection35` uses to define 35-moment realizability
+beyond the marginals: `to_recon_vars_dev(M)` → standardized moments → density &
+directional-variance guards → **`delta2star_psd_dev` (the 6×6 Δ2* moment-matrix PSD
+test via Bunch–Kaufman inertia — the CROSS-moment cone).** Chosen over option (b)
+"re-invert `U(θ)` and require min node weight ≥ −1e-12" because it is (i) the exact
+cross-moment-cone definition the solver already uses, and (ii) a bounded 6×6 test
+(~one Δ2* build + inertia) vs a full ~0.8 µs inversion per bisection step (≈24×/cell)
+— option (a) is both sounder and ~30× cheaper. The design's affine-Hankel-pencil
+closed form (thm:idp-blend) is a later optimization; bisection is used for
+correctness and is already cheap (see cost below).
+
+**Why full-cone (the core of the increment).** The shipped Track-2 θ* limiter
+(`IdpLimiterDev.theta_star_update_dev`) checks only the MARGINAL cone
+(`RiemannFluxDev._state_realizable` = `_marg_shape` per axis, NO cross-moment block).
+The anchor's whole value is preserving the CROSS-moment cone.
+
+**Validation** (`parity_kfvs_blend.jl`, real 48³ interior stencils near the jet, CFL
+0.4, 97 336 stencils; Test C reproduced on real data):
+
+| result | value |
+|---|---|
+| (a) mean full-cone θ* (high-order fraction kept) | **0.9701** (target 0.97–0.99); θ*=1 unlimited on **62.8%** (θ* percentiles p1=0.68, p50=1.0) |
+| (b) `U(θ*)` full-cone realizable | **97 336/97 336 = 100.0000%** — **0 cross-moment-cone exits** |
+| **(c) marginal-only θ* (Track-2) blended states OUTSIDE the cross-moment cone** | **36 253/97 336 = 37.25%** (and marginal θ* > full-cone θ* on 37.1%) — the full-cone limiter drives this to **0** |
+
+(c) is the empirical justification: **using the shipped marginal-only θ* would silently
+let 37% of blended states exit the cross-moment cone** — exactly the cone the anchor
+exists to protect. The full-cone limiter is necessary.
+
+**GPU cost** (`gpu_kfvs_blend.jl`, V100, 97 336 real pairs):
+
+| kernel | registers | throughput | on-device check |
+|---|---:|---:|---|
+| full-cone θ* blend limiter | **255** (2464 B local) | **0.246 µs/cell** | mean θ*=0.9701, U(θ*) realizable 100%, 0 exits |
+
+**Blunt on cost.** 255 regs (the Δ2* build + Bunch–Kaufman inertia is heavy) but only
+**0.246 µs/cell** — the bisection short-circuits on the 62.8% θ*=1 common path and each
+predicate is a bounded 6×6 test, not a re-inversion. **The closed-form cross-moment
+pencil is NOT needed before increment E**; the bisection limiter is already cheap
+enough. The predicate agrees with CPU `is_realizable` to ~98–99.9% (the mismatch is at
+the cone boundary, the documented CPU-LAPACK-eig vs device-Bunch-Kaufman-inertia floor,
+same as the shipped residual limiter — not a soundness gap; the 37% cross-exit demo is
+measured self-consistently with the device predicate).
+
 ## Bottom line
 
 Increment A is landed and validated: faithful gate (spurious rate 0.18% → 0),
@@ -174,11 +232,17 @@ CPU).
 Increment B is landed and validated: per-cell storage (1.81 GB @128³, exact
 round-trip) + the 3D `measure_update` anchor (168-reg light consumer). The
 realizability certificate (min weight ≥ −1e-12) holds on **100% of 2M+ real
-interior stencils on-device at CFL 0.4** with 0 negatives and 0 CFL shrinks;
-updated states are realizable; the x-slice port matches the CPU reference to 9.5e-7.
-**B is solid enough to build the θ\*-blend (increment D) on top next** — the anchor
-delivers a realizable-by-construction `U_anchor` and the closed-form θ\* IDP limiter
-(`idp_limiter_dev.jl`, shipped) blends the high-order state toward it.
+interior stencils on-device at CFL 0.4** with 0 negatives and 0 CFL shrinks.
+
+Increment D is landed and validated: the full-cone θ* blend limiter. Mean θ* =
+**0.9701** on real data (62.8% unlimited), `U(θ*)` full-cone realizable on **100%**
+(0 cone exits), at **0.246 µs/cell / 255 regs**. The A/B demo proves the full-cone
+predicate is necessary: the shipped marginal-only θ* would let **37% of blended
+states exit the cross-moment cone**. **D is solid enough to build the final
+increment E** (wire into the residual as an opt-in, golden-gated, byte-identical-off
+replacement for `projection35`) — the blend is a self-contained device function with
+a cheap correct limiter; the closed-form pencil is a later optimization, not a
+blocker.
 
 **Blunt caveats for the next increment:**
 - The kernel is pinned at the 255-register wall with local spill; the split does
