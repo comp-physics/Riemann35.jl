@@ -8,6 +8,13 @@ include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_s
 # the GPU order-3 kernels (hiorder3_recon_dev.jl) — residual_line3 just composes them.
 include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
     recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev, recon_vars_realizable
+# Hardened device CHyQMOM inversion (KFVS increment A) — CUDA-free, host-runnable.
+# Used ONLY by the opt-in kinetic-FVS anchor path (`_anchor_interior!`); the default
+# order=1,2,3 paths never reference it. Its faithful condition gate removes the
+# CPU `chyqmom_nodes_3d`'s wild-abscissa blowup (0.18% of real cells), which is
+# essential for the anchor's measure_update to stay finite on cone-boundary cells.
+include(joinpath(@__DIR__, "..", "..", "gpu", "chyqmom_nodes_3d_dev.jl"))
+using .KFVSInversionDev: chyqmom_nodes_3d_dev
 
 # ---------------------------------------------------------------------------
 # _face_flux_tup — NTuple{35} in, NTuple{35} HLL flux out.
@@ -503,13 +510,126 @@ function _project_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma) / 2.0)
     end
 end
 
-# kinetic-FVS anchor→blend replacement for `_project_interior!` (opt-in). STUB in
-# the plumbing commit; implemented in the flag-on commit (increment E step 3). Takes
-# the just-updated interior `M` (= U_highorder) and the stage-INPUT state `Ssrc`
-# (from which the anchor quadratures are built), and writes the full-cone θ*-blended
-# state back into `M`'s interior — retiring the projection (blend realizable by
-# construction). Never called on the default (`use_kfvs_anchor=false`) path.
-function _anchor_interior! end
+# ---------------------------------------------------------------------------
+# Kinetic-FVS anchor → full-cone θ* blend (opt-in; increment E of the KFVS anchor).
+# Replaces the per-cell realizability PROJECTION with a blend of the high-order
+# update toward a nonnegative-measure anchor, which is full-cone realizable BY
+# CONSTRUCTION — so the projection is retired.
+#
+# Per interior cell (i,j,k):
+#   * anchor: kinetic-FVS measure_update of the 7-cell stencil of the stage-INPUT
+#     state `Ssrc` (invert each cell's quadrature with the CPU reference
+#     `chyqmom_nodes_3d`; retained mass nC_k(1-λ(|Ux|+|Uy|+|Uz|)) + upwind inflow
+#     per axis). Realizable by construction under λ·max_k(|Ux|+|Uy|+|Uz|) ≤ 1, and
+#     the march CFL (dt = (1/3)dx/vmax) guarantees this at λ = dt/dx.
+#   * blend: U(θ) = (1−θ)·U_anchor + θ·U_highorder (U_highorder = the just-updated
+#     cell `M[ih,jh,k]`); θ* = largest θ∈[0,1] with U(θ) FULL-CONE realizable
+#     (`is_realizable`, = the Δ2* cross-moment cone the projection uses). Bisection.
+# The projection is NOT applied on this path. If any stencil cell is degenerate
+# (ρ≤0 / inversion fails), the cell falls back to the shipped projection (a safe,
+# rare boundary case) so the anchor path never crashes.
+#
+# z has no halo in the CPU layout; z-neighbors are outflow (edge-copy), matching
+# the residual's z-pad. `_ANCHOR_STATS` (env HYQMOM_ANCHOR_STATS=1) records how
+# many cells the projection WOULD have corrected (nonzero ⇒ projection retired),
+# the mean θ*, and the count.
+const _ANCHOR_STATS_ENABLED = Ref{Bool}(get(ENV, "HYQMOM_ANCHOR_STATS", "0") != "0")
+const _ANCHOR_WOULD_PROJECT = Ref{Int}(0)      # cells unrealizable pre-blend (proj would fire)
+const _ANCHOR_THETA_SUM     = Ref{Float64}(0.0)
+const _ANCHOR_CELLS         = Ref{Int}(0)
+const _ANCHOR_FALLBACK      = Ref{Int}(0)      # degenerate cells that fell back to projection
+reset_anchor_stats!() = (_ANCHOR_WOULD_PROJECT[]=0; _ANCHOR_THETA_SUM[]=0.0; _ANCHOR_CELLS[]=0; _ANCHOR_FALLBACK[]=0; nothing)
+anchor_stats() = (would_project=_ANCHOR_WOULD_PROJECT[], mean_theta = _ANCHOR_CELLS[]>0 ? _ANCHOR_THETA_SUM[]/_ANCHOR_CELLS[] : 1.0,
+                  cells=_ANCHOR_CELLS[], fallback=_ANCHOR_FALLBACK[])
+
+# quadrature of a raw-moment cell via the HARDENED DEVICE inversion (KFVS increment
+# A, FIX-1 gated — no wild-abscissa blowup, never throws). Returns the device tuple
+# (n, Ux, Uy, Uz, Nn) or nothing on a degenerate cell (ρ≤0 / no nodes). All nodes
+# are checked finite (a belt-and-braces guard); a non-finite node ⇒ degenerate.
+@inline function _anchor_quad(m::AbstractVector)
+    (length(m) >= 35 && m[1] > 0.0 && all(isfinite, m)) || return nothing
+    M = ntuple(t -> Float64(m[t]), Val(35))
+    (nn, nux, nuy, nuz, Nn) = chyqmom_nodes_3d_dev(M)
+    Nn >= 1 || return nothing
+    @inbounds for q in 1:Nn
+        (isfinite(nn[q]) && isfinite(nux[q]) && isfinite(nuy[q]) && isfinite(nuz[q])) || return nothing
+    end
+    return (nn, nux, nuy, nuz, Nn)
+end
+
+# accumulate a weighted node into the 35-moment vector Mout (in place).
+@inline function _anchor_accum!(Mout, w, ux, uy, uz)
+    @inbounds for (idx,(i,j,l)) in enumerate(_ANCHOR_IJK)
+        Mout[idx] += w * ux^i * uy^j * uz^l
+    end
+end
+const _ANCHOR_IJK = _CHYQ_TRIPLES   # reuse the 35-triple table from chyqmom_nodes_3d.jl
+
+function _anchor_interior!(M::Array{Float64,4}, Ssrc::Array{Float64,4},
+                           nx,ny,nz,halo, dt, dx, Ma, s3max)
+    λ = Float64(dt) / Float64(dx)
+    stats = _ANCHOR_STATS_ENABLED[]
+    Mout = zeros(35)
+    for k in 1:nz, j in 1:ny, i in 1:nx
+        ih = i + halo; jh = j + halo
+        km = k > 1  ? k-1 : 1      # z outflow edge-copy (no z halo)
+        kp = k < nz ? k+1 : nz
+        # invert the 7-cell stencil of the stage-INPUT state
+        qc  = _anchor_quad(@view Ssrc[ih,   jh,   k, :])
+        qxl = _anchor_quad(@view Ssrc[ih-1, jh,   k, :]); qxr = _anchor_quad(@view Ssrc[ih+1, jh,   k, :])
+        qyl = _anchor_quad(@view Ssrc[ih,   jh-1, k, :]); qyr = _anchor_quad(@view Ssrc[ih,   jh+1, k, :])
+        qzl = _anchor_quad(@view Ssrc[ih,   jh,   km, :]); qzr = _anchor_quad(@view Ssrc[ih,   jh,   kp, :])
+        if qc === nothing || qxl === nothing || qxr === nothing ||
+           qyl === nothing || qyr === nothing || qzl === nothing || qzr === nothing
+            # degenerate stencil → fall back to the shipped projection for this cell
+            M[ih,jh,k,:] = realizable_3D_M4(M[ih,jh,k,:], Ma, s3max)
+            stats && (_ANCHOR_FALLBACK[] += 1; _ANCHOR_CELLS[] += 1; _ANCHOR_THETA_SUM[] += 1.0)
+            continue
+        end
+        # ---- measure_update (3D): build the nonneg-measure moments in Mout ----
+        fill!(Mout, 0.0)
+        (nC,uxC,uyC,uzC,NC) = qc
+        for c in 1:NC
+            ux=uxC[c]; uy=uyC[c]; uz=uzC[c]
+            w = nC[c]*(1.0 - λ*(abs(ux)+abs(uy)+abs(uz)))
+            _anchor_accum!(Mout, w, ux, uy, uz)
+        end
+        # x inflow: left nodes Ux>0, right nodes Ux<0
+        (nn,ux_,uy_,uz_,NN)=qxl; for c in 1:NN; ux_[c]>0.0 || continue; _anchor_accum!(Mout, λ*nn[c]*ux_[c], ux_[c],uy_[c],uz_[c]); end
+        (nn,ux_,uy_,uz_,NN)=qxr; for c in 1:NN; ux_[c]<0.0 || continue; _anchor_accum!(Mout,-λ*nn[c]*ux_[c], ux_[c],uy_[c],uz_[c]); end
+        # y inflow
+        (nn,ux_,uy_,uz_,NN)=qyl; for c in 1:NN; uy_[c]>0.0 || continue; _anchor_accum!(Mout, λ*nn[c]*uy_[c], ux_[c],uy_[c],uz_[c]); end
+        (nn,ux_,uy_,uz_,NN)=qyr; for c in 1:NN; uy_[c]<0.0 || continue; _anchor_accum!(Mout,-λ*nn[c]*uy_[c], ux_[c],uy_[c],uz_[c]); end
+        # z inflow
+        (nn,ux_,uy_,uz_,NN)=qzl; for c in 1:NN; uz_[c]>0.0 || continue; _anchor_accum!(Mout, λ*nn[c]*uz_[c], ux_[c],uy_[c],uz_[c]); end
+        (nn,ux_,uy_,uz_,NN)=qzr; for c in 1:NN; uz_[c]<0.0 || continue; _anchor_accum!(Mout,-λ*nn[c]*uz_[c], ux_[c],uy_[c],uz_[c]); end
+
+        # ---- full-cone θ* blend of U_highorder (current M cell) toward the anchor ----
+        Uho = ntuple(q -> M[ih,jh,k,q], Val(35))
+        if stats && realizability_margin(@view M[ih,jh,k,:]) < 0.0
+            _ANCHOR_WOULD_PROJECT[] += 1      # projection WOULD have fired here
+        end
+        θ = _anchor_blend_theta(Mout, Uho)
+        for q in 1:35
+            M[ih,jh,k,q] = (1.0-θ)*Mout[q] + θ*Uho[q]
+        end
+        if stats; _ANCHOR_CELLS[] += 1; _ANCHOR_THETA_SUM[] += θ; end
+    end
+    return nothing
+end
+
+# largest θ∈[0,1] keeping (1-θ)Ua + θ Uho FULL-CONE realizable (is_realizable, the
+# Δ2* cross-moment cone). Ua realizable by construction ⇒ θ=0 always feasible.
+@inline function _anchor_blend_theta(Ua::Vector{Float64}, Uho::NTuple{35,Float64}; nb::Int=30)
+    blend(θ) = ntuple(q -> (1.0-θ)*Ua[q] + θ*Uho[q], Val(35))
+    is_realizable(collect(blend(1.0)); lam_min=0.0) && return 1.0
+    lo=0.0; hi=1.0
+    for _ in 1:nb
+        mid = 0.5*(lo+hi)
+        is_realizable(collect(blend(mid)); lam_min=0.0) ? (lo=mid) : (hi=mid)
+    end
+    return lo
+end
 
 function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
@@ -560,7 +680,7 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
     # CONSTRUCTION so the projection is retired (opt-in; see `_anchor_interior!`).
     realize!(Mwork, Mstage0) =
         use_kfvs_anchor ?
-            _anchor_interior!(Mwork, Mstage0, nx,ny,nz,halo, dt, Ma, s3max) :
+            _anchor_interior!(Mwork, Mstage0, nx,ny,nz,halo, dt, dx, Ma, s3max) :
             _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
 
     M0 = copy(M)

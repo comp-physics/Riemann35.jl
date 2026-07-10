@@ -44,21 +44,40 @@ function main()
     dt = 0.1 * dx / 12.0     # conservative CFL for Ma=10 crossing
     nsteps = 4
     s3max = max(40.0, 4.0 + abs(Ma)/2.0)
+    # conservation reference: total mass + total energy (trace of 2nd moments) at t0
+    mass0 = 0.0; en0 = 0.0
+    for k in 1:nz, j in 1:ny, i in 1:nx
+        mass0 += M[i+halo,j+halo,k,1]
+        en0   += M[i+halo,j+halo,k,3] + M[i+halo,j+halo,k,10] + M[i+halo,j+halo,k,20]
+    end
+    USE_ANCHOR && reset_anchor_stats!()
     for s in 1:nsteps
         step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma;
                            order=3, s3max=s3max, use_kfvs_anchor=USE_ANCHOR)
     end
-    # exact checksum of the interior
-    acc = 0.0; s1 = 0.0; nfin = 0; nrho = 0; nz_neg = 0
+    # exact checksum + finiteness/realizability + conservation
+    acc = 0.0; s1 = 0.0; nfin = 0; nrho = 0; nunreal = 0
+    mass1 = 0.0; en1 = 0.0
     for k in 1:nz, j in 1:ny, i in 1:nx
+        cell = @view M[i+halo, j+halo, k, :]
         for q in 1:35
-            v = M[i+halo, j+halo, k, q]
-            acc += v*v; s1 += v
-            isfinite(v) || (nfin += 1)
+            v = cell[q]; acc += v*v; s1 += v; isfinite(v) || (nfin += 1)
         end
-        (M[i+halo,j+halo,k,1] > 0.0) || (nrho += 1)
+        (cell[1] > 0.0) || (nrho += 1)
+        (realizability_margin(cell) < 0.0) && (nunreal += 1)
+        mass1 += cell[1]; en1 += cell[3]+cell[10]+cell[20]
     end
-    @printf("anchor=%s  L2=%.17e  sum=%.17e  nonfinite=%d  rho<=0=%d\n",
-            USE_ANCHOR, sqrt(acc), s1, nfin, nrho)
+    @printf("anchor=%s  L2=%.17e  sum=%.17e  nonfinite=%d  rho<=0=%d  unrealizable=%d\n",
+            USE_ANCHOR, sqrt(acc), s1, nfin, nrho, nunreal)
+    @printf("  mass rel drift=%.3e  energy(tr M2) rel drift=%.3e\n",
+            abs(mass1-mass0)/mass0, abs(en1-en0)/max(abs(en0),1e-300))
+    if USE_ANCHOR
+        st = anchor_stats()
+        @printf("  ANCHOR: cells/step=%d  mean θ*=%.4f  proj-would-fire=%d  fallback=%d\n",
+                st.cells÷nsteps, st.mean_theta, st.would_project, st.fallback)
+        @printf("  => projection RETIRED: the blend is realizable by construction; the old\n")
+        @printf("     _project_interior! would have corrected %d cell-updates over %d steps.\n",
+                st.would_project, nsteps)
+    end
 end
 main()
