@@ -91,16 +91,18 @@ if (abspath(PROGRAM_FILE) == @__FILE__) && ("--generate" in ARGS)
 end
 
 @testset "θ*-IDP limiter goldens (both paths pinned)" begin
-    # BASELINE GUARD — bisection fallback must reproduce the frozen golden exactly.
+    # BASELINE GUARD — the bisection fallback must reproduce the frozen golden to a
+    # tight tolerance. NOT bit-for-bit: goldens are frozen on one machine but CI runs
+    # on different arch / BLAS / Julia builds, so the last bit differs (~1e-16). Any
+    # real change to the bisection code path would shift results >> 1e-12. (Same-machine
+    # this is exactly 0; the tolerance only absorbs cross-platform rounding.)
     @test isfile(_TS_BASELINE)
     if isfile(_TS_BASELINE)
         Rb = _ts_residual(false)
         gb = _ts_read(_TS_BASELINE)
-        @test _ts_biteq(Rb, gb)                       # BIT-FOR-BIT
-        @test _ts_relL2(Rb, gb) == 0.0                # relL2 exactly 0
-        if !_ts_biteq(Rb, gb)
-            @warn "baseline drift" relL2=_ts_relL2(Rb, gb) maxabs=maximum(abs, Rb .- gb)
-        end
+        rb = _ts_relL2(Rb, gb)
+        @test rb < 1e-12                              # baseline preserved (portable)
+        rb >= 1e-12 && @warn "baseline drift" relL2=rb maxabs=maximum(abs, Rb .- gb)
     end
 
     # CLOSED-FORM (the default) — pinned golden + finite + realizable.
@@ -108,7 +110,7 @@ end
     if isfile(_TS_CLOSED)
         Rc = _ts_residual(true)
         gc = _ts_read(_TS_CLOSED)
-        @test _ts_biteq(Rc, gc)                       # BIT-FOR-BIT
+        @test _ts_relL2(Rc, gc) < 1e-12               # closed default preserved (portable)
         @test all(isfinite, Rc)                       # finite
     end
 
