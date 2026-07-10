@@ -52,6 +52,19 @@ end
 Advance `M0` (host `(35,nx,ny,nz)`) for `nstep` SSP-RK3 steps on the GPU, dumping a
 snapshot every `snapshot_interval` steps to `snapshot_filename` (JLD2). With `comm`
 given, `M0` is this rank's z-slab interior and snapshots are the gathered global field.
+
+`theta_closed` (default `true`, the closed-form limiter): for the order-3
+(WENO5 + θ*-IDP) path, selects the closed-form marginal-Hankel θ* limiter
+(`theta_star_update_closed`) — the more accurate path, exact vs bisection's 2^-24
+resolution and an exact realizable lower bound. Pass `theta_closed=false` to fall
+back to the BASELINE 24-iteration bisection (`theta_star_update_dev`), which is
+retained forever and CI-guarded byte-for-byte (test/goldenfiles/
+theta_star_baseline_golden.f64, test/test_theta_star_goldens.jl). It is a plain
+runtime Bool threaded down to the six per-face θ* device calls, so BOTH paths live
+in one compiled kernel (no precompile-time const, which would freeze and silently
+no-op on the package path). The default was flipped false→true on 2026-07-10 after
+the bisection baseline was frozen + CI-guarded; the GPU default-OFF path was
+verified byte-identical to the pre-change kernel. No effect on order 1/2.
 """
 function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     snapshot_interval::Integer, snapshot_filename::AbstractString,
@@ -59,6 +72,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     scheme::Symbol=:recommended, pressure_recon=nothing, stage_bgk=nothing, Kn::Real=Inf,
                     s3max::Real=max(40.0, 4.0 + abs(Ma) / 2.0),
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
+                    theta_closed::Bool=true,
                     params=Dict{String,Any}(), include_initial::Bool=true, web_dir=nothing)
     @assert size(M0, 1) == 35 "M0 must be (35,nx,ny,nz)"
     @assert snapshot_interval >= 1 "snapshot_interval must be >= 1"
@@ -141,13 +155,15 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
         seg = dts_host === nothing ? nothing : dts_host[step+1:step+k]
         used = if order3_single
             u = march3d_order3_gpu!(G3, dx, Ma, k; dts=seg, s3max=s3max,
-                                    stage_bgk=stage_bgk, Kn=Kn, threads=threads)
+                                    stage_bgk=stage_bgk, Kn=Kn, threads=threads,
+                                    theta_closed=theta_closed)
             interior_from_cube!(Md, G3; threads=threads)   # sync interior for the snapshot
             u
         elseif multigpu
             march3d_slab_gpu!(Md, dx, Ma, k, comm; halo=halo, dts=seg,
                               vacuum_floor=vacuum_floor, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
-                              pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads)
+                              pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads,
+                              theta_closed=theta_closed)
         else
             march3d_gpu!(Md, dx, Ma, k; dts=seg, vacuum_floor=vacuum_floor, order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
                          pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads)

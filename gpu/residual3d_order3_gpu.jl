@@ -48,8 +48,15 @@ using .WavespeedDev: realize_and_speed_Mr_dev
 using .FluxClosureDev: flux_closure35_dev
 using .RealizeDev: realizable_3D_M4_dev
 using .ReconDev: to_recon_vars_tup
-using .IdpLimiterDev: theta_star_update_dev
+using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
 using .HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
+
+# Runtime θ* dispatch (single compiled kernel holds BOTH paths). `use_closed`
+# is a plain Bool threaded from the host through the whole call chain (NOT a
+# precompile-time const — that pattern freezes at precompile and silently
+# no-ops on the package path). Default OFF ⇒ bisection ⇒ byte-identical.
+@inline _theta_star(use_closed::Bool, Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64}) =
+    use_closed ? theta_star_update_closed(Mlo, dM) : theta_star_update_dev(Mlo, dM)
 
 export residual3d_order3_box_gpu!, residual3d_order3_gpu
 
@@ -293,7 +300,7 @@ end
 
 function _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                       nx::Int, ny::Int, nz::Int, g::Int,
-                      λx::Float64, λy::Float64, λz::Float64)
+                      λx::Float64, λy::Float64, λz::Float64, use_closed::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -321,12 +328,12 @@ function _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
             Gzr = ntuple(q -> hzr1[q] - fzr1[q], Val(35))
             Gzl = ntuple(q -> hzl0[q] - fzl0[q], Val(35))
 
-            Th[1, i, j, k] = theta_star_update_dev(Mlo, ntuple(q -> -6λx * Gxr[q], Val(35)))
-            Th[2, i, j, k] = theta_star_update_dev(Mlo, ntuple(q ->  6λx * Gxl[q], Val(35)))
-            Th[3, i, j, k] = theta_star_update_dev(Mlo, ntuple(q -> -6λy * Gyr[q], Val(35)))
-            Th[4, i, j, k] = theta_star_update_dev(Mlo, ntuple(q ->  6λy * Gyl[q], Val(35)))
-            Th[5, i, j, k] = theta_star_update_dev(Mlo, ntuple(q -> -6λz * Gzr[q], Val(35)))
-            Th[6, i, j, k] = theta_star_update_dev(Mlo, ntuple(q ->  6λz * Gzl[q], Val(35)))
+            Th[1, i, j, k] = _theta_star(use_closed, Mlo, ntuple(q -> -6λx * Gxr[q], Val(35)))
+            Th[2, i, j, k] = _theta_star(use_closed, Mlo, ntuple(q ->  6λx * Gxl[q], Val(35)))
+            Th[3, i, j, k] = _theta_star(use_closed, Mlo, ntuple(q -> -6λy * Gyr[q], Val(35)))
+            Th[4, i, j, k] = _theta_star(use_closed, Mlo, ntuple(q ->  6λy * Gyl[q], Val(35)))
+            Th[5, i, j, k] = _theta_star(use_closed, Mlo, ntuple(q -> -6λz * Gzr[q], Val(35)))
+            Th[6, i, j, k] = _theta_star(use_closed, Mlo, ntuple(q ->  6λz * Gzl[q], Val(35)))
         end
     end
     return nothing
@@ -369,11 +376,11 @@ end
 @inline function _rank_face_theta(G, Thf::Float64, px::Int, py::Int, pk::Int,
                                   FHOa, FLOa, fi::Int, fj::Int, fk::Int, s6λ::Float64,
                                   λx::Float64, λy::Float64, λz::Float64,
-                                  Ma::Float64, s3f::Float64)
+                                  Ma::Float64, s3f::Float64, use_closed::Bool)
     Mlo = _halo_cell_mlo(G, px, py, pk, λx, λy, λz, Ma, s3f)
     Gsh = _face3(FHOa, fi, fj, fk)
     Gsl = _face3(FLOa, fi, fj, fk)
-    θh  = theta_star_update_dev(Mlo, ntuple(q -> s6λ*(Gsh[q]-Gsl[q]), Val(35)))
+    θh  = _theta_star(use_closed, Mlo, ntuple(q -> s6λ*(Gsh[q]-Gsl[q]), Val(35)))
     return min(Thf, θh)
 end
 
@@ -397,7 +404,8 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                           dx::Float64, dy::Float64, dz::Float64,
                           G, g::Int, λx::Float64, λy::Float64, λz::Float64,
                           Ma::Float64, s3f::Float64,
-                          xlo::Bool, xhi::Bool, ylo::Bool, yhi::Bool, zlo::Bool, zhi::Bool)
+                          xlo::Bool, xhi::Bool, ylo::Bool, yhi::Bool, zlo::Bool, zhi::Bool,
+                          use_closed::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -410,7 +418,7 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                 θxr = min(Th[1,i,j,k], Th[2,i+1,j,k])
             elseif xhi
                 θxr = _rank_face_theta(G, Th[1,i,j,k], g+nx+1, g+j, g+k,
-                                       FHOx, FLOx, nx+1, j, k, 6.0*λx, λx, λy, λz, Ma, s3f)
+                                       FHOx, FLOx, nx+1, j, k, 6.0*λx, λx, λy, λz, Ma, s3f, use_closed)
             else
                 θxr = Th[1,i,j,k]
             end
@@ -419,7 +427,7 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                 θxl = min(Th[2,i,j,k], Th[1,i-1,j,k])
             elseif xlo
                 θxl = _rank_face_theta(G, Th[2,i,j,k], g, g+j, g+k,
-                                       FHOx, FLOx, 1, j, k, -6.0*λx, λx, λy, λz, Ma, s3f)
+                                       FHOx, FLOx, 1, j, k, -6.0*λx, λx, λy, λz, Ma, s3f, use_closed)
             else
                 θxl = Th[2,i,j,k]
             end
@@ -428,7 +436,7 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                 θyr = min(Th[3,i,j,k], Th[4,i,j+1,k])
             elseif yhi
                 θyr = _rank_face_theta(G, Th[3,i,j,k], g+i, g+ny+1, g+k,
-                                       FHOy, FLOy, i, ny+1, k, 6.0*λy, λx, λy, λz, Ma, s3f)
+                                       FHOy, FLOy, i, ny+1, k, 6.0*λy, λx, λy, λz, Ma, s3f, use_closed)
             else
                 θyr = Th[3,i,j,k]
             end
@@ -437,7 +445,7 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                 θyl = min(Th[4,i,j,k], Th[3,i,j-1,k])
             elseif ylo
                 θyl = _rank_face_theta(G, Th[4,i,j,k], g+i, g, g+k,
-                                       FHOy, FLOy, i, 1, k, -6.0*λy, λx, λy, λz, Ma, s3f)
+                                       FHOy, FLOy, i, 1, k, -6.0*λy, λx, λy, λz, Ma, s3f, use_closed)
             else
                 θyl = Th[4,i,j,k]
             end
@@ -446,7 +454,7 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                 θzr = min(Th[5,i,j,k], Th[6,i,j,k+1])
             elseif zhi
                 θzr = _rank_face_theta(G, Th[5,i,j,k], g+i, g+j, g+nz+1,
-                                       FHOz, FLOz, i, j, nz+1, 6.0*λz, λx, λy, λz, Ma, s3f)
+                                       FHOz, FLOz, i, j, nz+1, 6.0*λz, λx, λy, λz, Ma, s3f, use_closed)
             else
                 θzr = Th[5,i,j,k]
             end
@@ -455,7 +463,7 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                 θzl = min(Th[6,i,j,k], Th[5,i,j,k-1])
             elseif zlo
                 θzl = _rank_face_theta(G, Th[6,i,j,k], g+i, g+j, g,
-                                       FHOz, FLOz, i, j, 1, -6.0*λz, λx, λy, λz, Ma, s3f)
+                                       FHOz, FLOz, i, j, 1, -6.0*λz, λx, λy, λz, Ma, s3f, use_closed)
             else
                 θzl = Th[6,i,j,k]
             end
@@ -489,6 +497,7 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     nx::Int, ny::Int, nz::Int, g::Int,
                                     dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
                                     s3max::Real = 40.0, threads::Int = 128,
+                                    theta_closed::Bool = true,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                                 zlo=false, zhi=false))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
@@ -526,13 +535,14 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
 
     # --- Pass 2: θ* per cell, then blend + residual ---
     @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
-                                                   nx, ny, nz, g, λx, λy, λz)
+                                                   nx, ny, nz, g, λx, λy, λz, theta_closed)
     @cuda threads=threads blocks=bint _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                                                        nx, ny, nz, dxf, dyf, dzf,
                                                        G, g, λx, λy, λz, Maf, s3f,
                                                        Bool(rank_bnd.xlo), Bool(rank_bnd.xhi),
                                                        Bool(rank_bnd.ylo), Bool(rank_bnd.yhi),
-                                                       Bool(rank_bnd.zlo), Bool(rank_bnd.zhi))
+                                                       Bool(rank_bnd.zlo), Bool(rank_bnd.zhi),
+                                                       theta_closed)
     return nothing
 end
 
@@ -545,10 +555,10 @@ order-3 residual, return the interior `(35, nx, ny, nz)`.
 """
 function residual3d_order3_gpu(G_host::Array{Float64,4}, nx::Int, ny::Int, nz::Int, g::Int,
                                dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
-                               s3max::Real = 40.0, threads::Int = 128)
+                               s3max::Real = 40.0, threads::Int = 128, theta_closed::Bool = true)
     Gd = CuArray(G_host)
     R  = CUDA.zeros(Float64, 35, nx, ny, nz)
-    residual3d_order3_box_gpu!(R, Gd, nx, ny, nz, g, dx, dy, dz, Ma, dt; s3max=s3max, threads=threads)
+    residual3d_order3_box_gpu!(R, Gd, nx, ny, nz, g, dx, dy, dz, Ma, dt; s3max=s3max, threads=threads, theta_closed=theta_closed)
     CUDA.synchronize()
     return Array(R)
 end
