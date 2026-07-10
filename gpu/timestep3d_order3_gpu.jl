@@ -236,7 +236,8 @@ in place and left with its outflow halos refilled.
 """
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                             stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128)
+                             stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
+                             theta_closed::Bool = false)
     @assert size(G, 1) == 35 "G must be (35,nf,nf,nf)"
     nf = size(G, 2)
     @assert size(G) == (35, nf, nf, nf) "G must be a cube (35,nf,nf,nf)"
@@ -272,7 +273,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         for (a, b, c) in stages
             @cuda threads=threads blocks=bcube _refill_halo!(G, nf, g, n)
             residual3d_order3_box_gpu!(R, G, n, n, n, g, dxf, dxf, dxf, Maf, dt;
-                                       s3max=s3f, threads=threads)
+                                       s3max=s3f, threads=threads, theta_closed=theta_closed)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, n, n, g, Maf, s3f)
             if stage_bgk
@@ -332,7 +333,8 @@ unless `dts` is supplied. Returns the dt vector used. `Mi` is updated in place.
 """
 function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                                   dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                                  stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128)
+                                  stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
+                                  theta_closed::Bool = false)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(Mi, 1) == 35 "Mi must be (35,n,n,nz_loc)"
     n = size(Mi, 2); nzloc = size(Mi, 4)
@@ -414,7 +416,7 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
         for (a, b, c) in stages
             refresh_halos!()
             residual3d_order3_box_gpu!(R, G, n, n, nzloc, g, dxf, dxf, dxf, Maf, dt;
-                                       s3max=s3f, threads=threads, rank_bnd=rb)
+                                       s3max=s3f, threads=threads, rank_bnd=rb, theta_closed=theta_closed)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, nzloc, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, n, nzloc, g, Maf, s3f)
             if stage_bgk

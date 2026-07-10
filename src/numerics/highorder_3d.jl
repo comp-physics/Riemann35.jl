@@ -3,7 +3,7 @@
 # default order=1,2 code path (byte-identical guarantee). The modules create
 # sub-modules of Riemann35 and their names are brought into this file's scope.
 # ---------------------------------------------------------------------------
-include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_star_update_dev
+include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
 # Single-source device-safe order-3 reconstruction primitives, shared VERBATIM with
 # the GPU order-3 kernels (hiorder3_recon_dev.jl) — residual_line3 just composes them.
 include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
@@ -114,10 +114,16 @@ end
 # Requires halo ≥ 4.  dt > 0 enables IDP limiting; dt = 0 sets all θ = 1
 # (pure WENO5, useful for conservation tests).
 # ---------------------------------------------------------------------------
+# Runtime θ* selector (default OFF ⇒ bisection ⇒ byte-identical). `theta_closed`
+# is a plain Bool threaded from the entry point — same pattern as the GPU path.
+@inline _theta_star_sel(use_closed::Bool, Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64}) =
+    use_closed ? theta_star_update_closed(Mlo, dM) : theta_star_update_dev(Mlo, dM)
+
 function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 nx::Int, ny::Int, nz::Int, halo::Int,
                                 dx::Real, dy::Real, dz::Real, Ma::Real,
                                 dt::Real; s3max::Real = 40.0,
+                                theta_closed::Bool = false,
                                 rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                             zlo=false, zhi=false))
     @assert halo >= 4 "order=3 residual requires halo ≥ 4; got halo=$halo"
@@ -216,12 +222,12 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
         Gzl = ntuple(q -> FHO_z[i,j,k  ][q] - FLO_z[i,j,k  ][q], Val(35))
 
         # Per-face θ* (one-sided, factor-6 conservative bound)
-        Θ_xr[i,j,k] = theta_star_update_dev(Mlo, ntuple(q -> -6λx * Gxr[q], Val(35)))
-        Θ_xl[i,j,k] = theta_star_update_dev(Mlo, ntuple(q ->  6λx * Gxl[q], Val(35)))
-        Θ_yr[i,j,k] = theta_star_update_dev(Mlo, ntuple(q -> -6λy * Gyr[q], Val(35)))
-        Θ_yl[i,j,k] = theta_star_update_dev(Mlo, ntuple(q ->  6λy * Gyl[q], Val(35)))
-        Θ_zr[i,j,k] = theta_star_update_dev(Mlo, ntuple(q -> -6λz * Gzr[q], Val(35)))
-        Θ_zl[i,j,k] = theta_star_update_dev(Mlo, ntuple(q ->  6λz * Gzl[q], Val(35)))
+        Θ_xr[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> -6λx * Gxr[q], Val(35)))
+        Θ_xl[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q ->  6λx * Gxl[q], Val(35)))
+        Θ_yr[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> -6λy * Gyr[q], Val(35)))
+        Θ_yl[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q ->  6λy * Gyl[q], Val(35)))
+        Θ_zr[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> -6λz * Gzr[q], Val(35)))
+        Θ_zl[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q ->  6λz * Gzl[q], Val(35)))
     end
 
     # =========================================================================
@@ -293,7 +299,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
             cx, cy, ck = halo_coords(axis, hi, a, b)
             Mlo = halo_cell_mlo(cx, cy, ck)
             G   = shared_face_G(axis, hi, a, b)
-            Θ[a, b] = theta_star_update_dev(Mlo, ntuple(q -> s * G[q], Val(35)))
+            Θ[a, b] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> s * G[q], Val(35)))
         end
         return Θ
     end
@@ -411,13 +417,15 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
                          order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                          s3max::Real = 4.0 + abs(Ma) / 2.0,
                          dt::Real = 0.0,
+                         theta_closed::Bool = false,
                          rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                      zlo=false, zhi=false))
     # order==3: two-pass WENO5 + joint 6-face θ*-IDP (separate implementation,
     # leaves the order==1,2 path below byte-identical).
     if order == 3
         return residual_ho_3d_order3!(R, M, nx, ny, nz, halo,
-                                      dx, dy, dz, Ma, dt; s3max=s3max, rank_bnd=rank_bnd)
+                                      dx, dy, dz, Ma, dt; s3max=s3max,
+                                      theta_closed=theta_closed, rank_bnd=rank_bnd)
     end
     fill!(R, 0.0)
     g = halo
