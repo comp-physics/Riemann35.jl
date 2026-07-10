@@ -123,7 +123,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 nx::Int, ny::Int, nz::Int, halo::Int,
                                 dx::Real, dy::Real, dz::Real, Ma::Real,
                                 dt::Real; s3max::Real = 40.0,
-                                theta_closed::Bool = false,
+                                theta_closed::Bool = true,
                                 rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                             zlo=false, zhi=false))
     @assert halo >= 4 "order=3 residual requires halo ≥ 4; got halo=$halo"
@@ -417,7 +417,7 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
                          order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                          s3max::Real = 4.0 + abs(Ma) / 2.0,
                          dt::Real = 0.0,
-                         theta_closed::Bool = false,
+                         theta_closed::Bool = true,
                          rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                      zlo=false, zhi=false))
     # order==3: two-pass WENO5 + joint 6-face θ*-IDP (separate implementation,

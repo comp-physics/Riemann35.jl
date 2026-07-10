@@ -37,9 +37,31 @@
 #      everywhere ⇒ closed and bisection coincide exactly; the difference only
 #      appears where θ actually binds, per items 1 and 3.)
 #
-# VERDICT: merge-ready. Opt-in (theta_closed, default false); default byte-for-byte
-# identical on both CPU (relL2 0) and GPU (sha256 identical); flag-on verified
+# 5. DEFAULT FLIP (2026-07-10) — closed-form θ* is now the DEFAULT:
+#      theta_closed default flipped false→true at all 8 order-3 entry points
+#      (highorder_3d.jl residual_ho_3d! / residual_ho_3d_order3!; GPU
+#      gpu_run.jl / timestep3d_gpu.jl / timestep3d_order3_gpu.jl /
+#      residual3d_order3_gpu.jl). The bisection BASELINE is retained forever and
+#      CI-guarded byte-for-byte via explicit theta_closed=false:
+#        - test/goldenfiles/theta_star_baseline_golden.f64 (bisection, FROZEN)
+#        - test/goldenfiles/theta_star_closed_golden.f64   (closed = new default)
+#        - test/test_theta_star_goldens.jl (in runtests.jl → CI): baseline guard
+#          relL2==0 bit-for-bit; closed default pinned bit-for-bit + finite +
+#          marched-state realizable (216/216, rho_min 0.333>0).
+#      The default order-3 goldens were deliberately regenerated to the closed
+#      output (reference MOVED, on purpose). Where θ actually binds the shift is
+#      ~2.4e-8 relL2 on this smooth case; on chaotic/high-Ma trajectories expect
+#      up to a few-% shift — the MORE-ACCURATE path (exact vs bisection's 2^-24),
+#      smooth amplification per the GPU matched-dt growth-curve validation, not a
+#      bug. Verified: default(no kwarg) == closed golden bitwise; explicit
+#      theta_closed=false == baseline golden bitwise (fallback intact).
+#
+# VERDICT: merge-ready. Default is now closed-form θ* (more accurate); the
+# bisection baseline is preserved and CI-guarded byte-for-byte via
+# theta_closed=false. Both paths pinned to frozen goldens; default verified
 # correct (2^-24 agreement, exact lower bound) and stable (finite/rho>0/realizable).
+# GPU default-OFF was byte-identical to main (item 2), and only the runtime Bool
+# selects between the two paths within one compiled kernel.
 # ===========================================================================
 #
 # Run under the GPU env (V100 / sm_70):

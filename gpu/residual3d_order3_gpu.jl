@@ -497,7 +497,7 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     nx::Int, ny::Int, nz::Int, g::Int,
                                     dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
                                     s3max::Real = 40.0, threads::Int = 128,
-                                    theta_closed::Bool = false,
+                                    theta_closed::Bool = true,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                                 zlo=false, zhi=false))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
@@ -555,7 +555,7 @@ order-3 residual, return the interior `(35, nx, ny, nz)`.
 """
 function residual3d_order3_gpu(G_host::Array{Float64,4}, nx::Int, ny::Int, nz::Int, g::Int,
                                dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
-                               s3max::Real = 40.0, threads::Int = 128, theta_closed::Bool = false)
+                               s3max::Real = 40.0, threads::Int = 128, theta_closed::Bool = true)
     Gd = CuArray(G_host)
     R  = CUDA.zeros(Float64, 35, nx, ny, nz)
     residual3d_order3_box_gpu!(R, Gd, nx, ny, nz, g, dx, dy, dz, Ma, dt; s3max=s3max, threads=threads, theta_closed=theta_closed)

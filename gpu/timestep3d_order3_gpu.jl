@@ -237,7 +237,7 @@ in place and left with its outflow halos refilled.
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
-                             theta_closed::Bool = false)
+                             theta_closed::Bool = true)
     @assert size(G, 1) == 35 "G must be (35,nf,nf,nf)"
     nf = size(G, 2)
     @assert size(G) == (35, nf, nf, nf) "G must be a cube (35,nf,nf,nf)"
@@ -334,7 +334,7 @@ unless `dts` is supplied. Returns the dt vector used. `Mi` is updated in place.
 function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                                   dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                                   stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
-                                  theta_closed::Bool = false)
+                                  theta_closed::Bool = true)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(Mi, 1) == 35 "Mi must be (35,n,n,nz_loc)"
     n = size(Mi, 2); nzloc = size(Mi, 4)

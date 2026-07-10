@@ -188,7 +188,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
                            halo::Int=2, dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                            pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf,
                            s3max::Real=4.0 + abs(Ma) / 2.0,
-                           threads::Int=128, theta_closed::Bool=false)
+                           threads::Int=128, theta_closed::Bool=true)
     # order==3: route to the z-slab WENO5+θ*-IDP march (its own g=8 haloed-cube path
     # with z rank-boundary θ). The order-1/2 slab path below is untouched (byte-identical).
     if order == 3
