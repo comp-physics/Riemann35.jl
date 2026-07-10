@@ -42,6 +42,12 @@ julia --project=gpu/gpuenv2 gpu/validation/gpu_kfvs_measure_update.jl
 julia --project=. gpu/validation/parity_kfvs_blend.jl
 # Increment D — GPU cost (registers + us/cell) of the full-cone blend limiter:
 julia --project=gpu/gpuenv2 gpu/validation/gpu_kfvs_blend.jl
+
+# Increment E — CPU order-3 byte-identity gate (flag off) + flag-on validation:
+julia --project=. gpu/validation/kfvs_cpu_order3_baseline.jl              # flag OFF
+KFVS_ANCHOR=1 HYQMOM_ANCHOR_STATS=1 julia --project=. gpu/validation/kfvs_cpu_order3_baseline.jl  # flag ON
+# Increment E — GPU order-3 golden (flag-off byte-identity + flag-on smoke):
+julia --project=gpu/gpuenv2 gpu/validation/kfvs_gpu_order3_golden.jl
 ```
 
 ## FIX 1 — faithful condition gate (the fidelity fix)
@@ -222,6 +228,76 @@ the cone boundary, the documented CPU-LAPACK-eig vs device-Bunch-Kaufman-inertia
 same as the shipped residual limiter — not a soundness gap; the 37% cross-exit demo is
 measured self-consistently with the device predicate).
 
+## Increment E — wire the anchor→blend into the order-3 march (opt-in, byte-identical off)
+
+The FIRST increment that touches the solver path. A runtime `use_kfvs_anchor::Bool`
+(default **false**) is threaded, mirroring the `stage_bgk` opt-in, through the
+order-3 entry points; when false the code path is **untouched**.
+
+**Files modified (the solver path — existing files):**
+- `src/numerics/highorder_3d.jl` — `step_highorder_3d!` gains `use_kfvs_anchor`;
+  the per-stage realizability step becomes `use_kfvs_anchor ? _anchor_interior! :
+  _project_interior!`. Adds `_anchor_interior!` (CPU flag-on path) + anchor stats.
+  Includes the CUDA-free `gpu/chyqmom_nodes_3d_dev.jl` (hardened inversion) for the
+  anchor only.
+- `src/simulation_runner.jl` — reads `get(params, :use_kfvs_anchor, false)`, passes it.
+- `src/Riemann35.jl` — exports `reset_anchor_stats!`, `anchor_stats`.
+- `gpu/timestep3d_order3_gpu.jl` — `march3d_order3_gpu!` gains `use_kfvs_anchor`;
+  guards the projection kernel + a stage-input cube snapshot (`Gin` allocated only
+  when opt-in). Adds `_copy_cube!` + an interim `_anchor_interior!` GPU kernel (==
+  `realizable_3D_M4_dev` projection for now — the real device anchor kernel is a
+  follow-up).
+- `gpu/gpu_run.jl` — `run_gpu_3d` gains `use_kfvs_anchor`, passes it.
+
+**CPU BYTE-IDENTITY (flag off — the hard requirement):** order-3 crossing-jets 16³
+Ma=10, 4 steps, flag OFF vs pristine `main`:
+```
+pristine (main) : L2 = 2.92509950810618875e+02  sum = 1.70493403083572848e+04
+flag-off (branch): L2 = 2.92509950810618875e+02  sum = 1.70493403083572848e+04
+```
+**relL2 = 0.0 EXACTLY (bit-identical).** `test_hiorder3_cpu.jl` 8/8,
+`test_highorder_3d.jl` pass. The device-inversion include is inert on the off path.
+
+**CPU FLAG-ON validation** (well-posed crossing-jets, order=3):
+- Ma=10, 12 steps: finite, **0 unrealizable**, conservation **identical** to the
+  projection path (mass drift 9.19e-8, energy 8.21e-8); **mean θ* = 1.0,
+  projection-would-fire = 0, fallback = 0 ⇒ projection RETIRED** (blend realizable
+  by construction).
+- The anchor uses the **hardened device inversion** `chyqmom_nodes_3d_dev` (FIX-1
+  gated): the CPU reference `chyqmom_nodes_3d` **threw on 5 and produced wild
+  abscissas (max|U|=7.6e4) on 23** of a 4096-cell real block — feeding those into
+  measure_update produces NaN, so the hardened inversion is load-bearing here.
+
+**GPU golden** (order-3 march, 16³ crossing-jets, V100, exact FNV-1a bitsum of the
+final field):
+```
+main (pristine) flag-off : L2=2.40090644131310427e+02  bitsum=0x7c27cd25463cbf83
+branch          flag-off : L2=2.40090644131310427e+02  bitsum=0x7c27cd25463cbf83
+```
+**Identical bitsum ⇒ the GPU order-3 march flag-off is BYTE-IDENTICAL to pristine
+`main` on device** (the plumbing did not perturb the GPU path). Both flag-off runs
+are finite (nonfinite=0).
+
+**GPU flag-on is a FOLLOW-UP.** The full device measure_update→blend kernel is not
+built yet; the interim GPU `_anchor_interior!` kernel applies the SAME
+`realizable_3D_M4_dev` projection as the default path (code-identical to
+`_proj_interior!`), so GPU flag-on == flag-off by construction (safe, well-defined).
+The stage-input cube snapshot (`Gin`/`_copy_cube!`) scaffolding is in place for the
+real kernel. The validated anchor flag-on path is the **CPU** one above.
+
+**BLUNT limitation (a real gap — not hidden):** the anchor-blend enforces the
+**Δ2* cross-moment cone** (its designed target — the cone split-HLL loses) but NOT
+the **marginal s3max skewness cap / variance floors** that `realizable_3D_M4` also
+applies. On a raw-snapshot stress block (itself unstable on the OFF path:
+unreal=2106, mass drift 5.6e-2) the anchor path went non-finite where the marginal
+clamp would have stabilized. So the flag-on path is validated as the **cross-moment
+projection replacement on well-posed / moderate-Ma cases**; it is **NOT yet a
+validated high-Ma drop-in** — the marginal skewness guard remains a separate concern
+(the task scoped the replacement to the per-cell cross-moment projection; the
+reconstruction/marginal guards were left as-is). A production high-Ma path should
+either (a) apply the marginal s3max clamp to the anchor output as a floor, or (b)
+fold the s3max bound into the blend predicate. Flagged for increment E follow-up.
+
 ## Bottom line
 
 Increment A is landed and validated: faithful gate (spurious rate 0.18% → 0),
@@ -238,11 +314,20 @@ Increment D is landed and validated: the full-cone θ* blend limiter. Mean θ* =
 **0.9701** on real data (62.8% unlimited), `U(θ*)` full-cone realizable on **100%**
 (0 cone exits), at **0.246 µs/cell / 255 regs**. The A/B demo proves the full-cone
 predicate is necessary: the shipped marginal-only θ* would let **37% of blended
-states exit the cross-moment cone**. **D is solid enough to build the final
-increment E** (wire into the residual as an opt-in, golden-gated, byte-identical-off
-replacement for `projection35`) — the blend is a self-contained device function with
-a cheap correct limiter; the closed-form pencil is a later optimization, not a
-blocker.
+states exit the cross-moment cone**.
+
+Increment E is landed with the hard requirement met: the opt-in `use_kfvs_anchor`
+(default false) is threaded into the order-3 CPU + GPU march, and flag-off is
+**byte-identical to pristine main** on BOTH CPU (relL2=0.0 exactly) and GPU
+(identical bitsum). The CPU flag-on path (anchor → full-cone θ*-blend, projection
+retired) is validated on well-posed moderate-Ma cases: finite, realizable,
+conservation identical to the projection path, mean θ*=1.0 / projection-would-fire=0.
+**Two items remain before E is a complete production feature:** (1) the GPU device
+anchor kernel (flag-on GPU is currently the projection interim — a follow-up), and
+(2) the marginal s3max skewness guard on the anchor path for high-Ma stability (the
+blend enforces only the cross-moment cone; a raw-snapshot stress case exposed this
+gap — see the blunt limitation above). E is the right structure and byte-safe; it
+is not yet a validated high-Ma drop-in.
 
 **Blunt caveats for the next increment:**
 - The kernel is pinned at the 255-register wall with local spill; the split does

@@ -158,12 +158,34 @@ function _copy_cube!(Gdst, Gsrc, nf::Int)
     return nothing
 end
 
-# kinetic-FVS anchor→blend interior kernel (opt-in). STUB in the plumbing commit;
-# implemented in the flag-on commit (increment E step 3/5). Reads the just-updated
-# interior of `G` (= U_highorder) and the stage-input haloed cube `Gin` (the anchor
-# quadrature source), writes the full-cone θ*-blended interior back into `G`. Never
-# launched on the default (`use_kfvs_anchor=false`) path.
+# kinetic-FVS anchor→blend interior kernel (opt-in). INTERIM: the full device
+# measure_update→full-cone-θ*-blend kernel is a follow-up (the CPU flag-on path in
+# src/numerics/highorder_3d.jl `_anchor_interior!` is the validated reference). To
+# keep the GPU opt-in path SAFE and well-defined in the meantime, this interim
+# kernel applies the SAME per-cell realizability projection as the default path
+# (`realizable_3D_M4_dev`) — i.e. GPU flag-on currently == flag-off. `Gin`/dt are
+# accepted for the eventual anchor build but unused here. Never launched on the
+# default path. (This is why the GPU golden shows flag-on == flag-off once this
+# interim is in place; the real device anchor kernel is the next step.)
 function _anchor_interior!(G, Gin, n::Int, nz::Int, g::Int, Ma::Float64, s3max::Float64, dt::Float64)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= n * n * nz
+        @inbounds begin
+            i = (idx - 1) % n + 1; r = (idx - 1) ÷ n
+            j = r % n + 1;         k = r ÷ n + 1
+            ga = g + i; gb = g + j; gc = g + k
+            P = realizable_3D_M4_dev(
+                G[1,ga,gb,gc],  G[2,ga,gb,gc],  G[3,ga,gb,gc],  G[4,ga,gb,gc],  G[5,ga,gb,gc],
+                G[6,ga,gb,gc],  G[7,ga,gb,gc],  G[8,ga,gb,gc],  G[9,ga,gb,gc],  G[10,ga,gb,gc],
+                G[11,ga,gb,gc], G[12,ga,gb,gc], G[13,ga,gb,gc], G[14,ga,gb,gc], G[15,ga,gb,gc],
+                G[16,ga,gb,gc], G[17,ga,gb,gc], G[18,ga,gb,gc], G[19,ga,gb,gc], G[20,ga,gb,gc],
+                G[21,ga,gb,gc], G[22,ga,gb,gc], G[23,ga,gb,gc], G[24,ga,gb,gc], G[25,ga,gb,gc],
+                G[26,ga,gb,gc], G[27,ga,gb,gc], G[28,ga,gb,gc], G[29,ga,gb,gc], G[30,ga,gb,gc],
+                G[31,ga,gb,gc], G[32,ga,gb,gc], G[33,ga,gb,gc], G[34,ga,gb,gc], G[35,ga,gb,gc],
+                Ma, s3max)
+            for m in 1:35; G[m, ga, gb, gc] = P[m]; end
+        end
+    end
     return nothing
 end
 
