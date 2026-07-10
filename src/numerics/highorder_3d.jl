@@ -89,9 +89,19 @@ kfvs_theta_stats() = (mean_theta = _KFVS_THETA_N[]>0 ? _KFVS_THETA_SUM[]/_KFVS_T
 # (`_marginal_regularized`) — so the face-shared-θ flux blend keeps the update in the
 # FULL cone (not just the marginals split-HLL preserves). Mlo (the KFVS first-order
 # anchor) is realizable in both by construction under CFL ⇒ θ=0 feasible.
+# DIAGNOSTIC env hook (F3-drift investigation; default OFF ⇒ production unchanged):
+# HYQMOM_KFVS_XFLOOR=δ requires the Δ2* cross-moment margin ≥ +δ (re-interiorization
+# floor, mirroring the marginal h2min floor) instead of the production ≥ 0. Set to a
+# small positive value (e.g. 1e-6) to test whether parking cells slightly INTERIOR of
+# the cross cone collapses the multi-step drift (VARIANT B). At 0.0 (default) this is
+# byte-identical to the shipped predicate. `is_realizable(m; lam_min=δ)` already uses
+# the EXACT LAPACK eigvals of the Δ2* matrix (VARIANT A = the production path).
+const _KFVS_XFLOOR = Ref{Float64}(parse(Float64, get(ENV, "HYQMOM_KFVS_XFLOOR", "0.0")))
+set_kfvs_xfloor!(δ) = (_KFVS_XFLOOR[] = Float64(δ); nothing)
 @inline function _theta_star_fullcone(Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64},
                                       Ma, s3max; nb::Int = 24)
-    ok(m) = is_realizable(collect(m); lam_min=0.0) && _marginal_regularized(m, Ma, s3max)
+    lamf = _KFVS_XFLOOR[]
+    ok(m) = is_realizable(collect(m); lam_min=lamf) && _marginal_regularized(m, Ma, s3max)
     full = ntuple(j -> Mlo[j] + dM[j], Val(35))
     ok(full) && return 1.0
     lo = 0.0; hi = 1.0
