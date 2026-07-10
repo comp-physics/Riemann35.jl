@@ -1,6 +1,47 @@
 # verify_theta_closed_gpu.jl — GPU byte-identity + payoff gate for the opt-in
 # closed-form θ* limiter (theta_closed kwarg) in the order-3 (WENO5 + θ*-IDP) path.
 #
+# ===========================================================================
+# MERGE_NOTES — feat/theta-star-cubic (closed-form θ*, opt-in theta_closed)
+# ===========================================================================
+# Evidence gathered before merge (2026-07-09, PACE V100 sm_70 / CPU):
+#
+# 1. CLOSED-FORM CORRECTNESS (CPU, test/verify_theta_star_closed.jl, 200k pairs):
+#      max |θ_closed − θ_bisect| = 5.96e-8  (== bisection's own 2^-24 floor)
+#      p99.9 = 5.95e-8 ; overshoots into non-realizable = 0 / 200000
+#      ⇒ closed form is an exact realizable lower bound, never overshoots.
+#      limiter microbench: bisection 1476 ns/call vs closed 547 ns/call = 2.70x.
+#
+# 2. GPU BYTE-IDENTITY GATE (flag OFF) — PASSED, EXACTLY:
+#      R_ref.f64  = order-3 residual on main baseline (a25480e), 16^3, binding dt
+#      R_off.f64  = same case on this branch with theta_closed=false
+#      sha256 IDENTICAL: f958644a405695d1c1963137cab384a87a444bb8969e6e402a08b8cce45c8184
+#      relL2 = 0.000e+00, max|Δ| = 0.0, 0/143360 Float64 bits differ.
+#      ⇒ default-off is bit-for-bit unchanged on device.
+#
+# 3. CPU FLAG-ON STABILITY (test/verify_theta_closed_wiring_cpu.jl):
+#      flag OFF vs historical no-kwarg call: bit-identical, relL2 = 0.0
+#      flag ON vs OFF residual: relL2 = 2.40e-8 (limiter's 2^-24 resolution)
+#      flag ON, 10 forward-Euler substeps of the θ*-limited residual:
+#         finite=true, rho_min=0.333>0, realizable = 216/216 cells.
+#      ⇒ flag-on march is finite, positive-density, realizable (no blowup).
+#
+# 4. ON-DEVICE STEP TIMING: NOT separately measured. Each fresh GPU process
+#      re-runs the ~13-min ptxas sm_70 compile, which exceeded command timeouts
+#      under concurrent V100 contention, so a clean isolated timed run was not
+#      practical. The limiter (theta_star) is only a fraction of the full order-3
+#      residual (WENO5 recon + per-axis flux dominate), so the step-level speedup
+#      is expected to be MODEST even though the limiter itself is 2.70x faster on
+#      CPU. The closed form is not a regression: it is faster per θ* eval and
+#      byte-identical when off. (A smooth 16^3 residual at CFL dt often has θ*=1
+#      everywhere ⇒ closed and bisection coincide exactly; the difference only
+#      appears where θ actually binds, per items 1 and 3.)
+#
+# VERDICT: merge-ready. Opt-in (theta_closed, default false); default byte-for-byte
+# identical on both CPU (relL2 0) and GPU (sha256 identical); flag-on verified
+# correct (2^-24 agreement, exact lower bound) and stable (finite/rho>0/realizable).
+# ===========================================================================
+#
 # Run under the GPU env (V100 / sm_70):
 #   source /storage/scratch1/6/sbryngelson3/vizwork/env.sh
 #   export CUDA_VISIBLE_DEVICES=0

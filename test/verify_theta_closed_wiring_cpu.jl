@@ -78,4 +78,31 @@ bytes_identical(a,b) = all(reinterpret(UInt64, vec(a)) .== reinterpret(UInt64, v
 @assert bytes_identical(R_off, R_hist) "flag OFF is NOT byte-identical to historical!"
 @assert relL2(R_on, R_off) < 1e-4 "closed form disagrees too much: $(relL2(R_on,R_off))"
 @assert all(isfinite, R_on) "flag ON produced non-finite residual!"
-println("\nOK: flag OFF byte-identical; flag ON agrees to ~limiter resolution and is finite.")
+
+# --- marched-state stability with the flag ON: a few forward-Euler substeps of
+# the θ*-limited residual must keep the interior finite, rho>0, realizable ---
+using Riemann35.RiemannFluxDev: _state_realizable
+Mw = copy(M)
+Rw = zeros(nx+2halo, ny+2halo, nz, 35)
+dt_march = 0.1*dx
+nreal = ntot = 0
+for s in 1:10
+    residual_ho_3d_order3!(Rw, Mw, nx, ny, nz, halo, dx, dx, dx, Ma, dt_march;
+                           s3max=40.0, theta_closed=true)
+    @. Mw += dt_march * Rw          # interior slots get updated; halos re-used (smooth IC)
+end
+global nreal, ntot
+for k in 1:nz, j in 1:ny, i in 1:nx
+    global nreal, ntot
+    m = ntuple(q -> Mw[i+halo, j+halo, k, q], 35)
+    ntot += 1
+    _state_realizable(m) && (nreal += 1)
+end
+rhomin = minimum(@view Mw[halo+1:halo+nx, halo+1:halo+ny, :, 1])
+@printf("  flag ON marched-state stability (10 Euler substeps):\n")
+@printf("     finite:      %s\n", all(isfinite, @view Mw[halo+1:halo+nx, halo+1:halo+ny, :, :]))
+@printf("     rho_min:     %.3e  (>0: %s)\n", rhomin, rhomin > 0.0)
+@printf("     realizable:  %d / %d\n", nreal, ntot)
+@assert rhomin > 0.0 "flag ON march produced rho<=0!"
+@assert nreal == ntot "flag ON march produced non-realizable cells: $(ntot-nreal)"
+println("\nOK: flag OFF byte-identical; flag ON agrees to ~limiter resolution, finite, rho>0, realizable.")
