@@ -187,6 +187,14 @@ function simulation_runner(params)
     # Demo env: REPRO_PROJREC=1 in debug/run_ma100_demo.jl.
     ho_proj_first_order = get(params, :ho_proj_first_order, false)
 
+    # use_kfvs_anchor (OPT-IN, default false; spatial_order=3 only): replace the
+    # per-cell post-update realizability PROJECTION with the kinetic-FVS anchor →
+    # full-cone θ*-blend (increment E of the KFVS anchor). The blend of the
+    # high-order update toward a nonnegative-measure anchor is full-cone realizable
+    # BY CONSTRUCTION, so the projection is retired. Default false ⇒ byte-identical
+    # to the shipped projection path (see gpu/validation/README_kfvs.md).
+    use_kfvs_anchor = get(params, :use_kfvs_anchor, false)
+
     # scheme (default :recommended as of 2026-07-02 — the graduation study in
     # docs/design/scheme-graduation.md):
     #   :recommended — ho_pressure_recon + stage_bgk (machine-exact on uniform-p
@@ -841,7 +849,8 @@ function simulation_runner(params)
             step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma; s3max=s3max,
                                order=spatial_order, use_limiter=ho_realizability_limiter,
                                use_proj_recon=ho_proj_first_order,
-                               stage_bgk_kn=(stage_bgk ? Kn : nothing))
+                               stage_bgk_kn=(stage_bgk ? Kn : nothing),
+                               use_kfvs_anchor=use_kfvs_anchor)
         else
             # --- FIRST-ORDER PATH (spatial_order=1, default) ---
             # Byte-identical to the original validated path.

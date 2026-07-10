@@ -145,6 +145,28 @@ function _proj_interior!(G, n::Int, nz::Int, g::Int, Ma::Float64, s3max::Float64
     return nothing
 end
 
+# full haloed-cube copy (anchor path: snapshot the stage-input quadrature source).
+function _copy_cube!(Gdst, Gsrc, nf::Int)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nf * nf * nf
+        @inbounds begin
+            a = (idx - 1) % nf + 1; r = (idx - 1) ÷ nf
+            b = r % nf + 1;         c = r ÷ nf + 1
+            for m in 1:35; Gdst[m, a, b, c] = Gsrc[m, a, b, c]; end
+        end
+    end
+    return nothing
+end
+
+# kinetic-FVS anchor→blend interior kernel (opt-in). STUB in the plumbing commit;
+# implemented in the flag-on commit (increment E step 3/5). Reads the just-updated
+# interior of `G` (= U_highorder) and the stage-input haloed cube `Gin` (the anchor
+# quadrature source), writes the full-cone θ*-blended interior back into `G`. Never
+# launched on the default (`use_kfvs_anchor=false`) path.
+function _anchor_interior!(G, Gin, n::Int, nz::Int, g::Int, Ma::Float64, s3max::Float64, dt::Float64)
+    return nothing
+end
+
 # optional exact-exponential stage-BGK relaxation on the interior (CPU `bgk!`).
 function _bgk_interior!(G, n::Int, nz::Int, g::Int, dt::Float64, kn::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -237,7 +259,7 @@ in place and left with its outflow halos refilled.
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
-                             theta_closed::Bool = true)
+                             theta_closed::Bool = true, use_kfvs_anchor::Bool = false)
     @assert size(G, 1) == 35 "G must be (35,nf,nf,nf)"
     nf = size(G, 2)
     @assert size(G) == (35, nf, nf, nf) "G must be a cube (35,nf,nf,nf)"
@@ -251,6 +273,8 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     R    = CUDA.zeros(Float64, 35, n, n, n)
     G0   = CUDA.zeros(Float64, 35, n, n, n)
     svec = CUDA.zeros(Float64, n * n * n)
+    # anchor path only: stage-input haloed-cube snapshot (allocated only when opt-in).
+    Gin  = use_kfvs_anchor ? CUDA.zeros(Float64, 35, nf, nf, nf) : G
 
     bcube = cld(nf * nf * nf, threads)
     bint  = cld(n * n * n, threads)
@@ -272,10 +296,24 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         @cuda threads=threads blocks=bint _copy_interior!(G0, G, n, n, g)
         for (a, b, c) in stages
             @cuda threads=threads blocks=bcube _refill_halo!(G, nf, g, n)
+            # anchor path: snapshot the stage-INPUT haloed cube (the quadratures the
+            # measure_update anchor is built from) BEFORE the residual overwrites the
+            # interior. Off path: no copy, no effect (byte-identical).
+            if use_kfvs_anchor
+                @cuda threads=threads blocks=bcube _copy_cube!(Gin, G, nf)
+            end
             residual3d_order3_box_gpu!(R, G, n, n, n, g, dxf, dxf, dxf, Maf, dt;
                                        s3max=s3f, threads=threads, theta_closed=theta_closed)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, g, a, b, c * dt)
-            @cuda threads=threads blocks=bint _proj_interior!(G, n, n, g, Maf, s3f)
+            # per-cell realizability step. Default = shipped projection (byte-identical).
+            # Anchor (opt-in) = kinetic-FVS measure_update → full-cone θ*-blend, which
+            # retires the projection (realizable by construction).
+            if use_kfvs_anchor
+                @cuda threads=threads blocks=bcube _refill_halo!(Gin, nf, g, n)
+                @cuda threads=threads blocks=bint _anchor_interior!(G, Gin, n, n, g, Maf, s3f, dt)
+            else
+                @cuda threads=threads blocks=bint _proj_interior!(G, n, n, g, Maf, s3f)
+            end
             if stage_bgk
                 @cuda threads=threads blocks=bint _bgk_interior!(G, n, n, g, dt, knf)
             end

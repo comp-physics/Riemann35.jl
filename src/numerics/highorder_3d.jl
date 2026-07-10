@@ -503,10 +503,19 @@ function _project_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma) / 2.0)
     end
 end
 
+# kinetic-FVS anchor→blend replacement for `_project_interior!` (opt-in). STUB in
+# the plumbing commit; implemented in the flag-on commit (increment E step 3). Takes
+# the just-updated interior `M` (= U_highorder) and the stage-INPUT state `Ssrc`
+# (from which the anchor quadratures are built), and writes the full-cone θ*-blended
+# state back into `M`'s interior — retiring the projection (blend realizable by
+# construction). Never called on the default (`use_kfvs_anchor=false`) path.
+function _anchor_interior! end
+
 function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
-                            stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0)
+                            stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0,
+                            use_kfvs_anchor::Bool=false)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # A side is a RANK boundary iff a real neighbour rank sits there (encoded as a
@@ -545,13 +554,25 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
         end
         return nothing
     end
+    # Per-stage realizability step. When `use_kfvs_anchor` is false (default) this is
+    # EXACTLY the shipped `_project_interior!` projection (byte-identical). When true
+    # it is the kinetic-FVS anchor→full-cone-θ*-blend, which is realizable BY
+    # CONSTRUCTION so the projection is retired (opt-in; see `_anchor_interior!`).
+    realize!(Mwork, Mstage0) =
+        use_kfvs_anchor ?
+            _anchor_interior!(Mwork, Mstage0, nx,ny,nz,halo, dt, Ma, s3max) :
+            _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
+
     M0 = copy(M)
     # stage 1: M1 = M + dt*L(M)
-    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; _project_interior!(M,nx,ny,nz,halo,Ma,s3max); bgk!(M)
+    Sa = use_kfvs_anchor ? copy(M) : M   # anchor needs the stage-INPUT state (M before update)
+    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; realize!(M, Sa); bgk!(M)
     # stage 2: M2 = 3/4 M0 + 1/4 (M1 + dt L(M1))
-    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma,s3max); bgk!(M)
+    Sa = use_kfvs_anchor ? copy(M) : M
+    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); realize!(M, Sa); bgk!(M)
     # stage 3: M = 1/3 M0 + 2/3 (M2 + dt L(M2))
-    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); _project_interior!(M,nx,ny,nz,halo,Ma,s3max); bgk!(M)
+    Sa = use_kfvs_anchor ? copy(M) : M
+    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); realize!(M, Sa); bgk!(M)
     halo_exchange_3d!(M, decomp, bc)
     return nothing
 end
