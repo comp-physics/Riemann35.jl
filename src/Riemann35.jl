@@ -77,6 +77,7 @@ export step_highorder_3d!
 export residual_line3, residual_ho_3d_order3!
 export reset_proj_counter!, proj_correction_count
 export reset_anchor_stats!, anchor_stats
+export reset_kfvs_theta_stats!, kfvs_theta_stats
 export setup_mpi_cartesian_3d, halo_exchange_3d!, apply_flux_update_3d!
 export compute_halo_fluxes_and_wavespeeds_3d!
 export compute_standardized_field, compute_central_field, get_standardized_moment, get_central_moment

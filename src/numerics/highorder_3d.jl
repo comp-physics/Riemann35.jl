@@ -37,6 +37,73 @@ function _face_flux_tup(mL::NTuple{35,Float64}, mR::NTuple{35,Float64},
 end
 
 # ---------------------------------------------------------------------------
+# _kfvs_face_flux_tup — the KINETIC-FVS interface flux (F3 conservative anchor).
+# Upwind quadrature flux: nodes of the LEFT cell with U_axis > 0 (leaving L into
+# the interface) plus nodes of the RIGHT cell with U_axis < 0 (entering from R).
+# For flux component m=(i,j,l): contribution = n_k · U_axis · (Ux^i Uy^j Uz^l).
+# This is EXACTLY the interface flux implied by the 3D measure_update (increment B),
+# expressed as an F(cL,cR) so it slots into the residual's flux-blend F_LO. Because
+# it is a single-valued function of the shared (cL,cR), the face flux is identical
+# for both adjacent cells ⇒ the update telescopes ⇒ mass/momentum/energy conserve
+# EXACTLY (thm:idp-conservative). Uses the hardened device inversion (no wild
+# abscissas / throws). axis ∈ {1=x,2=y,3=z}. Degenerate cell ⇒ HLL fallback.
+@inline function _kfvs_face_flux_tup(mL::NTuple{35,Float64}, mR::NTuple{35,Float64},
+                                     axis::Int, Ma::Real, s3max::Real)
+    qL = _anchor_quad(collect(mL)); qR = _anchor_quad(collect(mR))
+    (qL === nothing || qR === nothing) && return _face_flux_tup(mL, mR, axis, Ma, s3max)
+    F = zeros(35)
+    (nL,uxL,uyL,uzL,NL) = qL
+    @inbounds for c in 1:NL
+        ua = axis==1 ? uxL[c] : (axis==2 ? uyL[c] : uzL[c])
+        ua > 0.0 || continue
+        w = nL[c]*ua
+        for (m,(i,j,l)) in enumerate(_ANCHOR_IJK)
+            F[m] += w * uxL[c]^i * uyL[c]^j * uzL[c]^l
+        end
+    end
+    (nR,uxR,uyR,uzR,NR) = qR
+    @inbounds for c in 1:NR
+        ua = axis==1 ? uxR[c] : (axis==2 ? uyR[c] : uzR[c])
+        ua < 0.0 || continue
+        w = nR[c]*ua
+        for (m,(i,j,l)) in enumerate(_ANCHOR_IJK)
+            F[m] += w * uxR[c]^i * uyR[c]^j * uzR[c]^l
+        end
+    end
+    return NTuple{35,Float64}(F)
+end
+
+# F3 flux-level θ stats (env HYQMOM_KFVS_THETA_STATS=1): mean face θ* + fraction of
+# faces where θ*<1 (the flux limiter engaged). Cheap Refs, populated in PASS 2a.
+const _KFVS_THETA_STATS_ENABLED = Ref{Bool}(get(ENV, "HYQMOM_KFVS_THETA_STATS", "0") != "0")
+const _KFVS_THETA_SUM = Ref{Float64}(0.0)
+const _KFVS_THETA_N   = Ref{Int}(0)
+const _KFVS_THETA_LT1 = Ref{Int}(0)
+reset_kfvs_theta_stats!() = (_KFVS_THETA_SUM[]=0.0; _KFVS_THETA_N[]=0; _KFVS_THETA_LT1[]=0; nothing)
+kfvs_theta_stats() = (mean_theta = _KFVS_THETA_N[]>0 ? _KFVS_THETA_SUM[]/_KFVS_THETA_N[] : 1.0,
+                      faces=_KFVS_THETA_N[], theta_lt1=_KFVS_THETA_LT1[])
+
+# FULL-CONE + MARGINAL θ* for the face limiter (F3). Same structure as the shipped
+# marginal-only `theta_star_update_dev`, but the realizability predicate is the Δ2*
+# cross-moment cone (`is_realizable`) AND the marginal s3max/variance regularization
+# (`_marginal_regularized`) — so the face-shared-θ flux blend keeps the update in the
+# FULL cone (not just the marginals split-HLL preserves). Mlo (the KFVS first-order
+# anchor) is realizable in both by construction under CFL ⇒ θ=0 feasible.
+@inline function _theta_star_fullcone(Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64},
+                                      Ma, s3max; nb::Int = 24)
+    ok(m) = is_realizable(collect(m); lam_min=0.0) && _marginal_regularized(m, Ma, s3max)
+    full = ntuple(j -> Mlo[j] + dM[j], Val(35))
+    ok(full) && return 1.0
+    lo = 0.0; hi = 1.0
+    for _ in 1:nb
+        mid = 0.5 * (lo + hi)
+        m = ntuple(j -> Mlo[j] + mid * dM[j], Val(35))
+        ok(m) ? (lo = mid) : (hi = mid)
+    end
+    lo
+end
+
+# ---------------------------------------------------------------------------
 # residual_line3 — WENO5 high-order fluxes + first-order HLL anchors for one
 # axis line.  Returns (F_HO, F_LO) as length-(n+1) Vector{NTuple{35,Float64}}.
 # Requires g ≥ 4 (WENO5 ±2 stencil + deconv ±2 extension).
@@ -55,7 +122,7 @@ interior-bounding interfaces.  The driver combines these across all three
 axes for the joint 6-face θ*-IDP blend.
 """
 function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
-                        g::Int = 4, s3max::Real = 40.0)
+                        g::Int = 4, s3max::Real = 40.0, use_kfvs_anchor::Bool = false)
     n2g = size(Mext, 1)
     n   = n2g - 2g
     @assert g >= 4 "order=3 residual requires halo g ≥ 4 (WENO5+deconv stencils); got g=$g"
@@ -107,7 +174,10 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
         mL, mR = weno_faces_dev(_vv(il-2), _vv(il-1), _vv(il),
                                 _vv(il+1), _vv(il+2), _vv(il+3), cL, cR)
         F_HO[f] = _face_flux_tup(mL, mR, axis, Ma, s3max)
-        F_LO[f] = _face_flux_tup(cL, cR, axis, Ma, s3max)
+        # F_LO anchor flux: default = HLL (byte-identical off); F3 = kinetic-FVS
+        # upwind quadrature flux (conservative + realizable-by-construction anchor).
+        F_LO[f] = use_kfvs_anchor ? _kfvs_face_flux_tup(cL, cR, axis, Ma, s3max) :
+                                    _face_flux_tup(cL, cR, axis, Ma, s3max)
     end
     return F_HO, F_LO
 end
@@ -132,7 +202,8 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 dt::Real; s3max::Real = 40.0,
                                 theta_closed::Bool = true,
                                 rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
-                                            zlo=false, zhi=false))
+                                            zlo=false, zhi=false),
+                                use_kfvs_anchor::Bool = false)
     @assert halo >= 4 "order=3 residual requires halo ≥ 4; got halo=$halo"
     fill!(R, 0.0)
     g  = halo
@@ -159,7 +230,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     for k in 1:nz, j in 1:ny
         jh   = j + halo
         Mext = @view M[:, jh, k, :]           # (nx+2halo, 35) — zero-copy view
-        Fho, Flo = residual_line3(Mext, dx, 1, Ma; g=g, s3max=s3max)
+        Fho, Flo = residual_line3(Mext, dx, 1, Ma; g=g, s3max=s3max, use_kfvs_anchor=use_kfvs_anchor)
         for f in 1:nx+1
             FHO_x[f,j,k] = Fho[f];  FLO_x[f,j,k] = Flo[f]
         end
@@ -169,7 +240,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     for k in 1:nz, i in 1:nx
         ih   = i + halo
         Mext = @view M[ih, :, k, :]
-        Fho, Flo = residual_line3(Mext, dy, 2, Ma; g=g, s3max=s3max)
+        Fho, Flo = residual_line3(Mext, dy, 2, Ma; g=g, s3max=s3max, use_kfvs_anchor=use_kfvs_anchor)
         for f in 1:ny+1
             FHO_y[i,f,k] = Fho[f];  FLO_y[i,f,k] = Flo[f]
         end
@@ -183,7 +254,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
         Mext = vcat(repeat(col[1:1,  :], g, 1),
                     col,
                     repeat(col[nz:nz,:], g, 1))   # (nz+2g, 35)
-        Fho, Flo = residual_line3(Mext, dz, 3, Ma; g=g, s3max=s3max)
+        Fho, Flo = residual_line3(Mext, dz, 3, Ma; g=g, s3max=s3max, use_kfvs_anchor=use_kfvs_anchor)
         for f in 1:nz+1
             FHO_z[i,j,f] = Fho[f];  FLO_z[i,j,f] = Flo[f]
         end
@@ -228,13 +299,26 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
         Gzr = ntuple(q -> FHO_z[i,j,k+1][q] - FLO_z[i,j,k+1][q], Val(35))
         Gzl = ntuple(q -> FHO_z[i,j,k  ][q] - FLO_z[i,j,k  ][q], Val(35))
 
-        # Per-face θ* (one-sided, factor-6 conservative bound)
-        Θ_xr[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> -6λx * Gxr[q], Val(35)))
-        Θ_xl[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q ->  6λx * Gxl[q], Val(35)))
-        Θ_yr[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> -6λy * Gyr[q], Val(35)))
-        Θ_yl[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q ->  6λy * Gyl[q], Val(35)))
-        Θ_zr[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> -6λz * Gzr[q], Val(35)))
-        Θ_zl[i,j,k] = _theta_star_sel(theta_closed, Mlo, ntuple(q ->  6λz * Gzl[q], Val(35)))
+        # Per-face θ* (one-sided, factor-6 conservative bound). Default = the shipped
+        # marginal-only limiter (closed-form or bisection per theta_closed); F3
+        # (use_kfvs_anchor) = FULL-CONE + marginal limiter, so the face-shared-θ flux
+        # blend keeps the update in the full cross-moment cone.
+        kstat = use_kfvs_anchor && _KFVS_THETA_STATS_ENABLED[]
+        θfun(mlo, dm) = begin
+            θ = use_kfvs_anchor ? _theta_star_fullcone(mlo, dm, Ma, s3max) :
+                                  _theta_star_sel(theta_closed, mlo, dm)
+            if kstat
+                _KFVS_THETA_SUM[] += θ; _KFVS_THETA_N[] += 1
+                θ < 1.0 - 1e-9 && (_KFVS_THETA_LT1[] += 1)
+            end
+            θ
+        end
+        Θ_xr[i,j,k] = θfun(Mlo, ntuple(q -> -6λx * Gxr[q], Val(35)))
+        Θ_xl[i,j,k] = θfun(Mlo, ntuple(q ->  6λx * Gxl[q], Val(35)))
+        Θ_yr[i,j,k] = θfun(Mlo, ntuple(q -> -6λy * Gyr[q], Val(35)))
+        Θ_yl[i,j,k] = θfun(Mlo, ntuple(q ->  6λy * Gyl[q], Val(35)))
+        Θ_zr[i,j,k] = θfun(Mlo, ntuple(q -> -6λz * Gzr[q], Val(35)))
+        Θ_zl[i,j,k] = θfun(Mlo, ntuple(q ->  6λz * Gzl[q], Val(35)))
     end
 
     # =========================================================================
@@ -259,17 +343,19 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     # First-order (HLL) anchor of the cell at haloed position (px,py,k), over all 6
     # faces; copy-rule (HLL of the cell with itself) at the z ends — mirrors the
     # interior Mlo exactly. dt=0 (λ all zero) short-circuits to the cell state.
+    ff(a,b,ax) = use_kfvs_anchor ? _kfvs_face_flux_tup(a, b, ax, Ma, s3max) :
+                                   _face_flux_tup(a, b, ax, Ma, s3max)
     function halo_cell_mlo(px::Int, py::Int, k::Int)
         C = crow(px, py, k)
         (iszero(λx) && iszero(λy) && iszero(λz)) && return C
-        FxL = _face_flux_tup(crow(px-1,py,k), C, 1, Ma, s3max)
-        FxR = _face_flux_tup(C, crow(px+1,py,k), 1, Ma, s3max)
-        FyD = _face_flux_tup(crow(px,py-1,k), C, 2, Ma, s3max)
-        FyU = _face_flux_tup(C, crow(px,py+1,k), 2, Ma, s3max)
+        FxL = ff(crow(px-1,py,k), C, 1)
+        FxR = ff(C, crow(px+1,py,k), 1)
+        FyD = ff(crow(px,py-1,k), C, 2)
+        FyU = ff(C, crow(px,py+1,k), 2)
         zb  = (k > 1)  ? crow(px,py,k-1) : C
         zf  = (k < nz) ? crow(px,py,k+1) : C
-        FzB = _face_flux_tup(zb, C, 3, Ma, s3max)
-        FzF = _face_flux_tup(C, zf, 3, Ma, s3max)
+        FzB = ff(zb, C, 3)
+        FzF = ff(C, zf, 3)
         return ntuple(q -> C[q] - λx*(FxR[q]-FxL[q]) - λy*(FyU[q]-FyD[q])
                                  - λz*(FzF[q]-FzB[q]), Val(35))
     end
@@ -306,7 +392,9 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
             cx, cy, ck = halo_coords(axis, hi, a, b)
             Mlo = halo_cell_mlo(cx, cy, ck)
             G   = shared_face_G(axis, hi, a, b)
-            Θ[a, b] = _theta_star_sel(theta_closed, Mlo, ntuple(q -> s * G[q], Val(35)))
+            dm  = ntuple(q -> s * G[q], Val(35))
+            Θ[a, b] = use_kfvs_anchor ? _theta_star_fullcone(Mlo, dm, Ma, s3max) :
+                                        _theta_star_sel(theta_closed, Mlo, dm)
         end
         return Θ
     end
@@ -426,13 +514,15 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
                          dt::Real = 0.0,
                          theta_closed::Bool = true,
                          rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
-                                     zlo=false, zhi=false))
+                                     zlo=false, zhi=false),
+                         use_kfvs_anchor::Bool = false)
     # order==3: two-pass WENO5 + joint 6-face θ*-IDP (separate implementation,
     # leaves the order==1,2 path below byte-identical).
     if order == 3
         return residual_ho_3d_order3!(R, M, nx, ny, nz, halo,
                                       dx, dy, dz, Ma, dt; s3max=s3max,
-                                      theta_closed=theta_closed, rank_bnd=rank_bnd)
+                                      theta_closed=theta_closed, rank_bnd=rank_bnd,
+                                      use_kfvs_anchor=use_kfvs_anchor)
     end
     fill!(R, 0.0)
     g = halo
@@ -708,7 +798,7 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
     # stage helper: M_in (with halos) -> returns updated interior-only array (full M-shape, halos zero)
     function L!(Mwork)
         halo_exchange_3d!(Mwork, decomp, bc)
-        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max, dt=Float64(dt), rank_bnd=rank_bnd)
+        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max, dt=Float64(dt), rank_bnd=rank_bnd, use_kfvs_anchor=use_kfvs_anchor)
         return R
     end
     # stage_bgk (opt-in, `stage_bgk_kn` = Kn): exact-exponential BGK relaxation of
@@ -731,25 +821,27 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
         end
         return nothing
     end
-    # Per-stage realizability step. When `use_kfvs_anchor` is false (default) this is
-    # EXACTLY the shipped `_project_interior!` projection (byte-identical). When true
-    # it is the kinetic-FVS anchor→full-cone-θ*-blend, which is realizable BY
-    # CONSTRUCTION so the projection is retired (opt-in; see `_anchor_interior!`).
-    realize!(Mwork, Mstage0) =
-        use_kfvs_anchor ?
-            _anchor_interior!(Mwork, Mstage0, nx,ny,nz,halo, dt, dx, Ma, s3max) :
-            _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
+    # Per-stage realizability step.
+    #  * default (use_kfvs_anchor=false): the shipped `_project_interior!` projection
+    #    (byte-identical to main).
+    #  * F3 (use_kfvs_anchor=true): NO per-cell step. The residual's FLUX-level blend
+    #    F = F_KFVS + θ·(F_HO − F_KFVS) with a FACE-SHARED θ (min over the two adjacent
+    #    cells) and the FULL-CONE + marginal θ* predicate makes the update BOTH
+    #    conservative (single-valued face flux ⇒ mass/mom/energy telescope exactly,
+    #    thm:idp-conservative) AND full-cone realizable by construction
+    #    (thm:idp-cons-real). So projection35 is RETIRED with no post-hoc per-cell
+    #    projection or state blend (the E/F2 `_anchor_interior!` state blend is NOT
+    #    used — it was non-conservative; see cor:proj-noncons).
+    realize!(Mwork) =
+        use_kfvs_anchor ? nothing : _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
 
     M0 = copy(M)
     # stage 1: M1 = M + dt*L(M)
-    Sa = use_kfvs_anchor ? copy(M) : M   # anchor needs the stage-INPUT state (M before update)
-    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; realize!(M, Sa); bgk!(M)
+    L!(M); @views M[int...] .= M0[int...] .+ dt .* R[int...]; realize!(M); bgk!(M)
     # stage 2: M2 = 3/4 M0 + 1/4 (M1 + dt L(M1))
-    Sa = use_kfvs_anchor ? copy(M) : M
-    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); realize!(M, Sa); bgk!(M)
+    L!(M); @views M[int...] .= (3/4).*M0[int...] .+ (1/4).*(M[int...] .+ dt .* R[int...]); realize!(M); bgk!(M)
     # stage 3: M = 1/3 M0 + 2/3 (M2 + dt L(M2))
-    Sa = use_kfvs_anchor ? copy(M) : M
-    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); realize!(M, Sa); bgk!(M)
+    L!(M); @views M[int...] .= (1/3).*M0[int...] .+ (2/3).*(M[int...] .+ dt .* R[int...]); realize!(M); bgk!(M)
     halo_exchange_3d!(M, decomp, bc)
     return nothing
 end
