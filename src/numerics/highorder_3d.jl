@@ -538,8 +538,11 @@ const _ANCHOR_WOULD_PROJECT = Ref{Int}(0)      # cells unrealizable pre-blend (p
 const _ANCHOR_THETA_SUM     = Ref{Float64}(0.0)
 const _ANCHOR_CELLS         = Ref{Int}(0)
 const _ANCHOR_FALLBACK      = Ref{Int}(0)      # degenerate cells that fell back to projection
-reset_anchor_stats!() = (_ANCHOR_WOULD_PROJECT[]=0; _ANCHOR_THETA_SUM[]=0.0; _ANCHOR_CELLS[]=0; _ANCHOR_FALLBACK[]=0; nothing)
+const _ANCHOR_THETA_LT1     = Ref{Int}(0)      # cells where θ* < 1 (blend engaged)
+const _ANCHOR_THETA_MIN     = Ref{Float64}(1.0)
+reset_anchor_stats!() = (_ANCHOR_WOULD_PROJECT[]=0; _ANCHOR_THETA_SUM[]=0.0; _ANCHOR_CELLS[]=0; _ANCHOR_FALLBACK[]=0; _ANCHOR_THETA_LT1[]=0; _ANCHOR_THETA_MIN[]=1.0; nothing)
 anchor_stats() = (would_project=_ANCHOR_WOULD_PROJECT[], mean_theta = _ANCHOR_CELLS[]>0 ? _ANCHOR_THETA_SUM[]/_ANCHOR_CELLS[] : 1.0,
+                  theta_lt1=_ANCHOR_THETA_LT1[], theta_min=_ANCHOR_THETA_MIN[],
                   cells=_ANCHOR_CELLS[], fallback=_ANCHOR_FALLBACK[])
 
 # quadrature of a raw-moment cell via the HARDENED DEVICE inversion (KFVS increment
@@ -604,29 +607,83 @@ function _anchor_interior!(M::Array{Float64,4}, Ssrc::Array{Float64,4},
         (nn,ux_,uy_,uz_,NN)=qzl; for c in 1:NN; uz_[c]>0.0 || continue; _anchor_accum!(Mout, λ*nn[c]*uz_[c], ux_[c],uy_[c],uz_[c]); end
         (nn,ux_,uy_,uz_,NN)=qzr; for c in 1:NN; uz_[c]<0.0 || continue; _anchor_accum!(Mout,-λ*nn[c]*uz_[c], ux_[c],uy_[c],uz_[c]); end
 
-        # ---- full-cone θ* blend of U_highorder (current M cell) toward the anchor ----
+        # ---- F2: MARGINALLY-REGULARIZE the anchor so θ=0 is realizable in BOTH the
+        # Δ2* cone AND the s3max/variance marginal set. `realizable_3D_M4` applies
+        # the marginal clamp (s3max cap + Hankel/variance/S2 floors); its Δ2*
+        # projection is a near-no-op here since the measure-update anchor is already
+        # in the cross-moment cone by construction. Ua is then the realizable-in-both
+        # anchor. (Reuses the shipped projection ONLY on the anchor — a nonneg-measure
+        # state — NOT on the high-order update; the blend still recovers high-order.)
+        Ua = realizable_3D_M4(Mout, Ma, s3max)
+        # ---- θ* blend of U_highorder toward the (regularized) anchor ----
         Uho = ntuple(q -> M[ih,jh,k,q], Val(35))
-        if stats && realizability_margin(@view M[ih,jh,k,:]) < 0.0
-            _ANCHOR_WOULD_PROJECT[] += 1      # projection WOULD have fired here
+        if stats
+            (realizability_margin(@view M[ih,jh,k,:]) < 0.0 ||
+             !_marginal_regularized(Uho, Ma, s3max)) && (_ANCHOR_WOULD_PROJECT[] += 1)
         end
-        θ = _anchor_blend_theta(Mout, Uho)
+        θ = _anchor_blend_theta(Ua, Uho, Ma, s3max)
         for q in 1:35
-            M[ih,jh,k,q] = (1.0-θ)*Mout[q] + θ*Uho[q]
+            M[ih,jh,k,q] = (1.0-θ)*Ua[q] + θ*Uho[q]
         end
-        if stats; _ANCHOR_CELLS[] += 1; _ANCHOR_THETA_SUM[] += θ; end
+        if stats
+            _ANCHOR_CELLS[] += 1; _ANCHOR_THETA_SUM[] += θ
+            θ < 1.0 - 1e-9 && (_ANCHOR_THETA_LT1[] += 1)
+            θ < _ANCHOR_THETA_MIN[] && (_ANCHOR_THETA_MIN[] = θ)
+        end
     end
     return nothing
 end
 
-# largest θ∈[0,1] keeping (1-θ)Ua + θ Uho FULL-CONE realizable (is_realizable, the
-# Δ2* cross-moment cone). Ua realizable by construction ⇒ θ=0 always feasible.
-@inline function _anchor_blend_theta(Ua::Vector{Float64}, Uho::NTuple{35,Float64}; nb::Int=30)
+# MARGINAL-regularization predicate (F2). `realizable_3D_M4` applies, beyond the
+# Δ2* cross-moment projection, a MARGINAL regularization that `is_realizable`
+# (Δ2* only) does NOT test: the s3max standardized-skewness cap on |S300|,|S030|,
+# |S003| (Rodney Fox's high-Ma stabilizer), the Hankel/variance floors
+# H2ii ≥ h2min and S4ii ≥ S3ii²+1+h2min, the 2nd-order-cross S2 floor, and the
+# S220/S202/S022 bounds. The anchor+blend must satisfy this too or high-Ma states
+# blow up. This predicate returns true iff M already satisfies that regularization
+# (within tolerance); it is the marginal half of the blend's θ* feasibility test.
+# Uses the CPU `M2CS4_35` standardization (byte-consistent with `is_realizable`).
+@inline function _marginal_regularized(M, Ma, s3max)
+    (isfinite(M[1]) && M[1] > 0.0) || return false
+    # M2CS4_35 needs an AbstractVector (it calls size()); collect NTuple inputs.
+    Mv = M isa AbstractVector ? M : collect(M)
+    C4, S4 = M2CS4_35(Mv)
+    C200 = C4[3]; C020 = C4[10]; C002 = C4[20]
+    (C200 > 0.0 && C020 > 0.0 && C002 > 0.0 && isfinite(C200) && isfinite(C020) && isfinite(C002)) || return false
+    h2min = 1.0e-6
+    S2min = 1.0e-6
+    tol = 1.0e-9   # small slack so an at-the-cap state (produced BY the clamp) passes
+    S300=S4[4]; S400=S4[5]; S030=S4[13]; S040=S4[15]; S003=S4[23]; S004=S4[25]
+    @inbounds for q in (4,5,13,15,23,25); isfinite(S4[q]) || return false; end
+    # s3max skewness cap
+    (abs(S300) <= s3max + tol && abs(S030) <= s3max + tol && abs(S003) <= s3max + tol) || return false
+    # Hankel/variance floors: H2ii = S4ii - S3ii^2 - 1 ≥ h2min
+    (S400 - S300^2 - 1.0 >= h2min - tol) || return false
+    (S040 - S030^2 - 1.0 >= h2min - tol) || return false
+    (S004 - S003^2 - 1.0 >= h2min - tol) || return false
+    # 2nd-order-cross S2 floor
+    S110=S4[7]; S101=S4[17]; S011=S4[26]
+    (isfinite(S110) && isfinite(S101) && isfinite(S011)) || return false
+    S2 = 1.0 + 2.0*S110*S101*S011 - (S110^2 + S101^2 + S011^2)
+    (S2 >= S2min - tol) || return false
+    return true
+end
+
+# largest θ∈[0,1] keeping (1-θ)Ua + θ Uho realizable in BOTH the Δ2* cross-moment
+# cone (`is_realizable`) AND the marginal s3max/variance regularization
+# (`_marginal_regularized`) — F2. Ua is the anchor AFTER `realizable_3D_M4`, so it
+# satisfies both ⇒ θ=0 always feasible ⇒ θ* well-defined and the blended output is
+# realizable-by-construction in BOTH senses (no post-blend clamp: s3max is
+# nonlinear, so a post-clamp of a blend could re-violate — instead θ* is limited to
+# never leave the marginal set in the first place).
+@inline function _anchor_blend_theta(Ua::Vector{Float64}, Uho::NTuple{35,Float64}, Ma, s3max; nb::Int=30)
     blend(θ) = ntuple(q -> (1.0-θ)*Ua[q] + θ*Uho[q], Val(35))
-    is_realizable(collect(blend(1.0)); lam_min=0.0) && return 1.0
+    ok(m) = is_realizable(collect(m); lam_min=0.0) && _marginal_regularized(m, Ma, s3max)
+    ok(blend(1.0)) && return 1.0
     lo=0.0; hi=1.0
     for _ in 1:nb
         mid = 0.5*(lo+hi)
-        is_realizable(collect(blend(mid)); lam_min=0.0) ? (lo=mid) : (hi=mid)
+        ok(blend(mid)) ? (lo=mid) : (hi=mid)
     end
     return lo
 end
