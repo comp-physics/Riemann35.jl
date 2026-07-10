@@ -48,6 +48,9 @@ julia --project=. gpu/validation/kfvs_cpu_order3_baseline.jl              # flag
 KFVS_ANCHOR=1 HYQMOM_ANCHOR_STATS=1 julia --project=. gpu/validation/kfvs_cpu_order3_baseline.jl  # flag ON
 # Increment E — GPU order-3 golden (flag-off byte-identity + flag-on smoke):
 julia --project=gpu/gpuenv2 gpu/validation/kfvs_gpu_order3_golden.jl
+
+# Increment F2 — Ma=100 anchor+marginal-guard validation (CPU, well-posed case):
+KFVS_ANCHOR=1 HYQMOM_ANCHOR_STATS=1 julia --project=. gpu/validation/kfvs_ma100_anchor_validate.jl
 ```
 
 ## FIX 1 — faithful condition gate (the fidelity fix)
@@ -298,6 +301,61 @@ reconstruction/marginal guards were left as-is). A production high-Ma path shoul
 either (a) apply the marginal s3max clamp to the anchor output as a floor, or (b)
 fold the s3max bound into the blend predicate. Flagged for increment E follow-up.
 
+## Increment F2 — close the high-Ma marginal gap (CPU anchor path)
+
+The gap flagged in E: production `realizable_3D_M4` does BOTH (a) the Δ2* cross-moment
+projection (anchor+blend replaces this) AND (b) a MARGINAL regularization — the
+s3max standardized-skewness cap (`s3max = max(40, 4+|Ma|/2) = 54` at Ma=100, Fox's
+high-Ma stabilizer), the Hankel/variance floors (`H2ii ≥ 1e-6`,
+`S4ii ≥ S3ii²+1+1e-6`), and the S2 floor. The anchor path only did (a).
+
+**What F2 does** (CPU `_anchor_interior!` only; GPU still placeholder; opt-in):
+`_marginal_regularized(M,Ma,s3max)` is the marginal predicate (via `M2CS4_35`,
+byte-consistent with `is_realizable`). The anchor is regularized with
+`realizable_3D_M4` (marginal clamp; its Δ2* projection is a near-no-op on the
+nonneg-measure anchor) so θ=0 is realizable in BOTH the cross-moment cone AND the
+marginal set ⇒ θ* always feasible ⇒ realizable-by-construction. The **θ* predicate =
+`is_realizable` (Δ2*) AND `_marginal_regularized` (marginals)**, so θ* never leaves
+the marginal set (chosen over a post-blend clamp, which s3max's nonlinearity could
+re-violate).
+
+**Ma=100 validation** (well-posed crossing-jets, OFF path stable; CPU, 8/20/40 steps):
+
+| metric | OFF (projection) | ON (anchor+F2) |
+|---|---|---|
+| non-finite / ρ≤0 / unrealizable | 0 / 0 / 48–272 | **0 / 0 / 0** (all horizons) |
+| mass drift (8/20/40)  | 1.1e-8 / 2.4e-8 / 7.7e-7 | 1.8e-2 / 5.4e-3 / 1.4e-2 |
+| energy drift (8/20/40)| 4.0e-11 / 2.6e-8 / 4.8e-7 | 2.4e-2 / 5.1e-2 / **9.7e-1** |
+| θ* engaged (θ*<1)     | — | **0 cells (θ*=1 everywhere)** |
+| would-regularize / fallback | — | 0 / 0 |
+
+**F2 SUCCESS on the primary goal: the anchor path is FINITE, ρ>0, 0-unrealizable at
+Ma=100 across all horizons** — the non-finite blowup gap from E is closed at the
+stability level, with the marginal guard in place.
+
+**But F2 exposes a deeper, real conservation issue — and I am blunt about it.** On
+this well-posed Ma=100 case the high-order update is **already fully realizable**
+(θ*=1 everywhere, would-regularize=0), so the anchor/blend **never engages** — yet
+energy drift grows to **~97% by 40 steps** vs the projection's 4.8e-7. Diagnosed
+root cause: **`realizable_3D_M4` is a LOSSY round-trip that perturbs EVERY cell** —
+measured mean 1.6e-4 / max 1.5e-2 even on *strictly-realizable* cells (margin ≥ 1e-8,
+where `projection35` should be a no-op). That per-stage cross-moment perturbation
+incidentally damps the high moments and stabilizes energy conservation. The anchor,
+by design faithful to the high-order cross-moments at θ*=1, **omits this incidental
+damping**, so conservation regresses even though nothing was unrealizable.
+
+**Verdict: F2 closes the stability (non-finite) gap but the anchor is NOT yet a
+conservation-neutral Ma=100 drop-in for the projection.** The surviving failure mode
+is specific: `projection35`'s lossy per-cell round-trip does non-realizability work
+(implicit high-moment damping) that stabilizes energy at high Ma; the anchor
+correctly replaces the *realizability* role but not this *incidental damping* role,
+so on well-posed Ma=100 (where the blend is a no-op) energy conservation drifts to
+~O(1). Retiring the projection at Ma=100 therefore requires either (i) accepting a
+different (less lossy, more faithful) high-Ma conservation behavior and validating it
+physically, or (ii) adding an explicit, conservative high-moment damping to the
+anchor path to replace the projection's incidental one. This is a genuine finding,
+not a plumbing bug — byte-identity-off remains exact and CPU tests pass.
+
 ## Bottom line
 
 Increment A is landed and validated: faithful gate (spurious rate 0.18% → 0),
@@ -320,14 +378,23 @@ Increment E is landed with the hard requirement met: the opt-in `use_kfvs_anchor
 (default false) is threaded into the order-3 CPU + GPU march, and flag-off is
 **byte-identical to pristine main** on BOTH CPU (relL2=0.0 exactly) and GPU
 (identical bitsum). The CPU flag-on path (anchor → full-cone θ*-blend, projection
-retired) is validated on well-posed moderate-Ma cases: finite, realizable,
-conservation identical to the projection path, mean θ*=1.0 / projection-would-fire=0.
-**Two items remain before E is a complete production feature:** (1) the GPU device
-anchor kernel (flag-on GPU is currently the projection interim — a follow-up), and
-(2) the marginal s3max skewness guard on the anchor path for high-Ma stability (the
-blend enforces only the cross-moment cone; a raw-snapshot stress case exposed this
-gap — see the blunt limitation above). E is the right structure and byte-safe; it
-is not yet a validated high-Ma drop-in.
+retired) is validated on well-posed moderate-Ma cases.
+
+Increment F2 closed the high-Ma **stability** gap: with the marginal s3max/variance
+regularization folded into the anchor (regularized anchor + marginal-augmented θ*
+predicate), the anchor path is **finite, ρ>0, 0-unrealizable at Ma=100** across
+8/20/40 steps. But F2 also surfaced a **real, specific conservation regression**: on
+well-posed Ma=100 the high-order update is already fully realizable (θ*=1 everywhere,
+blend a no-op), and the projection it replaces turns out to be a *lossy per-cell
+round-trip* (perturbs even strictly-realizable cells by up to 1.5e-2) whose
+incidental high-moment damping stabilizes energy conservation — energy drift is
+4.8e-7 (OFF) vs ~0.97 (ON) by 40 steps. **So the anchor is byte-safe and
+finite/realizable at Ma=100, but NOT yet a conservation-neutral drop-in for the
+projection at high Ma.** Three items remain before this is production: the GPU device
+anchor kernel (E follow-up), the high-Ma conservation fix (F2 follow-up: either
+validate the more-faithful anchor conservation physically, or add explicit
+conservative high-moment damping), and a physical (not just realizability)
+high-Ma accuracy comparison vs the projection path.
 
 **Blunt caveats for the next increment:**
 - The kernel is pinned at the 255-register wall with local spill; the split does
