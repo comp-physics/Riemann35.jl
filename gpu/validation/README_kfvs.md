@@ -49,8 +49,8 @@ KFVS_ANCHOR=1 HYQMOM_ANCHOR_STATS=1 julia --project=. gpu/validation/kfvs_cpu_or
 # Increment E — GPU order-3 golden (flag-off byte-identity + flag-on smoke):
 julia --project=gpu/gpuenv2 gpu/validation/kfvs_gpu_order3_golden.jl
 
-# Increment F2 — Ma=100 anchor+marginal-guard validation (CPU, well-posed case):
-KFVS_ANCHOR=1 HYQMOM_ANCHOR_STATS=1 julia --project=. gpu/validation/kfvs_ma100_anchor_validate.jl
+# Increment F2/F3 — Ma=100 anchor conservation+realizability validation (CPU):
+julia --project=. gpu/validation/kfvs_ma100_anchor_validate.jl   # OFF vs ON (F3 flux-level), 8/20/40 steps
 ```
 
 ## FIX 1 — faithful condition gate (the fidelity fix)
@@ -356,6 +356,61 @@ physically, or (ii) adding an explicit, conservative high-moment damping to the
 anchor path to replace the projection's incidental one. This is a genuine finding,
 not a plumbing bug — byte-identity-off remains exact and CPU tests pass.
 
+## Increment F3 — flux-level face-shared-θ anchor (conservative by construction)
+
+**Root cause of F2's non-conservation** (theory in notes: thm:idp-conservative /
+cor:proj-noncons): E/F2 blended **states** per-cell with a *per-cell* θ*, which is
+non-conservative — at a shared face the implied flux is double-valued when
+`θ_c ≠ θ_c'`. **F3 does the blend at the FLUX/FACE level with a face-shared θ**,
+reusing the residual's EXISTING conservative θ*-IDP machinery (which already blends
+fluxes `F = F_LO + θ(F_HO−F_LO)` with `θ_interface = min` over the two adjacent cells
+⇒ single-valued face flux ⇒ telescoping ⇒ conservative). Two swaps under
+`use_kfvs_anchor`, both in `src/numerics/highorder_3d.jl`:
+
+1. **F_LO anchor flux: HLL → kinetic-FVS.** `_kfvs_face_flux_tup(cL,cR,axis)` = the
+   upwind quadrature flux (L-cell nodes with `U·n>0` + R-cell nodes with `U·n<0`,
+   times the moment monomials) — exactly the interface flux implied by the
+   `measure_update` anchor, via the hardened device inversion. Single-valued in the
+   shared `(cL,cR)` ⇒ the two adjacent cells see the same flux ⇒ conserves.
+2. **θ* predicate: marginal-only → full-cone + marginal.** `_theta_star_fullcone` =
+   `is_realizable` (Δ2* cross-moment cone) AND `_marginal_regularized` (s3max/floors),
+   with the face-min reconciliation kept. Projection **and** the E/F2 per-cell state
+   blend are DROPPED on the anchor path (`realize!` is a no-op; the flux blend is
+   realizable-by-construction).
+
+**Ma=100 validation** (well-posed crossing-jets, CPU, 8/20/40 steps):
+
+| metric | OFF (projection) | ON (F3 flux-level) | ON (F2 per-cell — for contrast) |
+|---|---|---|---|
+| mass drift (8/20/40)   | 1.1e-8 / 2.4e-8 / 7.7e-7 | **5.4e-9 / 2.6e-8 / 1.3e-7** | 1.8e-2 / 5.4e-3 / 1.4e-2 |
+| **energy drift** (8/20/40) | 4.0e-11 / 2.6e-8 / 4.8e-7 | **2.8e-10 / 7.1e-10 / 2.8e-7** | 2.4e-2 / 5.1e-2 / **9.7e-1** |
+| finite / ρ>0 | yes | **yes** | yes |
+| mean flux θ* (retention) | — | **0.919** (θ<1 on 11.6% of faces) | θ*=1 (blend never engaged) |
+
+**F3 CONSERVES TO MACHINE PRECISION at Ma=100** (energy drift 2.8e-10, comparable to
+the projection's 4.0e-11 and ~9 orders better than F2's 9.7e-1) — **thm:idp-conservative
+confirmed**. And the flux limiter genuinely engages (mean θ*=0.92, 92% high-order
+retention), unlike the F2 per-cell blend which was a no-op.
+
+**SURVIVING GAP — cross-moment-cone drift (blunt):** `margin < −1e-8` (the Δ2* cone)
+holds on **224 / 704 / 960 cells** at 8/20/40 steps, worst margin **−0.99**, vs the
+projection path's cells all at machine-zero (worst −9.5e-13). **A SINGLE F3 forward-
+Euler step is fully realizable (0 cells with margin<−1e-8)** — so the θ*-IDP full-cone
+bound holds per stage (thm:idp-cons-real for one step); the exit is a **multi-step
+accumulation** without the per-stage re-projection: boundary cells slowly drift out of
+the cross-moment cone over many steps (count grows ~linearly, field stays finite —
+bounded, not a blowup). The projection path avoids this only because it re-clamps every
+stage. Closing it without breaking conservation needs either a *conservative* full-cone
+re-projection (Guermond-Popov limiter on the assembled state) or accepting the bounded
+drift — flagged for follow-up.
+
+**Verdict:** F3 makes the anchor CONSERVATIVE at Ma=100 (the F2 pass/fail) — machine-
+precision mass+energy, 92% high-order retention, finite/ρ>0, projection retired. It is
+**a genuine conservative drop-in for the cross-moment projection on conservation**, but
+NOT yet fully realizability-neutral: cross-moment-cone violations accumulate over many
+steps (bounded, worst −0.99 by 40 steps) because there is no per-stage re-projection.
+Byte-identity-off exact; CPU tests 8/8.
+
 ## Bottom line
 
 Increment A is landed and validated: faithful gate (spurious rate 0.18% → 0),
@@ -380,21 +435,25 @@ Increment E is landed with the hard requirement met: the opt-in `use_kfvs_anchor
 (identical bitsum). The CPU flag-on path (anchor → full-cone θ*-blend, projection
 retired) is validated on well-posed moderate-Ma cases.
 
-Increment F2 closed the high-Ma **stability** gap: with the marginal s3max/variance
-regularization folded into the anchor (regularized anchor + marginal-augmented θ*
-predicate), the anchor path is **finite, ρ>0, 0-unrealizable at Ma=100** across
-8/20/40 steps. But F2 also surfaced a **real, specific conservation regression**: on
-well-posed Ma=100 the high-order update is already fully realizable (θ*=1 everywhere,
-blend a no-op), and the projection it replaces turns out to be a *lossy per-cell
-round-trip* (perturbs even strictly-realizable cells by up to 1.5e-2) whose
-incidental high-moment damping stabilizes energy conservation — energy drift is
-4.8e-7 (OFF) vs ~0.97 (ON) by 40 steps. **So the anchor is byte-safe and
-finite/realizable at Ma=100, but NOT yet a conservation-neutral drop-in for the
-projection at high Ma.** Three items remain before this is production: the GPU device
-anchor kernel (E follow-up), the high-Ma conservation fix (F2 follow-up: either
-validate the more-faithful anchor conservation physically, or add explicit
-conservative high-moment damping), and a physical (not just realizability)
-high-Ma accuracy comparison vs the projection path.
+Increment F2 closed the high-Ma **stability** gap (marginal s3max/variance guard folded
+in ⇒ finite/ρ>0 at Ma=100) but its per-cell STATE blend was non-conservative (energy
+drift ~0.97 by 40 steps) — because a per-cell θ* makes the implied face flux
+double-valued.
+
+Increment F3 fixes that by moving the blend to the **FLUX/FACE level with a
+face-shared θ** (kinetic-FVS F_LO + full-cone θ* predicate + face-min θ, projection
+and per-cell blend dropped). At Ma=100 this **conserves mass AND energy to machine
+precision** (energy drift 2.8e-10 / 7.1e-10 / 2.8e-7 at 8/20/40 steps, comparable to
+the projection's 4.0e-11 / 2.6e-8 / 4.8e-7 and ~9 orders better than F2) with 92%
+high-order retention (mean θ*=0.92), finite/ρ>0, projection retired — **thm:idp-
+conservative confirmed; the conservation pass/fail is a PASS.** One surviving gap: the
+Δ2* cross-moment cone accumulates violations over many steps (margin<−1e-8 on
+224/704/960 cells, worst −0.99 by 40 steps) — a **single** F3 step is fully realizable,
+so it's a multi-step accumulation from the absence of per-stage re-projection, bounded
+(field stays finite), not a blowup. Remaining before production: the GPU device flux
+path (E/F3 follow-up — GPU still the projection placeholder), a **conservative** full-
+cone re-projection or Guermond-Popov limiter to close the multi-step cone drift without
+breaking conservation, and a physical high-Ma accuracy comparison vs the projection.
 
 **Blunt caveats for the next increment:**
 - The kernel is pinned at the 255-register wall with local spill; the split does
