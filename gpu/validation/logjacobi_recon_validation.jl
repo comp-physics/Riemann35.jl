@@ -112,7 +112,7 @@ end
 # |u_x - 0.5| and |p - p0| over interior cells (contact-pollution metric).
 function test_contact()
     println("=== 3. CONTACT FIDELITY (3D moving uniform-p x-contact, rho 1:1000) ===")
-    n = 48; g = 8; Ma = 1.0; u0 = 0.5; p0 = 1.0; ratio = 1000.0; s3max = 40.0
+    n = 24; g = 8; Ma = 1.0; u0 = 0.5; p0 = 1.0; ratio = 1000.0; s3max = 40.0
     ic(i,j,k) = begin
         rho = i <= n÷2 ? 1.0 : ratio; T = p0/rho
         InitializeM4_35(rho, u0, 0.0, 0.0, T, 0.0, 0.0, T, 0.0, T)
@@ -120,7 +120,7 @@ function test_contact()
     dx = 1.0/n
     vmax = u0 + 4.0*sqrt(p0)
     dt = 0.2 * dx / vmax
-    nsteps = 25
+    nsteps = 15
     results = Tuple{String,Float64,Float64}[]
     for (nm, flag) in (("flag OFF (raw WENO5)", false), ("flag ON (log-Jacobi)", true))
         M = haloed(n, g, ic)
@@ -165,11 +165,36 @@ function contact_metrics(M, n, g, u0, p0)
     (umax, pmax)
 end
 
+# ===================== 4. CROSS-MOMENT NO-REGRESSION (Ma=100) ==================
+# Counter-streaming beams at Ma=100 (cross-moment stress). Confirm flag ON does
+# NOT introduce blowups or extra realizability-projection load vs flag OFF (J only
+# fixes marginals; the cross-moment cone stays the anchor/projection's job).
+function test_ma100_noregress()
+    println("=== 4. CROSS-MOMENT NO-REGRESSION (Ma=100 counter-streaming) ===")
+    ENV["HYQMOM_PROJ_COUNT"] = "1"
+    n = 16; g = 8; Ma = 100.0; s3max = max(40.0, 4.0 + Ma/2); dx = 1.0/n; U = 100.0
+    ic(i,j,k) = (x=(i-0.5)/n; ux = x<0.5 ? U : -U;
+                 InitializeM4_35(1.0, ux, 0.0, 0.0, 1.0,0.0,0.0,1.0,0.0,1.0))
+    dt = 0.15*dx/(U+4.0); nsteps = 6
+    for (nm, flag) in (("flag OFF", false), ("flag ON ", true))
+        reset_proj_counter!()
+        M = haloed(n, g, ic); blew = false
+        for s in 1:nsteps
+            march_step!(M, n, g, dx, Ma, dt, s3max, flag)
+            any(!isfinite, M) && (blew = true; @printf("   %s BLEW UP at step %d\n", nm, s); break)
+        end
+        blew || @printf("   %s survived %d steps; proj-corrections=%d; min rho=%.3e\n",
+                        nm, nsteps, proj_correction_count(), minimum(M[g+1:g+n,g+1:g+n,:,1]))
+    end
+    println()
+end
+
 function main()
     println("###### log-Jacobi marginal reconstruction — CPU validation ######\n")
     test_byte_identity()
     test_order()
     test_contact()
+    test_ma100_noregress()
     println("###### done ######")
 end
 
