@@ -10,6 +10,12 @@ calls it yet (no `projection35` / residual changes). Downstream anchor pieces
 Module: `KFVSInversionDev`, exports `chyqmom_nodes_3d_dev`,
 `chyqmom_nodes_3d_store_dev!`, `NODEMAX`.
 
+**Increment B** adds the anchor itself: per-cell quadrature STORAGE + the 3D
+device MEASURE_UPDATE (`gpu/kfvs_measure_update_dev.jl`, module
+`KFVSMeasureUpdateDev`, exports `measure_update_3d_dev`, `accum35_node`). See
+["Increment B" below](#increment-b--storage--3d-measure_update-anchor). Still a
+pure addition.
+
 ## Validation scripts (run from the worktree with the PACE env)
 
 ```
@@ -26,6 +32,11 @@ julia --project=. gpu/validation/fix1_itereig_probe.jl    # device-style iter-ei
 
 # GPU register/occupancy/throughput (fused + split), gpuenv2 has CUDA:
 julia --project=gpu/gpuenv2 gpu/validation/gpu_chyqmom_nodes_3d_dev.jl
+
+# Increment B — anchor: storage round-trip + 3D measure_update parity (no GPU):
+julia --project=. gpu/validation/parity_kfvs_measure_update.jl
+# Increment B — GPU storage pass + measure_update on the full 128^3 field:
+julia --project=gpu/gpuenv2 gpu/validation/gpu_kfvs_measure_update.jl
 ```
 
 ## FIX 1 — faithful condition gate (the fidelity fix)
@@ -113,13 +124,61 @@ The split variant's node counts and weights are **byte-identical** to the fused
 output (verified in-harness: 0 node-count diffs, 0 weight diff over 200k cells), so
 the split is a pure register/occupancy lever, not a fidelity change.
 
+## Increment B — storage + 3D measure_update anchor
+
+`gpu/kfvs_measure_update_dev.jl` (module `KFVSMeasureUpdateDev`).
+
+**Storage pass.** `chyqmom_nodes_3d_store_dev!` (increment A) inverts every cell and
+writes its quadrature (≤27 nodes × `(w, Ux, Uy, Uz)`) into a device array laid out
+`S[node, 4, cell]` + a `(cell)` node-count array.
+
+| metric | value |
+|---|---|
+| storage footprint @128³      | **1.812 GB** (27×4×8×Ncell) + 8.4 MB counts — confirms the ~1.8 GB design estimate |
+| store-pass GPU throughput    | **0.804 µs/cell** (255 regs), 1685 ms for the full 128³ field (2.1M cells) |
+| stored-quadrature round-trip | moments of stored nodes == fresh inversion, **0.0 abs diff** |
+
+**`measure_update_3d_dev` — the anchor.** The CPU reference `verify_kfvs.jl`
+`measure_update` is **x-only**; this **generalizes it to all 6 face-neighbors** (one
+upwind inflow per axis, using that axis's abscissa component and sign), with the
+retained weight `nC_k·(1 − λ(|Ux|+|Uy|+|Uz|)_k)`. Under the 3D CFL
+`λ·max_k(|Ux|+|Uy|+|Uz|)_k ≤ 1` every weight is ≥ 0 ⇒ nonneg measure ⇒ realizable
+in the full 35-moment cone (thm:kfvs-idp). The nonnegative-weight check is the cheap
+certificate that replaces the Hankel test.
+
+| validation (CFL = 0.4) | value |
+|---|---|
+| **min-weight certificate (≥ −1e-12) on real interior stencils** | **100.0000%** (host: 20 000/20 000; **GPU: 2 000 376/2 000 376** over the full 128³ interior) — 0 negative weights |
+| updated state passes `_state_realizable` (host, 20k stencils)    | **100.0000%** |
+| updated states with ρ ≤ 0 (GPU, 2.0M stencils)                   | **0** |
+| worst measure min-weight                                          | 8.06e-92 (a boundary node — tiny but ≥ 0) |
+| x-slice cross-check vs CPU `verify_kfvs.jl` measure_update        | max \|M_dev − M_cpu\| = **9.5e-7** over 3000 stencils (same nodes fed to both ⇒ isolates the accumulation/upwind port), **0** min-weight mismatches |
+| measure kernel registers / throughput (GPU)                      | **168 regs** (well under the 255 wall), **0.133 µs/cell**, 265 ms over 2.0M interior cells |
+
+The measure kernel at 168 registers confirms the anchor **consumer is cheap** (as
+the design predicted): the register cost lives in the inversion (store) kernel, so
+the storage split is exactly the right structure — invert-and-store once/stage
+(255-reg heavy kernel), then a light 168-reg consumer reads neighbor quadratures.
+
+**No stencil geometry failed the certificate and the CFL never had to shrink**
+below 0.4 — the certificate held on every one of the 2M+ real interior stencils
+at CFL 0.4 exactly as the theorem predicts.
+
 ## Bottom line
 
 Increment A is landed and validated: faithful gate (spurious rate 0.18% → 0),
 realizability certificate 100%, node-count match on real cells 99.82%, N=9 sizing
 confirmed, fused GPU kernel legal (255 regs, under the wall) at 0.81 µs/cell (~160×
-CPU). Solid enough to build the anchor's per-cell storage + `measure_update` +
-θ\*-blend on top of next.
+CPU).
+
+Increment B is landed and validated: per-cell storage (1.81 GB @128³, exact
+round-trip) + the 3D `measure_update` anchor (168-reg light consumer). The
+realizability certificate (min weight ≥ −1e-12) holds on **100% of 2M+ real
+interior stencils on-device at CFL 0.4** with 0 negatives and 0 CFL shrinks;
+updated states are realizable; the x-slice port matches the CPU reference to 9.5e-7.
+**B is solid enough to build the θ\*-blend (increment D) on top next** — the anchor
+delivers a realizable-by-construction `U_anchor` and the closed-form θ\* IDP limiter
+(`idp_limiter_dev.jl`, shipped) blends the high-order state toward it.
 
 **Blunt caveats for the next increment:**
 - The kernel is pinned at the 255-register wall with local spill; the split does
