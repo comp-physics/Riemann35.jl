@@ -87,16 +87,48 @@ Fused single kernel (`chyqmom_nodes_3d_dev`, one thread/cell) vs the split
 invert-and-store variant (`chyqmom_nodes_3d_store_dev!`, incremental global stores,
 no 27×4 NTuple accumulator — design §1.5 phase-1). 1e6 real `ma100` cells.
 
-<!-- GPU_NUMBERS -->
-_(filled by `gpu_chyqmom_nodes_3d_dev.jl`; see the SUMMARY block it prints.)_
+| variant | registers | local spill | occupancy | throughput | device min weight / mass err |
+|---|---:|---:|---:|---:|---|
+| FUSED (NTuple accumulator + global write)      | **255** | 5112 B | **12.5%** (8/64 warps) | **0.814 µs/cell** | 4.63e-6 (cert YES) / 2.17e-16 |
+| SPLIT (invert-and-store, incremental stores)   | **255** | 4448 B | **12.5%** (8/64 warps) | **0.789 µs/cell** | byte-identical to fused |
 
-The split variant's node-count and weights are byte-identical to the fused output
-(verified in-harness), so the storage-based split is a pure register/occupancy
-lever, not a fidelity change.
+**The split does NOT lift occupancy** (register delta = 0). Removing the 27×4
+output NTuple accumulator from the fused kernel's live set only trimmed the local
+spill (5112 → 4448 B) — the output buffers were **not** the binding constraint.
+The kernel is intrinsically pinned at the 255-register wall by the z-level N=9
+Cholesky (`spd_solve9`/`gram_fit_z`) and the new faithful iterative gate
+(`condkappa9`). So the storage-based split (design §1.5) is worth doing for the
+**memory-layout / phase-separation** reasons (it lets the downstream consumer be a
+separate low-register kernel), but it is NOT an occupancy escape for the inversion
+itself — a real relief valve would have to cut the z-level LA register footprint
+(e.g. shared-memory Gram, or a cheaper gate), which is a separate optimization.
+
+Throughput is nonetheless ~160× the ~130 µs/cell CPU baseline even at 12.5%
+occupancy (the work is compute-dense, footprint tiny: 35 in / 27×4 out per thread).
+The faithful gate's iteration count (`_EIG_ITERS`) was tuned from 40 → 16 (16 keeps
+0 gate mismatches on 381 905 real decisions), which halved throughput 1.60 → 0.81
+µs/cell with zero fidelity change.
+
+The split variant's node counts and weights are **byte-identical** to the fused
+output (verified in-harness: 0 node-count diffs, 0 weight diff over 200k cells), so
+the split is a pure register/occupancy lever, not a fidelity change.
 
 ## Bottom line
 
 Increment A is landed and validated: faithful gate (spurious rate 0.18% → 0),
 realizability certificate 100%, node-count match on real cells 99.82%, N=9 sizing
-confirmed. Solid enough to build the anchor's per-cell storage + `measure_update`
-+ θ\*-blend on top of next.
+confirmed, fused GPU kernel legal (255 regs, under the wall) at 0.81 µs/cell (~160×
+CPU). Solid enough to build the anchor's per-cell storage + `measure_update` +
+θ\*-blend on top of next.
+
+**Blunt caveats for the next increment:**
+- The kernel is pinned at the 255-register wall with local spill; the split does
+  NOT lift occupancy (the z-level N=9 Cholesky + iterative gate are the binding
+  register cost, not the output buffers). If occupancy matters downstream, cutting
+  the z-level LA footprint is the real lever, not the storage split.
+- Node-count fidelity is 99.82% on real cells, not 100%: ~0.18% of real cells are
+  genuine gate ties where DEV picks a slightly different (still realizable) column
+  set than the CPU svd, differing by a small bounded amount (max aligned abscissa
+  diff 1.3e-2). This is inherent to reproducing an incremental SVD selection with a
+  from-scratch iterative gate at exact ties; it is not a wild blowup and the
+  realizability certificate is unaffected.

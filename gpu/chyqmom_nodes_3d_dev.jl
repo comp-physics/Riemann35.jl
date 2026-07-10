@@ -238,7 +238,12 @@ end
 # is insensitive to sub-percent eigenvalue error (verified: 0 gate mismatches vs
 # CPU on >310k real column decisions).
 # ===========================================================================
-const _EIG_ITERS = 40   # power / inverse-power iterations (fixed)
+# Fixed power / inverse-power iteration count. The gate only needs to classify
+# accept/reject at the kappa=1e4 boundary, where the extreme eigenvalues are
+# well-separated and the iteration converges fast; measured on 381 905 real column
+# decisions, iters>=10 gives 0 accept/reject mismatches vs the CPU svd gate. 16 is
+# a safe margin that keeps the per-cell gate cost low (see gpu/validation notes).
+const _EIG_ITERS = 16
 
 # Multiply y = G x for the leading nbxnb block of the flat lower-tri Gram gl (len L).
 # Uses symmetry: G[i,j] = G[j,i] = gl[_lidx(max,min)]. n<=9.
