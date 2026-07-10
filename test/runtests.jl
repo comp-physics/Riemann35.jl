@@ -58,6 +58,11 @@ const TOL = 1e-10
         include("test_s3max.jl")
         include("test_roeps3.jl")
         include("test_moment_correction.jl")
+
+        # θ*-IDP limiter goldens — pins BOTH the bisection baseline (frozen,
+        # bit-for-bit fallback guard via theta_closed=false) and the closed-form
+        # default path (frozen golden + finite + realizable).
+        include("test_theta_star_goldens.jl")
     end
     
     # Integration tests (Julia vs MATLAB golden files)

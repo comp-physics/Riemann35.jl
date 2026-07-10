@@ -16,6 +16,20 @@ using .RiemannFluxDev.RoePS3Dev.MomentIndices: MARG_IDX
 
 export theta_star_update_dev, theta_star_update_closed
 
+"""
+    theta_star_update_dev(Mlo, dM; nb=24) -> Float64
+
+BASELINE θ* limiter: 24-iteration bisection on `_state_realizable`. This is the
+historical reference behavior, selected by `theta_closed=false` at the order-3
+entry points. It is FROZEN and CI-guarded byte-for-byte (test/goldenfiles/
+theta_star_baseline_golden.f64, test/test_theta_star_goldens.jl) so the fallback
+can never silently change — old results stay reproducible forever.
+
+The DEFAULT is now `theta_closed=true` → `theta_star_update_closed` (the
+closed-form Hankel-pencil limiter below), which is more accurate: exact vs
+bisection's 2^-24 resolution, and an exact realizable lower bound. Pass
+`theta_closed=false` anywhere in the order-3 chain to fall back to this bisection.
+"""
 @inline function theta_star_update_dev(Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64}; nb::Int = 24)
     full = ntuple(j -> Mlo[j] + dM[j], Val(35))
     _state_realizable(full) && return 1.0
