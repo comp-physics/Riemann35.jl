@@ -187,6 +187,17 @@ function simulation_runner(params)
     # Demo env: REPRO_PROJREC=1 in debug/run_ma100_demo.jl.
     ho_proj_first_order = get(params, :ho_proj_first_order, false)
 
+    # use_logjacobi_recon (OPT-IN, default false, order-3 only): reconstruct each
+    # axis's face-normal MARGINAL moment chain (m0..m4) in log-Jacobi coordinates
+    # J=(log m0, a1, log b2, a2, log b3) with the full deconvolution WENO5 pipeline,
+    # instead of raw-moment WENO5. Contact-fidelity + order upgrade to the marginal
+    # reconstruction (1D moving contact velocity error 1.3e-2 -> 5.5e-9 in the
+    # de-risk study). NOT a realizability fix: cross moments still reconstruct raw
+    # and the anchor/projection/θ*-IDP are untouched (J has no 1D cross chart —
+    # see roe-writeup-scripts/LOGJACOBI_DERISK_REPORT.md). Default path is
+    # byte-identical (the flag guards an if/else in residual_line3).
+    use_logjacobi_recon = get(params, :use_logjacobi_recon, false)
+
     # scheme (default :recommended as of 2026-07-02 — the graduation study in
     # docs/design/scheme-graduation.md):
     #   :recommended — ho_pressure_recon + stage_bgk (machine-exact on uniform-p
@@ -841,6 +852,7 @@ function simulation_runner(params)
             step_highorder_3d!(M, dt, decomp, bc, nx, ny, nz, halo, dx, dy, dz, Ma; s3max=s3max,
                                order=spatial_order, use_limiter=ho_realizability_limiter,
                                use_proj_recon=ho_proj_first_order,
+                               use_logjacobi_recon=use_logjacobi_recon,
                                stage_bgk_kn=(stage_bgk ? Kn : nothing))
         else
             # --- FIRST-ORDER PATH (spatial_order=1, default) ---

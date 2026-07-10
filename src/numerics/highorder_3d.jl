@@ -8,6 +8,10 @@ include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_s
 # the GPU order-3 kernels (hiorder3_recon_dev.jl) — residual_line3 just composes them.
 include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
     recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev, recon_vars_realizable
+# OPT-IN log-Jacobi marginal reconstruction (default OFF; byte-identical when off).
+include(joinpath(@__DIR__, "logjacobi_recon_dev.jl")); using .LogJacobiReconDev:
+    logjacobi_marginal_faces
+using .MomentIndices: MARG_IDX
 
 # ---------------------------------------------------------------------------
 # _face_flux_tup — NTuple{35} in, NTuple{35} HLL flux out.
@@ -37,6 +41,21 @@ end
 #           conv5 (recon-var averages) → weno5z L/R → from_recon_vars_dev →
 #           realizability fallback → _face_flux_tup (HLL).
 # ---------------------------------------------------------------------------
+# Override the 5 marginal slots (canonical indices `midx`, per axis) of a raw
+# 35-moment NTuple with the log-Jacobi-reconstructed marginal `jvals`. Device-safe
+# (branch-light NTuple rebuild; the 5 marginal slots differ per axis so a per-slot
+# ternary chain is used rather than scatter-assignment). Only reached under the flag.
+@inline function _override_marginal(m::NTuple{35,Float64}, midx::NTuple{5,Int},
+                                    jvals::NTuple{5,Float64})
+    ntuple(Val(35)) do q
+        q == midx[1] ? jvals[1] :
+        q == midx[2] ? jvals[2] :
+        q == midx[3] ? jvals[3] :
+        q == midx[4] ? jvals[4] :
+        q == midx[5] ? jvals[5] : m[q]
+    end
+end
+
 """
     residual_line3(Mext, ds, axis, Ma; g=4, s3max=40.0) -> (F_HO, F_LO)
 
@@ -48,11 +67,31 @@ interior-bounding interfaces.  The driver combines these across all three
 axes for the joint 6-face θ*-IDP blend.
 """
 function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
-                        g::Int = 4, s3max::Real = 40.0)
+                        g::Int = 4, s3max::Real = 40.0,
+                        use_logjacobi_recon::Bool = false)
     n2g = size(Mext, 1)
     n   = n2g - 2g
     @assert g >= 4 "order=3 residual requires halo g ≥ 4 (WENO5+deconv stencils); got g=$g"
     @assert n >= 1 "line must contain ≥ 1 interior cell; got n=$n"
+
+    # OPT-IN: log-Jacobi reconstruction of the face-normal MARGINAL chain. Runs the
+    # full :weno5j pipeline on the 5 marginal raw moments (m0..m4 at MARG_IDX[axis]);
+    # the resulting L/R marginal face values OVERRIDE the marginal slots of the
+    # raw-moment WENO faces below. Cross/transverse moments still reconstruct raw
+    # (no 1D J-chart), and the θ*-IDP scaling / anchor / projection are untouched.
+    # All-or-nothing per line (mirrors roe1d's ok_all): if any cell's marginal is
+    # off the 1D cone, keep the raw marginal reconstruction for the whole line.
+    lj_ok = false
+    lj_L = NTuple{5,Float64}[]; lj_R = NTuple{5,Float64}[]
+    if use_logjacobi_recon
+        midx = MARG_IDX[axis]
+        Mmarg = Vector{NTuple{5,Float64}}(undef, n2g)
+        @inbounds for k in 1:n2g
+            Mmarg[k] = (Mext[k, midx[1]], Mext[k, midx[2]], Mext[k, midx[3]],
+                        Mext[k, midx[4]], Mext[k, midx[5]])
+        end
+        lj_ok, lj_L, lj_R = logjacobi_marginal_faces(Mmarg, g)
+    end
 
     # --- Step 1: raw deconvolved point values → recon-var point values -------
     # Per-component smooth5 gate: if the 5-cell stencil for component q is
@@ -99,6 +138,15 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
         # Zhang–Shu realizability scaling toward the cell mean — all in weno_faces_dev.
         mL, mR = weno_faces_dev(_vv(il-2), _vv(il-1), _vv(il),
                                 _vv(il+1), _vv(il+2), _vv(il+3), cL, cR)
+        # OPT-IN: override the marginal slots with the log-Jacobi reconstruction
+        # (realizable-by-construction 1D chain; contact-exact). Cross moments in
+        # mL/mR are unchanged. Off by default → this branch is skipped entirely.
+        if lj_ok
+            midx = MARG_IDX[axis]
+            jL = lj_L[f]; jR = lj_R[f]
+            mL = _override_marginal(mL, midx, jL)
+            mR = _override_marginal(mR, midx, jR)
+        end
         F_HO[f] = _face_flux_tup(mL, mR, axis, Ma, s3max)
         F_LO[f] = _face_flux_tup(cL, cR, axis, Ma, s3max)
     end
@@ -124,6 +172,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 dx::Real, dy::Real, dz::Real, Ma::Real,
                                 dt::Real; s3max::Real = 40.0,
                                 theta_closed::Bool = true,
+                                use_logjacobi_recon::Bool = false,
                                 rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                             zlo=false, zhi=false))
     @assert halo >= 4 "order=3 residual requires halo ≥ 4; got halo=$halo"
@@ -152,7 +201,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     for k in 1:nz, j in 1:ny
         jh   = j + halo
         Mext = @view M[:, jh, k, :]           # (nx+2halo, 35) — zero-copy view
-        Fho, Flo = residual_line3(Mext, dx, 1, Ma; g=g, s3max=s3max)
+        Fho, Flo = residual_line3(Mext, dx, 1, Ma; g=g, s3max=s3max, use_logjacobi_recon=use_logjacobi_recon)
         for f in 1:nx+1
             FHO_x[f,j,k] = Fho[f];  FLO_x[f,j,k] = Flo[f]
         end
@@ -162,7 +211,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
     for k in 1:nz, i in 1:nx
         ih   = i + halo
         Mext = @view M[ih, :, k, :]
-        Fho, Flo = residual_line3(Mext, dy, 2, Ma; g=g, s3max=s3max)
+        Fho, Flo = residual_line3(Mext, dy, 2, Ma; g=g, s3max=s3max, use_logjacobi_recon=use_logjacobi_recon)
         for f in 1:ny+1
             FHO_y[i,f,k] = Fho[f];  FLO_y[i,f,k] = Flo[f]
         end
@@ -176,7 +225,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
         Mext = vcat(repeat(col[1:1,  :], g, 1),
                     col,
                     repeat(col[nz:nz,:], g, 1))   # (nz+2g, 35)
-        Fho, Flo = residual_line3(Mext, dz, 3, Ma; g=g, s3max=s3max)
+        Fho, Flo = residual_line3(Mext, dz, 3, Ma; g=g, s3max=s3max, use_logjacobi_recon=use_logjacobi_recon)
         for f in 1:nz+1
             FHO_z[i,j,f] = Fho[f];  FLO_z[i,j,f] = Flo[f]
         end
@@ -418,6 +467,7 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
                          s3max::Real = 4.0 + abs(Ma) / 2.0,
                          dt::Real = 0.0,
                          theta_closed::Bool = true,
+                         use_logjacobi_recon::Bool = false,
                          rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                      zlo=false, zhi=false))
     # order==3: two-pass WENO5 + joint 6-face θ*-IDP (separate implementation,
@@ -425,7 +475,8 @@ function residual_ho_3d!(R::Array{Float64,4}, M::Array{Float64,4},
     if order == 3
         return residual_ho_3d_order3!(R, M, nx, ny, nz, halo,
                                       dx, dy, dz, Ma, dt; s3max=s3max,
-                                      theta_closed=theta_closed, rank_bnd=rank_bnd)
+                                      theta_closed=theta_closed,
+                                      use_logjacobi_recon=use_logjacobi_recon, rank_bnd=rank_bnd)
     end
     fill!(R, 0.0)
     g = halo
@@ -506,7 +557,8 @@ end
 function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
-                            stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0)
+                            stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0,
+                            use_logjacobi_recon::Bool=false)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # A side is a RANK boundary iff a real neighbour rank sits there (encoded as a
@@ -522,7 +574,7 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
     # stage helper: M_in (with halos) -> returns updated interior-only array (full M-shape, halos zero)
     function L!(Mwork)
         halo_exchange_3d!(Mwork, decomp, bc)
-        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max, dt=Float64(dt), rank_bnd=rank_bnd)
+        residual_ho_3d!(R, Mwork, nx,ny,nz,halo, dx,dy,dz, Ma; order=order, use_limiter=use_limiter, use_proj_recon=use_proj_recon, s3max=s3max, dt=Float64(dt), use_logjacobi_recon=use_logjacobi_recon, rank_bnd=rank_bnd)
         return R
     end
     # stage_bgk (opt-in, `stage_bgk_kn` = Kn): exact-exponential BGK relaxation of
