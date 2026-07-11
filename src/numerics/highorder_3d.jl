@@ -184,6 +184,14 @@ end
 @inline _theta_star_sel(use_closed::Bool, Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64}) =
     use_closed ? theta_star_update_closed(Mlo, dM) : theta_star_update_dev(Mlo, dM)
 
+# Opt-in stage-level anchor-exit capture (diagnostic; OFF ⇒ byte-identical).
+# When ENV["KFVS_CAPTURE"]=="1", the residual records the FIRST interior cell whose
+# pure θ=0 KFVS anchor update `Mlo` leaves the cone (realizability_margin < tol),
+# together with its 7-cell face stencil (raw moments) and the update parameters, into
+# `_KFVS_CAPTURE`. This is the self-contained "first failing stencil" of Phase I.2 — a
+# caller saves `_KFVS_CAPTURE[]` to JLD2 for offline U^Q/D/cone-spectrum analysis.
+const _KFVS_CAPTURE = Ref{Any}(nothing)
+
 function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 nx::Int, ny::Int, nz::Int, halo::Int,
                                 dx::Real, dy::Real, dz::Real, Ma::Real,
@@ -277,6 +285,27 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
             ntuple(q -> Mc[q] - λx*(FLO_x[i+1,j,k][q]-FLO_x[i,j,k][q])
                                - λy*(FLO_y[i,j+1,k][q]-FLO_y[i,j,k][q])
                                - λz*(FLO_z[i,j,k+1][q]-FLO_z[i,j,k][q]), Val(35))
+        end
+
+        # Opt-in: capture EVERY anchor-endpoint cone exit (diagnostic; byte-id off).
+        # Accumulates each failing cell's 7-cell face stencil + Mlo into _KFVS_CAPTURE
+        # (lazily a Vector), capped at 400. First batch = the stage-2 failures.
+        if use_kfvs_anchor && get(ENV, "KFVS_CAPTURE", "0") == "1"
+            _KFVS_CAPTURE[] === nothing && (_KFVS_CAPTURE[] = Any[])
+            if length(_KFVS_CAPTURE[]) < 400
+                mlov = collect(Mlo)
+                # only "realizable INPUT state -> anchor update exits" (the true stage-2
+                # failure mode); excludes post-crash cells whose input is already out.
+                if realizability_margin(collect(Mc)) >= 0.0 &&
+                   all(isfinite, mlov) && realizability_margin(mlov) < -1e-8
+                    kz(dk) = clamp(k+dk, 1, nz)
+                    st(di,dj,dk) = [M[ih+di, jh+dj, kz(dk), q] for q in 1:35]
+                    push!(_KFVS_CAPTURE[], (cell=(i,j,k), lam=(λx,λy,λz), Ma=Float64(Ma), s3max=Float64(s3max),
+                        margin=realizability_margin(mlov), Mlo=mlov,
+                        C=st(0,0,0), Lx=st(-1,0,0), Rx=st(1,0,0),
+                        Ly=st(0,-1,0), Ry=st(0,1,0), Lz=st(0,0,-1), Rz=st(0,0,1)))
+                end
+            end
         end
 
         # High-order corrections G = F_HO - F_LO (per face)
