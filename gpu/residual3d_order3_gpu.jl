@@ -241,15 +241,21 @@ end
     @inbounds begin; NW[q, ci] = w; UX[q, ci] = ux; UY[q, ci] = uy; UZ[q, ci] = uz; end
     return nothing
 end
-# store pass: one thread per haloed cell, invert its 35 moments, write ≤27 nodes + count.
-function _anchor_store!(NW, UX, UY, UZ, NC, G, nfx::Int, nfy::Int, nfz::Int)
+# store pass: one thread per cell in the ANCHOR REGION only — the interior plus one halo
+# layer, cells [g, g+n+1] on each axis, which is exactly the set the weno faces read
+# (il ∈ [g, g+n], il+1 ∈ [g+1, g+n+1]). This skips the 8-deep WENO halos, cutting the
+# 255-reg inversions from (n+2g)^3 to (n+2)^3. NC stays 0 outside the region (never read).
+function _anchor_store!(NW, UX, UY, UZ, NC, G, nfx::Int, nfy::Int, nx::Int, ny::Int, nz::Int, g::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    mx = nx + 2; my = ny + 2; mz = nz + 2
+    if idx <= mx * my * mz
         @inbounds begin
-            i = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            j = r % nfy + 1;         k = r ÷ nfy + 1
+            ci = (idx - 1) % mx; r = (idx - 1) ÷ mx
+            cj = r % my;         ck = r ÷ my
+            i = g + ci; j = g + cj; k = g + ck          # cells [g, g+n+1]
+            cell = _lin(i, j, k, nfx, nfy)
             m = _cellG(G, i, j, k)
-            NC[idx] = chyqmom_nodes_3d_store_dev!(_store4_anchor!, NW, UX, UY, UZ, idx, m)
+            NC[cell] = chyqmom_nodes_3d_store_dev!(_store4_anchor!, NW, UX, UY, UZ, cell, m)
         end
     end
     return nothing
@@ -586,7 +592,8 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
         NW = CUDA.zeros(Float64, 27, ncube); UX = CUDA.zeros(Float64, 27, ncube)
         UY = CUDA.zeros(Float64, 27, ncube); UZ = CUDA.zeros(Float64, 27, ncube)
         NC = CUDA.zeros(Int32, ncube)
-        @cuda threads=threads blocks=bcube _anchor_store!(NW, UX, UY, UZ, NC, G, nfx, nfy, nfz)
+        bstore = cld((nx+2)*(ny+2)*(nz+2), threads)
+        @cuda threads=threads blocks=bstore _anchor_store!(NW, UX, UY, UZ, NC, G, nfx, nfy, nx, ny, nz, g)
     else
         NW = CUDA.zeros(Float64, 1, 1); UX = NW; UY = NW; UZ = NW; NC = CUDA.zeros(Int32, 1)
     end
