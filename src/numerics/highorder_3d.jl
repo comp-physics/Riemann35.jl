@@ -674,51 +674,63 @@ const _ANCHOR_IJK = _CHYQ_TRIPLES   # reuse the 35-triple table from chyqmom_nod
 const _INV_IDX = (1, 2, 6, 16)
 const _E_IDX   = (3, 10, 20)
 
-# F4 — cheap CONSERVATIVE re-projection (roadmap Route B). Per-stage replacement for
+# F4 — CONSERVATIVE re-projection (roadmap Route B). Per-stage replacement for
 # projection35's irreducible re-interiorization job (notes sec:idp-drift). Applied ONLY
 # to out-of-cone cells; in-cone high-order cells are left untouched (they keep their
-# accuracy and are already conservative from the face-shared flux). For each out-of-cone
-# cell: take the measure update M̃ (KFVS quadrature reproduction, realizable by
-# construction), then RESTORE the collision invariants (mass, momentum, and the energy
-# trace) from the cell, so the invariant totals are preserved per cell ⇒ globally
-# conservative. If the restored state B leaves the cone (the ~7% high-energy-defect
-# outliers), θ-limit toward B along M̃→B (largest realizable fraction), leaving only a
-# small residual energy deficit on those few cells. Design validated offline:
-# kfvs_invariant_restore_test.jl (variant B in-cone 90.9%, energy exact). Opt-in
-# (`anchor_reproject`, default OFF ⇒ byte-identical to F3).
+# accuracy and are already conservative from the face-shared flux). Each out-of-cone cell
+# is set to the FIRST realizable candidate of:
+#   (1) measure update M̃ (KFVS quadrature reproduction) with the collision invariants
+#       restored — mass+momentum exact, diagonal 2nd scaled to the cell's energy trace;
+#       keeps M̃'s high-order (3rd/4th) information when it lands in the cone (~90%);
+#   (2) the GAUSSIAN (Maxwellian) closure of the cell's degree≤2 moments — realizable by
+#       construction and reproducing mass, momentum, and ALL 2nd moments EXACTLY, so it
+#       preserves every collision invariant (the conflict-cell fallback, ~7%).
+# BOTH candidates preserve mass/momentum/energy exactly ⇒ the re-projection is
+# CONSERVATIVE for the collision invariants (no accumulating energy leak, unlike a
+# θ-limited partial restore). Opt-in (`anchor_reproject`, default OFF ⇒ byte-identical
+# to F3). Design validated: kfvs_invariant_restore_test.jl, kfvs_f4_validate.jl.
 @inline function _reproject_ok(m::NTuple{35,Float64}, Ma, s3max)
     is_realizable(collect(m)) && _marginal_regularized(m, Ma, s3max)
 end
-@inline function _anchor_reproject_pick(Mt::NTuple{35,Float64}, B::NTuple{35,Float64}, Ma, s3max)
-    _reproject_ok(B, Ma, s3max) && return B
-    _reproject_ok(Mt, Ma, s3max) || return Mt      # M̃ itself non-real (rare): best effort
-    lo = 0.0; hi = 1.0
-    for _ in 1:24
-        mid = 0.5 * (lo + hi)
-        cand = ntuple(q -> Mt[q] + mid * (B[q] - Mt[q]), Val(35))
-        _reproject_ok(cand, Ma, s3max) ? (lo = mid) : (hi = mid)
-    end
-    return ntuple(q -> Mt[q] + lo * (B[q] - Mt[q]), Val(35))
+# Gaussian closure of a cell's degree≤2 moments; nothing on a degenerate cell
+# (ρ≤0 or a non-positive marginal variance). Reproduces mass, momentum, and every 2nd
+# moment exactly (m200=ρ(C200+u²)=cell's m200), so it is invariant-exact ⇒ conservative.
+@inline function _gaussian_closure(c)
+    ρ = c[1]
+    ρ > 0.0 || return nothing
+    u = c[2]/ρ; v = c[6]/ρ; w = c[16]/ρ
+    C200 = c[3]/ρ - u*u; C020 = c[10]/ρ - v*v; C002 = c[20]/ρ - w*w
+    (C200 > 0.0 && C020 > 0.0 && C002 > 0.0) || return nothing
+    C110 = c[7]/ρ - u*v; C101 = c[17]/ρ - u*w; C011 = c[26]/ρ - v*w
+    return InitializeM4_35(ρ, u, v, w, C200, C110, C101, C020, C011, C002)
 end
 function _anchor_reproject_interior!(M::Array{Float64,4}, nx, ny, nz, halo, Ma, s3max)
     @inbounds for k in 1:nz, j in halo+1:halo+ny, i in halo+1:halo+nx
         c = @view M[i, j, k, :]
         realizability_margin(c) >= 0 && continue          # in-cone: leave untouched
+        newc = nothing
+        # candidate 1: measure update + invariant restore (keeps M̃'s high-order info)
         q = _anchor_quad(c)
-        q === nothing && continue                         # degenerate: leave as-is
-        (nn, nux, nuy, nuz, Nn) = q
-        Mt = zeros(35)
-        for a in 1:Nn; _anchor_accum!(Mt, nn[a], nux[a], nuy[a], nuz[a]); end
-        # variant-B restore: mass+momentum exact; scale diagonal 2nd to match energy trace
-        B = copy(Mt)
-        for t in _INV_IDX; B[t] = c[t]; end
-        Ecur = B[_E_IDX[1]] + B[_E_IDX[2]] + B[_E_IDX[3]]
-        Etar = c[_E_IDX[1]] + c[_E_IDX[2]] + c[_E_IDX[3]]
-        if Ecur > 0.0
-            s = Etar / Ecur
-            for t in _E_IDX; B[t] *= s; end
+        if q !== nothing
+            (nn, nux, nuy, nuz, Nn) = q
+            Mt = zeros(35)
+            for a in 1:Nn; _anchor_accum!(Mt, nn[a], nux[a], nuy[a], nuz[a]); end
+            for t in _INV_IDX; Mt[t] = c[t]; end          # restore mass+momentum exact
+            Ecur = Mt[_E_IDX[1]] + Mt[_E_IDX[2]] + Mt[_E_IDX[3]]
+            Etar = c[_E_IDX[1]]  + c[_E_IDX[2]]  + c[_E_IDX[3]]
+            (Ecur > 0.0) && (s = Etar / Ecur; for t in _E_IDX; Mt[t] *= s; end)
+            Bt = NTuple{35,Float64}(Mt)
+            _reproject_ok(Bt, Ma, s3max) && (newc = Bt)
         end
-        newc = _anchor_reproject_pick(NTuple{35,Float64}(Mt), NTuple{35,Float64}(B), Ma, s3max)
+        # candidate 2 (conflict cells): Gaussian closure — invariant-exact ⇒ conservative
+        if newc === nothing
+            G = _gaussian_closure(c)
+            if G !== nothing
+                Gt = NTuple{35,Float64}(G)
+                _reproject_ok(Gt, Ma, s3max) && (newc = Gt)
+            end
+        end
+        newc === nothing && continue                       # nothing realizable: leave as-is (rare)
         for q2 in 1:35; M[i, j, k, q2] = newc[q2]; end
     end
     return nothing

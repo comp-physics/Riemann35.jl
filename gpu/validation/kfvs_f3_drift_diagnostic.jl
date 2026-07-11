@@ -79,6 +79,15 @@ end
 function main()
     Ma=100.0; Np=16; halo=4; dx=1.0/Np
     dt = 0.12*dx/(Ma/2 + 5)
+    # FAST single-variant mode (parallelize across processes): set
+    # HYQMOM_KFVS_XFLOOR_RUN=<δ> and HYQMOM_DIAG_STEPS=<n> to run ONE floor at ONE horizon.
+    _sv = get(ENV, "HYQMOM_KFVS_XFLOOR_RUN", "")
+    if _sv != ""
+        δ = parse(Float64, _sv); set_kfvs_xfloor!(δ)
+        ns = parse(Int, get(ENV, "HYQMOM_DIAG_STEPS", "20"))
+        m,nf,md,ed = run_margins(Np,halo,Ma,ns,dt); report("δ=$(δ) $(ns)step", m,nf,md,ed)
+        set_kfvs_xfloor!(0.0); println("DONE."); return
+    end
     steps = (8, 20, 40)
 
     # confirm the CPU Δ2* predicate is exact-eig (VARIANT A ≡ baseline): compare
