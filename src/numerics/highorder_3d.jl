@@ -191,6 +191,10 @@ end
 # `_KFVS_CAPTURE`. This is the self-contained "first failing stencil" of Phase I.2 — a
 # caller saves `_KFVS_CAPTURE[]` to JLD2 for offline U^Q/D/cone-spectrum analysis.
 const _KFVS_CAPTURE = Ref{Any}(nothing)
+# Companion: full haloed input state of the residual call that first sees an anchor exit
+# (= the stage-2 input M1). Lets an offline pass reconstruct Mlo/U^Q/margins for EVERY
+# interior cell (pass AND fail) → the gate ROC. Set once, when the first exit is captured.
+const _KFVS_STATE = Ref{Any}(nothing)
 
 function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                                 nx::Int, ny::Int, nz::Int, halo::Int,
@@ -298,6 +302,7 @@ function residual_ho_3d_order3!(R::Array{Float64,4}, M::Array{Float64,4},
                 # failure mode); excludes post-crash cells whose input is already out.
                 if realizability_margin(collect(Mc)) >= 0.0 &&
                    all(isfinite, mlov) && realizability_margin(mlov) < -1e-8
+                    _KFVS_STATE[] === nothing && (_KFVS_STATE[] = copy(M))   # stage-2 input snapshot
                     kz(dk) = clamp(k+dk, 1, nz)
                     st(di,dj,dk) = [M[ih+di, jh+dj, kz(dk), q] for q in 1:35]
                     push!(_KFVS_CAPTURE[], (cell=(i,j,k), lam=(λx,λy,λz), Ma=Float64(Ma), s3max=Float64(s3max),

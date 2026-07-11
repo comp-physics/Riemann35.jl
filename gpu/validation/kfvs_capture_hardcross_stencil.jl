@@ -44,9 +44,10 @@ cells = reduce(hcat, [collect(c.cell) for c in caps])          # 3 x ncap
 margins = [c.margin for c in caps]
 Mlos = reduce(hcat, [c.Mlo for c in caps])                     # 35 x ncap
 stk(sym) = reduce(hcat, [getfield(c, sym) for c in caps])      # 35 x ncap per stencil slot
+state = Riemann35._KFVS_STATE[]   # full haloed stage-2 input state (for the gate ROC)
 out = joinpath(@__DIR__, "kfvs_hardcross_stencil_raw.jld2")
 jldsave(out; ncap=ncap, cells=cells, margins=margins, Mlos=Mlos,
         lam=collect(caps[1].lam), Ma=caps[1].Ma, s3max=caps[1].s3max, dt=dt, dx=dx, halo=h, N=N,
         C=stk(:C), Lx=stk(:Lx), Rx=stk(:Rx), Ly=stk(:Ly), Ry=stk(:Ry), Lz=stk(:Lz), Rz=stk(:Rz),
-        ic_bg=bg, ic_Mt=Mt, ic_Mb=Mb)
-println("wrote $out  ($ncap cells)")
+        ic_bg=bg, ic_Mt=Mt, ic_Mb=Mb, state=state)
+println("wrote $out  ($ncap cells, state $(size(state)))")
