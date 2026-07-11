@@ -15,6 +15,9 @@ include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
 # essential for the anchor's measure_update to stay finite on cone-boundary cells.
 include(joinpath(@__DIR__, "..", "..", "gpu", "chyqmom_nodes_3d_dev.jl"))
 using .KFVSInversionDev: chyqmom_nodes_3d_dev
+# SINGLE-SOURCE anchor primitives (F3 flux + full-cone θ* bisection), shared verbatim
+# with the GPU order-3 residual. Included here where `chyqmom_nodes_3d_dev` is in scope.
+include(joinpath(@__DIR__, "..", "..", "gpu", "kfvs_anchor_core.jl"))
 
 # ---------------------------------------------------------------------------
 # _face_flux_tup — NTuple{35} in, NTuple{35} HLL flux out.
@@ -49,28 +52,9 @@ end
 # abscissas / throws). axis ∈ {1=x,2=y,3=z}. Degenerate cell ⇒ HLL fallback.
 @inline function _kfvs_face_flux_tup(mL::NTuple{35,Float64}, mR::NTuple{35,Float64},
                                      axis::Int, Ma::Real, s3max::Real)
-    qL = _anchor_quad(collect(mL)); qR = _anchor_quad(collect(mR))
-    (qL === nothing || qR === nothing) && return _face_flux_tup(mL, mR, axis, Ma, s3max)
-    F = zeros(35)
-    (nL,uxL,uyL,uzL,NL) = qL
-    @inbounds for c in 1:NL
-        ua = axis==1 ? uxL[c] : (axis==2 ? uyL[c] : uzL[c])
-        ua > 0.0 || continue
-        w = nL[c]*ua
-        for (m,(i,j,l)) in enumerate(_ANCHOR_IJK)
-            F[m] += w * uxL[c]^i * uyL[c]^j * uzL[c]^l
-        end
-    end
-    (nR,uxR,uyR,uzR,NR) = qR
-    @inbounds for c in 1:NR
-        ua = axis==1 ? uxR[c] : (axis==2 ? uyR[c] : uzR[c])
-        ua < 0.0 || continue
-        w = nR[c]*ua
-        for (m,(i,j,l)) in enumerate(_ANCHOR_IJK)
-            F[m] += w * uxR[c]^i * uyR[c]^j * uzR[c]^l
-        end
-    end
-    return NTuple{35,Float64}(F)
+    # F3 quadrature flux via the single-source device core; native HLL on degeneracy.
+    f = kfvs_face_flux_dev(mL, mR, axis)
+    f === nothing ? _face_flux_tup(mL, mR, axis, Ma, s3max) : f
 end
 
 # F3 flux-level θ stats (env HYQMOM_KFVS_THETA_STATS=1): mean face θ* + fraction of
@@ -100,17 +84,11 @@ const _KFVS_XFLOOR = Ref{Float64}(parse(Float64, get(ENV, "HYQMOM_KFVS_XFLOOR", 
 set_kfvs_xfloor!(δ) = (_KFVS_XFLOOR[] = Float64(δ); nothing)
 @inline function _theta_star_fullcone(Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64},
                                       Ma, s3max; nb::Int = 24)
+    # CPU predicate (exact-eig is_realizable + marginal regularization); the bisection
+    # loop is the single-source `theta_star_fullcone_bisect` shared with the GPU path.
     lamf = _KFVS_XFLOOR[]
     ok(m) = is_realizable(collect(m); lam_min=lamf) && _marginal_regularized(m, Ma, s3max)
-    full = ntuple(j -> Mlo[j] + dM[j], Val(35))
-    ok(full) && return 1.0
-    lo = 0.0; hi = 1.0
-    for _ in 1:nb
-        mid = 0.5 * (lo + hi)
-        m = ntuple(j -> Mlo[j] + mid * dM[j], Val(35))
-        ok(m) ? (lo = mid) : (hi = mid)
-    end
-    lo
+    theta_star_fullcone_bisect(Mlo, dM, ok; nb=nb)
 end
 
 # ---------------------------------------------------------------------------
