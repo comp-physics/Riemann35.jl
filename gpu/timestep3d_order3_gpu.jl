@@ -295,8 +295,6 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     R    = CUDA.zeros(Float64, 35, n, n, n)
     G0   = CUDA.zeros(Float64, 35, n, n, n)
     svec = CUDA.zeros(Float64, n * n * n)
-    # anchor path only: stage-input haloed-cube snapshot (allocated only when opt-in).
-    Gin  = use_kfvs_anchor ? CUDA.zeros(Float64, 35, nf, nf, nf) : G
 
     bcube = cld(nf * nf * nf, threads)
     bint  = cld(n * n * n, threads)
@@ -318,21 +316,19 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         @cuda threads=threads blocks=bint _copy_interior!(G0, G, n, n, g)
         for (a, b, c) in stages
             @cuda threads=threads blocks=bcube _refill_halo!(G, nf, g, n)
-            # anchor path: snapshot the stage-INPUT haloed cube (the quadratures the
-            # measure_update anchor is built from) BEFORE the residual overwrites the
-            # interior. Off path: no copy, no effect (byte-identical).
-            if use_kfvs_anchor
-                @cuda threads=threads blocks=bcube _copy_cube!(Gin, G, nf)
-            end
+            # F3 anchor: the kinetic-FVS interface flux + full-cone θ* live IN the residual
+            # (use_kfvs_anchor threaded through). No stage-input snapshot is needed — the
+            # anchor reads the cell means directly, so the F2-era Gin/_anchor_interior! path
+            # is gone.
             residual3d_order3_box_gpu!(R, G, n, n, n, g, dxf, dxf, dxf, Maf, dt;
-                                       s3max=s3f, threads=threads, theta_closed=theta_closed)
+                                       s3max=s3f, threads=threads, theta_closed=theta_closed,
+                                       use_kfvs_anchor=use_kfvs_anchor)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, g, a, b, c * dt)
-            # per-cell realizability step. Default = shipped projection (byte-identical).
-            # Anchor (opt-in) = kinetic-FVS measure_update → full-cone θ*-blend, which
-            # retires the projection (realizable by construction).
+            # per-stage realizability step. Default = shipped projection (byte-identical).
+            # F3 anchor (opt-in): realizability comes from the face-shared-θ flux blend, so
+            # the projection is retired (no per-stage step). F4 reproject will slot in here.
             if use_kfvs_anchor
-                @cuda threads=threads blocks=bcube _refill_halo!(Gin, nf, g, n)
-                @cuda threads=threads blocks=bint _anchor_interior!(G, Gin, n, n, g, Maf, s3f, dt)
+                # (F3: nothing; F4 conservative re-projection kernel goes here.)
             else
                 @cuda threads=threads blocks=bint _proj_interior!(G, n, n, g, Maf, s3f)
             end
