@@ -9,9 +9,12 @@ ENV["HYQMOM_SKIP_PLOTTING"]="true"; ENV["CI"]="true"; ENV["KFVS_CAPTURE"]="1"
 using Riemann35, MPI, Printf, JLD2
 MPI.Initialized() || MPI.Init()
 
-DATA = joinpath(@__DIR__, "..", "..", "data")
-cross = reshape(collect(reinterpret(Float64, read(joinpath(DATA,"r3d_cross_ma100.f64")))), 35, 3)
-bg=cross[:,1]; Mt=cross[:,2]; Mb=cross[:,3]; Ma=100.0
+# in-memory IC (clean-checkout reproducible; verified byte-identical to the legacy
+# data/r3d_cross_ma100.f64 vectors, max rel diff 0.0): jets at ±Ma/√3 per axis.
+Ma=100.0; vj=Ma/sqrt(3)
+bg = InitializeM4_35(0.05, 0.0,0.0,0.0, 1.0,0.0,0.0,1.0,0.0,1.0)
+Mt = InitializeM4_35(1.0, -vj,-vj,-vj, 1.0,0.0,0.0,1.0,0.0,1.0)
+Mb = InitializeM4_35(1.0,  vj, vj, vj, 1.0,0.0,0.0,1.0,0.0,1.0)
 N=32; h=4; dx=1.0/N; s3max=max(40.0,4.0+Ma/2); dt=0.12*dx/(Ma/2+5)
 M=zeros(Float64,N+2h,N+2h,N,35)
 Cs=floor(Int,0.1*N); lo=div(N,2)-Cs;hi=div(N,2);lo2=div(N,2)+1;hi2=div(N,2)+1+Cs
