@@ -668,6 +668,62 @@ end
 end
 const _ANCHOR_IJK = _CHYQ_TRIPLES   # reuse the 35-triple table from chyqmom_nodes_3d.jl
 
+# Collision-invariant channel indices (F4 conservative re-projection): mass (m000),
+# momentum (m100,m010,m001), and the energy-trace diagonal 2nd moments (m200,m020,m002).
+# Verified against _CHYQ_TRIPLES ordering.
+const _INV_IDX = (1, 2, 6, 16)
+const _E_IDX   = (3, 10, 20)
+
+# F4 — cheap CONSERVATIVE re-projection (roadmap Route B). Per-stage replacement for
+# projection35's irreducible re-interiorization job (notes sec:idp-drift). Applied ONLY
+# to out-of-cone cells; in-cone high-order cells are left untouched (they keep their
+# accuracy and are already conservative from the face-shared flux). For each out-of-cone
+# cell: take the measure update M̃ (KFVS quadrature reproduction, realizable by
+# construction), then RESTORE the collision invariants (mass, momentum, and the energy
+# trace) from the cell, so the invariant totals are preserved per cell ⇒ globally
+# conservative. If the restored state B leaves the cone (the ~7% high-energy-defect
+# outliers), θ-limit toward B along M̃→B (largest realizable fraction), leaving only a
+# small residual energy deficit on those few cells. Design validated offline:
+# kfvs_invariant_restore_test.jl (variant B in-cone 90.9%, energy exact). Opt-in
+# (`anchor_reproject`, default OFF ⇒ byte-identical to F3).
+@inline function _reproject_ok(m::NTuple{35,Float64}, Ma, s3max)
+    is_realizable(collect(m)) && _marginal_regularized(m, Ma, s3max)
+end
+@inline function _anchor_reproject_pick(Mt::NTuple{35,Float64}, B::NTuple{35,Float64}, Ma, s3max)
+    _reproject_ok(B, Ma, s3max) && return B
+    _reproject_ok(Mt, Ma, s3max) || return Mt      # M̃ itself non-real (rare): best effort
+    lo = 0.0; hi = 1.0
+    for _ in 1:24
+        mid = 0.5 * (lo + hi)
+        cand = ntuple(q -> Mt[q] + mid * (B[q] - Mt[q]), Val(35))
+        _reproject_ok(cand, Ma, s3max) ? (lo = mid) : (hi = mid)
+    end
+    return ntuple(q -> Mt[q] + lo * (B[q] - Mt[q]), Val(35))
+end
+function _anchor_reproject_interior!(M::Array{Float64,4}, nx, ny, nz, halo, Ma, s3max)
+    @inbounds for k in 1:nz, j in halo+1:halo+ny, i in halo+1:halo+nx
+        c = @view M[i, j, k, :]
+        realizability_margin(c) >= 0 && continue          # in-cone: leave untouched
+        q = _anchor_quad(c)
+        q === nothing && continue                         # degenerate: leave as-is
+        (nn, nux, nuy, nuz, Nn) = q
+        Mt = zeros(35)
+        for a in 1:Nn; _anchor_accum!(Mt, nn[a], nux[a], nuy[a], nuz[a]); end
+        # variant-B restore: mass+momentum exact; scale diagonal 2nd to match energy trace
+        B = copy(Mt)
+        for t in _INV_IDX; B[t] = c[t]; end
+        Ecur = B[_E_IDX[1]] + B[_E_IDX[2]] + B[_E_IDX[3]]
+        Etar = c[_E_IDX[1]] + c[_E_IDX[2]] + c[_E_IDX[3]]
+        if Ecur > 0.0
+            s = Etar / Ecur
+            for t in _E_IDX; B[t] *= s; end
+        end
+        newc = _anchor_reproject_pick(NTuple{35,Float64}(Mt), NTuple{35,Float64}(B), Ma, s3max)
+        for q2 in 1:35; M[i, j, k, q2] = newc[q2]; end
+    end
+    return nothing
+end
+
 function _anchor_interior!(M::Array{Float64,4}, Ssrc::Array{Float64,4},
                            nx,ny,nz,halo, dt, dx, Ma, s3max)
     λ = Float64(dt) / Float64(dx)
@@ -792,7 +848,7 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                             stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0,
-                            use_kfvs_anchor::Bool=false)
+                            use_kfvs_anchor::Bool=false, anchor_reproject::Bool=false)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # A side is a RANK boundary iff a real neighbour rank sits there (encoded as a
@@ -842,8 +898,13 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
     #    (thm:idp-cons-real). So projection35 is RETIRED with no post-hoc per-cell
     #    projection or state blend (the E/F2 `_anchor_interior!` state blend is NOT
     #    used — it was non-conservative; see cor:proj-noncons).
+    #  * F4 (use_kfvs_anchor=true, anchor_reproject=true): conservative per-stage
+    #    re-projection of out-of-cone cells only (`_anchor_reproject_interior!`), the
+    #    Route-B fix for the multi-step cross-cone drift (notes sec:idp-drift). Opt-in;
+    #    with anchor_reproject=false (default) F3 is byte-identical.
     realize!(Mwork) =
-        use_kfvs_anchor ? nothing : _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
+        use_kfvs_anchor ? (anchor_reproject ? _anchor_reproject_interior!(Mwork, nx,ny,nz, halo, Ma, s3max) : nothing) :
+                          _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
 
     M0 = copy(M)
     # stage 1: M1 = M + dt*L(M)
