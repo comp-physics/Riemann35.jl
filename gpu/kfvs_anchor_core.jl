@@ -63,11 +63,24 @@ end
     end
 end
 
-# F3 kinetic-FVS interface flux (upwind quadrature): LEFT-cell nodes with u_axis>0 plus
-# RIGHT-cell nodes with u_axis<0, each contributing (n·u_axis)·(ux^i uy^j uz^k). Returns
-# the 35-moment flux NTuple, or `nothing` when either cell is degenerate (ρ≤0, non-finite
-# moments, no nodes, or a non-finite node) — the caller then supplies its native HLL flux.
-# axis ∈ {1=x, 2=y, 3=z}. Single-source core of the CPU `_kfvs_face_flux_tup`.
+# F3 kinetic-FVS interface flux FROM EXPLICIT NODES: LEFT-cell nodes with u_axis>0 plus
+# RIGHT-cell nodes with u_axis<0. This is the single-source flux core: the CPU path
+# inverts the two cells then calls this; the fast GPU path reads each cell's nodes ONCE
+# from a store pass and calls this (no per-face inversion). axis ∈ {1=x, 2=y, 3=z}.
+@noinline function kfvs_flux_from_nodes(nL::NTuple{27,Float64}, uxL::NTuple{27,Float64},
+                                        uyL::NTuple{27,Float64}, uzL::NTuple{27,Float64},
+                                        nR::NTuple{27,Float64}, uxR::NTuple{27,Float64},
+                                        uyR::NTuple{27,Float64}, uzR::NTuple{27,Float64}, axis::Int)
+    F = ntuple(_ -> 0.0, Val(35))
+    F = _kfvsa_upwind(F, nL, uxL, uyL, uzL, axis, true,  Val(27))   # left cell: u_axis > 0
+    F = _kfvsa_upwind(F, nR, uxR, uyR, uzR, axis, false, Val(27))   # right cell: u_axis < 0
+    return F
+end
+
+# F3 kinetic-FVS interface flux with inline inversion (CPU path / GPU fallback): invert
+# both cells then fold. Returns the 35-moment flux NTuple, or `nothing` when either cell
+# is degenerate (ρ≤0, non-finite moments, no nodes, or a non-finite node) — the caller
+# then supplies its native HLL flux. Single-source core of the CPU `_kfvs_face_flux_tup`.
 @noinline function kfvs_face_flux_dev(mL::NTuple{35,Float64}, mR::NTuple{35,Float64}, axis::Int)
     (mL[1] > 0.0 && _kfvsa_allfinite(mL)) || return nothing
     (mR[1] > 0.0 && _kfvsa_allfinite(mR)) || return nothing
@@ -77,10 +90,7 @@ end
     (NR >= 1) || return nothing
     _kfvsa_nodes_finite(nL, uxL, uyL, uzL) || return nothing
     _kfvsa_nodes_finite(nR, uxR, uyR, uzR) || return nothing
-    F = ntuple(_ -> 0.0, Val(35))
-    F = _kfvsa_upwind(F, nL, uxL, uyL, uzL, axis, true,  Val(27))   # left cell: u_axis > 0
-    F = _kfvsa_upwind(F, nR, uxR, uyR, uzR, axis, false, Val(27))   # right cell: u_axis < 0
-    return F
+    return kfvs_flux_from_nodes(nL, uxL, uyL, uzL, nR, uxR, uyR, uzR, axis)
 end
 
 # Device twin of the CPU `_marginal_regularized`: the marginal half of the θ* feasibility

@@ -55,7 +55,7 @@ using .HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
 # the CPU order-3 march (src/numerics/highorder_3d.jl). The bare `kfvs_anchor_core.jl`
 # is the one home for kfvs_face_flux_dev / theta_star_fullcone_bisect / marginal_regularized_dev.
 include(joinpath(@__DIR__, "chyqmom_nodes_3d_dev.jl"))
-using .KFVSInversionDev: chyqmom_nodes_3d_dev
+using .KFVSInversionDev: chyqmom_nodes_3d_dev, chyqmom_nodes_3d_store_dev!
 include(joinpath(@__DIR__, "kfvs_anchor_core.jl"))
 include(joinpath(@__DIR__, "kfvs_blend_dev.jl"))
 using .KFVSBlendDev: state_realizable_fullcone_dev
@@ -233,12 +233,37 @@ end
 
 # Step 3: per interface, WENO5 L/R faces + HLL → F_HO and F_LO.
 # Interface f (1..nx+1) between cube cells il = g+f-1 and il+1 at interior (j,k).
-# F3 anchor interface flux: the single-source kinetic-FVS quadrature flux (SAME function
-# the CPU march calls), with the native device HLL as the degeneracy fallback.
-@inline function _anchor_face_flux(cL::NTuple{35,Float64}, cR::NTuple{35,Float64},
-                                   axis::Int, Ma::Float64, s3f::Float64)
-    f = kfvs_face_flux_dev(cL, cR, axis)
-    f === nothing ? _hll_states(cL, cR, axis, Ma, s3f) : f
+# --- store-once node pass (fast path): invert every haloed cell ONCE per stage into
+# node arrays, so the weno flux reads stored L/R nodes instead of inverting per face
+# (which put the 255-reg inversion inline in the hot kernel and crashed occupancy). ---
+@inline _lin(i::Int, j::Int, k::Int, nfx::Int, nfy::Int) = i + (j-1)*nfx + (k-1)*nfx*nfy
+@inline function _store4_anchor!(NW, UX, UY, UZ, ci::Int, q::Int, w::Float64, ux::Float64, uy::Float64, uz::Float64)
+    @inbounds begin; NW[q, ci] = w; UX[q, ci] = ux; UY[q, ci] = uy; UZ[q, ci] = uz; end
+    return nothing
+end
+# store pass: one thread per haloed cell, invert its 35 moments, write ≤27 nodes + count.
+function _anchor_store!(NW, UX, UY, UZ, NC, G, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nfx * nfy * nfz
+        @inbounds begin
+            i = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
+            j = r % nfy + 1;         k = r ÷ nfy + 1
+            m = _cellG(G, i, j, k)
+            NC[idx] = chyqmom_nodes_3d_store_dev!(_store4_anchor!, NW, UX, UY, UZ, idx, m)
+        end
+    end
+    return nothing
+end
+# read a cell's stored ≤27 nodes into an NTuple{27} (static-index array reads ⇒ GPU-safe).
+@inline _read27(A, ci::Int) = ntuple(q -> @inbounds(A[q, ci]), Val(27))
+# F3 anchor interface flux from STORED nodes; native device HLL when either cell is
+# degenerate (node count 0). The upwind fold is the single-source kfvs_flux_from_nodes.
+@inline function _anchor_face_flux_stored(NW, UX, UY, UZ, ciL::Int, ciR::Int, NCL, NCR,
+                                          cL::NTuple{35,Float64}, cR::NTuple{35,Float64},
+                                          axis::Int, Ma::Float64, s3f::Float64)
+    (NCL >= 1 && NCR >= 1) || return _hll_states(cL, cR, axis, Ma, s3f)
+    return kfvs_flux_from_nodes(_read27(NW, ciL), _read27(UX, ciL), _read27(UY, ciL), _read27(UZ, ciL),
+                                _read27(NW, ciR), _read27(UX, ciR), _read27(UY, ciR), _read27(UZ, ciR), axis)
 end
 # F3 full-cone θ*: the shared bisection with the GPU predicate injected (inertia Δ2*
 # `state_realizable_fullcone_dev` + the marginal regularization twin).
@@ -249,7 +274,7 @@ end
 end
 
 function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::Int,
-                       Ma::Float64, s3f::Float64, use_ka::Bool)
+                       Ma::Float64, s3f::Float64, use_ka::Bool, NW, UX, UY, UZ, NC)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nx + 1
     if idx <= nf * ny * nz
@@ -263,7 +288,9 @@ function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::I
             W5 = _cellG(V, _clamp(il+2, nfx), b, c); W6 = _cellG(V, _clamp(il+3, nfx), b, c)
             mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
             FH = _hll_states(mL, mR, 1, Ma, s3f)
-            FL = use_ka ? _anchor_face_flux(cL, cR, 1, Ma, s3f) : _hll_states(cL, cR, 1, Ma, s3f)
+            ciL = _lin(il, b, c, nfx, nfx); ciR = _lin(il+1, b, c, nfx, nfx)
+            FL = use_ka ? _anchor_face_flux_stored(NW, UX, UY, UZ, ciL, ciR, NC[ciL], NC[ciR], cL, cR, 1, Ma, s3f) :
+                          _hll_states(cL, cR, 1, Ma, s3f)
             for m in 1:35; FHO[m, f, j, k] = FH[m]; FLO[m, f, j, k] = FL[m]; end
         end
     end
@@ -271,7 +298,7 @@ function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::I
 end
 
 function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::Int,
-                       Ma::Float64, s3f::Float64, use_ka::Bool)
+                       Ma::Float64, s3f::Float64, use_ka::Bool, NW, UX, UY, UZ, NC)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = ny + 1
     if idx <= nf * nx * nz
@@ -285,7 +312,9 @@ function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::I
             W5 = _cellG(V, a, _clamp(jl+2, nfy), c); W6 = _cellG(V, a, _clamp(jl+3, nfy), c)
             mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
             FH = _hll_states(mL, mR, 2, Ma, s3f)
-            FL = use_ka ? _anchor_face_flux(cL, cR, 2, Ma, s3f) : _hll_states(cL, cR, 2, Ma, s3f)
+            ciL = _lin(a, jl, c, nfy, nfy); ciR = _lin(a, jl+1, c, nfy, nfy)
+            FL = use_ka ? _anchor_face_flux_stored(NW, UX, UY, UZ, ciL, ciR, NC[ciL], NC[ciR], cL, cR, 2, Ma, s3f) :
+                          _hll_states(cL, cR, 2, Ma, s3f)
             for m in 1:35; FHO[m, i, f, k] = FH[m]; FLO[m, i, f, k] = FL[m]; end
         end
     end
@@ -293,7 +322,7 @@ function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::I
 end
 
 function _weno_flux_z!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfz::Int,
-                       Ma::Float64, s3f::Float64, use_ka::Bool)
+                       Ma::Float64, s3f::Float64, use_ka::Bool, NW, UX, UY, UZ, NC)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     nf = nz + 1
     if idx <= nf * nx * ny
@@ -307,7 +336,9 @@ function _weno_flux_z!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfz::I
             W5 = _cellG(V, a, b, _clamp(kl+2, nfz)); W6 = _cellG(V, a, b, _clamp(kl+3, nfz))
             mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
             FH = _hll_states(mL, mR, 3, Ma, s3f)
-            FL = use_ka ? _anchor_face_flux(cL, cR, 3, Ma, s3f) : _hll_states(cL, cR, 3, Ma, s3f)
+            ciL = _lin(a, b, kl, nfz, nfz); ciR = _lin(a, b, kl+1, nfz, nfz)
+            FL = use_ka ? _anchor_face_flux_stored(NW, UX, UY, UZ, ciL, ciR, NC[ciL], NC[ciR], cL, cR, 3, Ma, s3f) :
+                          _hll_states(cL, cR, 3, Ma, s3f)
             for m in 1:35; FHO[m, i, j, f] = FH[m]; FLO[m, i, j, f] = FL[m]; end
         end
     end
@@ -548,18 +579,30 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     fx = (nx+1)*ny*nz; fy = (ny+1)*nx*nz; fz = (nz+1)*nx*ny
     bint = cld(nx*ny*nz, threads)
 
+    # F3 anchor STORE-ONCE pass: invert every haloed cell ONCE into node arrays so the
+    # weno flux kernels read stored L/R nodes (the 255-reg inversion leaves the hot
+    # kernel ⇒ occupancy recovers). Tiny dummies on the default path (never indexed).
+    if use_kfvs_anchor
+        NW = CUDA.zeros(Float64, 27, ncube); UX = CUDA.zeros(Float64, 27, ncube)
+        UY = CUDA.zeros(Float64, 27, ncube); UZ = CUDA.zeros(Float64, 27, ncube)
+        NC = CUDA.zeros(Int32, ncube)
+        @cuda threads=threads blocks=bcube _anchor_store!(NW, UX, UY, UZ, NC, G, nfx, nfy, nfz)
+    else
+        NW = CUDA.zeros(Float64, 1, 1); UX = NW; UY = NW; UZ = NW; NC = CUDA.zeros(Int32, 1)
+    end
+
     # --- Pass 1: per axis Ppt → Vavg → faces ---
     @cuda threads=threads blocks=bcube _ppt_x!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_x!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, use_kfvs_anchor)
+    @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, use_kfvs_anchor, NW, UX, UY, UZ, NC)
 
     @cuda threads=threads blocks=bcube _ppt_y!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_y!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, use_kfvs_anchor)
+    @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, use_kfvs_anchor, NW, UX, UY, UZ, NC)
 
     @cuda threads=threads blocks=bcube _ppt_z!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_z!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, use_kfvs_anchor)
+    @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, use_kfvs_anchor, NW, UX, UY, UZ, NC)
 
     # --- Pass 2: θ* per cell, then blend + residual ---
     @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
