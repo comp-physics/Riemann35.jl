@@ -622,6 +622,23 @@ function _project_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma) / 2.0)
     end
 end
 
+# Sparse projection (the staged-gate "simplest useful fallback"): repair ONLY the
+# out-of-cone cells (realizability_margin < 0), leaving strictly-realizable cells
+# byte-untouched — so F3 keeps its exactness on the ~99.4% pass set and projection35
+# fires only on the thin flagged intervention set. Opt-in; default march never calls it.
+const _KFVS_SPARSE_NPROJ = Ref(0)
+function _project_flagged_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma)/2.0)
+    n = 0
+    for k in 1:nz, j in 1:ny, i in 1:nx
+        ih=i+halo; jh=j+halo
+        if realizability_margin(@view M[ih,jh,k,:]) < 0
+            M[ih,jh,k,:] = realizable_3D_M4(M[ih,jh,k,:], Ma, s3max); n += 1
+        end
+    end
+    _KFVS_SPARSE_NPROJ[] += n
+    return nothing
+end
+
 # ---------------------------------------------------------------------------
 # Kinetic-FVS anchor → full-cone θ* blend (opt-in; increment E of the KFVS anchor).
 # Replaces the per-cell realizability PROJECTION with a blend of the high-order
@@ -872,7 +889,8 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                             stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0,
-                            use_kfvs_anchor::Bool=false, anchor_reproject::Bool=false)
+                            use_kfvs_anchor::Bool=false, anchor_reproject::Bool=false,
+                            sparse_project::Bool=false)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # A side is a RANK boundary iff a real neighbour rank sits there (encoded as a
@@ -927,7 +945,8 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
     #    Route-B fix for the multi-step cross-cone drift (notes sec:idp-drift). Opt-in;
     #    with anchor_reproject=false (default) F3 is byte-identical.
     realize!(Mwork) =
-        use_kfvs_anchor ? (anchor_reproject ? _anchor_reproject_interior!(Mwork, nx,ny,nz, halo, Ma, s3max) : nothing) :
+        use_kfvs_anchor ? (sparse_project ? _project_flagged_interior!(Mwork, nx,ny,nz, halo, Ma, s3max) :
+                           anchor_reproject ? _anchor_reproject_interior!(Mwork, nx,ny,nz, halo, Ma, s3max) : nothing) :
                           _project_interior!(Mwork, nx,ny,nz, halo, Ma, s3max)
 
     M0 = copy(M)

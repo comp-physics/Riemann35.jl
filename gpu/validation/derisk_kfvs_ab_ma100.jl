@@ -19,7 +19,7 @@ using CUDA, Printf
 include(joinpath(@__DIR__, "..", "timestep3d_order3_gpu.jl")); using .Timestep3DOrder3GPU
 
 DATA = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "..", "data"))
-g = 4
+g = Timestep3DOrder3GPU.HALO3      # order-3 needs g=8 (was hardcoded 4 = halo mismatch)
 NSTEP = 20
 GRIDS = (32, 64)
 
@@ -58,7 +58,9 @@ end
 interior(GiB) = GiB
 en_of(GiB) = sum(@view GiB[3, :, :, :]) + sum(@view GiB[10, :, :, :]) + sum(@view GiB[20, :, :, :])
 
-function run_branch(N::Int, use_anchor::Bool)
+# sched=nothing => adaptive (returns the schedule); pass a saved schedule to REPLAY it so
+# OFF and ON march on IDENTICAL timesteps (fair conservation/perf comparison).
+function run_branch(N::Int, use_anchor::Bool; sched=nothing)
     Ghost = build_crossing(N, g)
     G = CuArray(Ghost)
     dxN = 1.0 / N
@@ -66,7 +68,7 @@ function run_branch(N::Int, use_anchor::Bool)
     mass0 = sum(@view Gi0[1, :, :, :]); en0 = en_of(Gi0)
 
     t0 = time()
-    dts = march3d_order3_gpu!(G, dxN, MaB, NSTEP; s3max=s3B, use_kfvs_anchor=use_anchor)
+    dts = march3d_order3_gpu!(G, dxN, MaB, NSTEP; dts=sched, s3max=s3B, use_kfvs_anchor=use_anchor)
     CUDA.synchronize()
     wall = time() - t0
 
@@ -78,19 +80,26 @@ function run_branch(N::Int, use_anchor::Bool)
     edrift = abs(en1 - en0) / max(abs(en0), 1e-300)
     thru = (N^3 * NSTEP) / wall / 1e6
     return (; survived, rmin=minimum(rho), rmax=maximum(rho), mdrift, edrift,
-            wall, thru, treached=sum(dts))
+            wall, thru, treached=sum(dts), sched=Array(dts))
 end
 
-@printf("=== F3 kinetic-FVS anchor de-risk: hard Ma=%.0f crossing, order-3, %d steps ===\n", MaB, NSTEP)
+prow(tag, r) = @printf("%-6s %-4s %-9s [%.3e,%.3e]  %-11.3e %-11.3e %-9.2f %-11.2f\n",
+        r.N, tag, r.survived ? "YES" : "NO", r.rmin, r.rmax, r.mdrift, r.edrift, r.wall, r.thru)
+
+@printf("=== F3 kinetic-FVS anchor de-risk: hard Ma=%.0f crossing, order-3 (g=HALO3=%d), %d steps ===\n", MaB, g, NSTEP)
+@printf("(OFF adaptive schedule is SAVED and REPLAYED for ON — identical timesteps; ON failure is caught)\n")
 @printf("%-6s %-4s %-9s %-24s %-11s %-11s %-9s %-11s\n",
         "grid", "br", "survived", "rho range", "mass drift", "en drift", "wall(s)", "Mcell·st/s")
 for N in GRIDS
-    for (tag, ua) in (("OFF", false), ("ON", true))
-        r = run_branch(N, ua)
-        @printf("%-6s %-4s %-9s [%.3e,%.3e]  %-11.3e %-11.3e %-9.2f %-11.2f\n",
-                "$(N)³", tag, r.survived ? "YES" : "NO", r.rmin, r.rmax,
-                r.mdrift, r.edrift, r.wall, r.thru)
+    roff = run_branch(N, false)
+    prow("OFF", merge(roff, (; N="$(N)³")))
+    try
+        ron = run_branch(N, true; sched=roff.sched)   # REPLAY OFF's saved schedule
+        prow("ON ", merge(ron, (; N="$(N)³")))
+    catch e
+        @printf("%-6s %-4s FAILED — %s  (OFF result stands; comparison not aborted)\n",
+                "$(N)³", "ON", sprint(showerror, e)[1:min(end,70)])
     end
-    @printf("       (t_reached over %d steps ~ same dt schedule both branches)\n", NSTEP)
+    @printf("       t_reached=%.4e over %d steps (identical schedule both branches)\n", roff.treached, NSTEP)
 end
-println("\nDone.  Discriminator = energy drift ON vs OFF (both order-3, single flag swap).")
+println("\nDone.  Discriminator = energy drift ON vs OFF on IDENTICAL timesteps (single flag swap, g=HALO3).")
