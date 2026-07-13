@@ -51,6 +51,28 @@ using .ReconDev: to_recon_vars_tup
 using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
 using .HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
 
+# --- opt-in log-Jacobi marginal reconstruction (device pieces) ---
+include(joinpath(@__DIR__, "..", "src", "numerics", "weno5_dev.jl"))
+using .Weno5Dev: weno5z, deconv5, conv5, smooth5
+include(joinpath(@__DIR__, "..", "src", "numerics", "logjacobi_recon_dev.jl"))
+using .LogJacobiReconDev: marg_m_to_J, marg_J_to_m
+# per-axis 5 marginal slot indices (= moment_indices.MARG_IDX; hardcoded to avoid a
+# device include of the indices module; verified against IJK: x=(1..5), y=(0,1,2,3,4)_y,
+# z=(0,1,2,3,4)_z).
+const _MARG_IDX = ((1,2,3,4,5), (1,6,10,13,15), (1,16,20,23,25))
+# NTuple rebuild overriding the 5 marginal slots (device copy of CPU _override_marginal).
+@inline function _override_marg_dev(m::NTuple{35,Float64}, midx::NTuple{5,Int}, jv::NTuple{5,Float64})
+    ntuple(Val(35)) do q
+        q == midx[1] ? jv[1] :
+        q == midx[2] ? jv[2] :
+        q == midx[3] ? jv[3] :
+        q == midx[4] ? jv[4] :
+        q == midx[5] ? jv[5] : m[q]
+    end
+end
+@inline _marg5(G, midx, a, b, c) = @inbounds (G[midx[1],a,b,c], G[midx[2],a,b,c], G[midx[3],a,b,c], G[midx[4],a,b,c], G[midx[5],a,b,c])
+@inline _vj5(VJ, a, b, c) = @inbounds (VJ[1,a,b,c], VJ[2,a,b,c], VJ[3,a,b,c], VJ[4,a,b,c], VJ[5,a,b,c])
+
 # Runtime θ* dispatch (single compiled kernel holds BOTH paths). `use_closed`
 # is a plain Bool threaded from the host through the whole call chain (NOT a
 # precompile-time const — that pattern freezes at precompile and silently
@@ -291,6 +313,200 @@ function _weno_flux_z!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfz::I
 end
 
 # ===========================================================================
+# OPT-IN log-Jacobi marginal pipeline: a J-domain 3-pass on the face-normal
+# marginal chain (m0..m4 at midx), parallel to the raw recon 3-pass above, mirroring
+# CPU logjacobi_marginal_faces call-for-call. _ppt_marg: deconv5-gated marginal point
+# -> marg_m_to_J (+ per-cell ok). _vavg_marg: conv5 -> J cell-average. _okline: AND ok
+# over the whole line (all-or-nothing fallback). _weno_flux_lj: as _weno_flux but, when
+# the line is ok, WENO5-Z in J -> marg_J_to_m -> override the marginal slots of mL/mR.
+# ===========================================================================
+function _ppt_marg_x!(PJ, OK, G, midx, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if idx <= nfx*nfy*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; r=(idx-1)÷nfx; b=r%nfy+1; c=r÷nfy+1
+            mpt = (a>=3 && a<=nfx-2) ?
+                (cm2=_marg5(G,midx,a-2,b,c); cm1=_marg5(G,midx,a-1,b,c); c0=_marg5(G,midx,a,b,c); cp1=_marg5(G,midx,a+1,b,c); cp2=_marg5(G,midx,a+2,b,c);
+                 ntuple(q -> smooth5(cm2[q],cm1[q],c0[q],cp1[q],cp2[q]) ? deconv5(cm2[q],cm1[q],c0[q],cp1[q],cp2[q]) : c0[q], Val(5))) :
+                _marg5(G,midx,a,b,c)
+            ok, J = marg_m_to_J(mpt[1],mpt[2],mpt[3],mpt[4],mpt[5])
+            PJ[1,a,b,c]=J[1]; PJ[2,a,b,c]=J[2]; PJ[3,a,b,c]=J[3]; PJ[4,a,b,c]=J[4]; PJ[5,a,b,c]=J[5]
+            OK[a,b,c] = ok ? 1.0 : 0.0
+        end
+    end
+    return nothing
+end
+function _ppt_marg_y!(PJ, OK, G, midx, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if idx <= nfx*nfy*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; r=(idx-1)÷nfx; b=r%nfy+1; c=r÷nfy+1
+            mpt = (b>=3 && b<=nfy-2) ?
+                (cm2=_marg5(G,midx,a,b-2,c); cm1=_marg5(G,midx,a,b-1,c); c0=_marg5(G,midx,a,b,c); cp1=_marg5(G,midx,a,b+1,c); cp2=_marg5(G,midx,a,b+2,c);
+                 ntuple(q -> smooth5(cm2[q],cm1[q],c0[q],cp1[q],cp2[q]) ? deconv5(cm2[q],cm1[q],c0[q],cp1[q],cp2[q]) : c0[q], Val(5))) :
+                _marg5(G,midx,a,b,c)
+            ok, J = marg_m_to_J(mpt[1],mpt[2],mpt[3],mpt[4],mpt[5])
+            PJ[1,a,b,c]=J[1]; PJ[2,a,b,c]=J[2]; PJ[3,a,b,c]=J[3]; PJ[4,a,b,c]=J[4]; PJ[5,a,b,c]=J[5]
+            OK[a,b,c] = ok ? 1.0 : 0.0
+        end
+    end
+    return nothing
+end
+function _ppt_marg_z!(PJ, OK, G, midx, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if idx <= nfx*nfy*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; r=(idx-1)÷nfx; b=r%nfy+1; c=r÷nfy+1
+            mpt = (c>=3 && c<=nfz-2) ?
+                (cm2=_marg5(G,midx,a,b,c-2); cm1=_marg5(G,midx,a,b,c-1); c0=_marg5(G,midx,a,b,c); cp1=_marg5(G,midx,a,b,c+1); cp2=_marg5(G,midx,a,b,c+2);
+                 ntuple(q -> smooth5(cm2[q],cm1[q],c0[q],cp1[q],cp2[q]) ? deconv5(cm2[q],cm1[q],c0[q],cp1[q],cp2[q]) : c0[q], Val(5))) :
+                _marg5(G,midx,a,b,c)
+            ok, J = marg_m_to_J(mpt[1],mpt[2],mpt[3],mpt[4],mpt[5])
+            PJ[1,a,b,c]=J[1]; PJ[2,a,b,c]=J[2]; PJ[3,a,b,c]=J[3]; PJ[4,a,b,c]=J[4]; PJ[5,a,b,c]=J[5]
+            OK[a,b,c] = ok ? 1.0 : 0.0
+        end
+    end
+    return nothing
+end
+function _vavg_marg_x!(VJ, PJ, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if idx <= nfx*nfy*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; r=(idx-1)÷nfx; b=r%nfy+1; c=r÷nfy+1
+            am2=_clamp(a-2,nfx); am1=_clamp(a-1,nfx); ap1=_clamp(a+1,nfx); ap2=_clamp(a+2,nfx)
+            for q in 1:5; VJ[q,a,b,c]=conv5(PJ[q,am2,b,c],PJ[q,am1,b,c],PJ[q,a,b,c],PJ[q,ap1,b,c],PJ[q,ap2,b,c]); end
+        end
+    end
+    return nothing
+end
+function _vavg_marg_y!(VJ, PJ, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if idx <= nfx*nfy*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; r=(idx-1)÷nfx; b=r%nfy+1; c=r÷nfy+1
+            bm2=_clamp(b-2,nfy); bm1=_clamp(b-1,nfy); bp1=_clamp(b+1,nfy); bp2=_clamp(b+2,nfy)
+            for q in 1:5; VJ[q,a,b,c]=conv5(PJ[q,a,bm2,c],PJ[q,a,bm1,c],PJ[q,a,b,c],PJ[q,a,bp1,c],PJ[q,a,bp2,c]); end
+        end
+    end
+    return nothing
+end
+function _vavg_marg_z!(VJ, PJ, nfx::Int, nfy::Int, nfz::Int)
+    idx = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if idx <= nfx*nfy*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; r=(idx-1)÷nfx; b=r%nfy+1; c=r÷nfy+1
+            cm2=_clamp(c-2,nfz); cm1=_clamp(c-1,nfz); cp1=_clamp(c+1,nfz); cp2=_clamp(c+2,nfz)
+            for q in 1:5; VJ[q,a,b,c]=conv5(PJ[q,a,b,cm2],PJ[q,a,b,cm1],PJ[q,a,b,c],PJ[q,a,b,cp1],PJ[q,a,b,cp2]); end
+        end
+    end
+    return nothing
+end
+function _okline_x!(OKL, OK, nfx::Int, nfy::Int, nfz::Int)
+    idx=(blockIdx().x-1)*blockDim().x+threadIdx().x
+    if idx <= nfy*nfz
+        @inbounds begin
+            b=(idx-1)%nfy+1; c=(idx-1)÷nfy+1; good=1.0
+            for a in 1:nfx; if OK[a,b,c] < 0.5; good=0.0; end; end
+            OKL[b,c]=good
+        end
+    end
+    return nothing
+end
+function _okline_y!(OKL, OK, nfx::Int, nfy::Int, nfz::Int)
+    idx=(blockIdx().x-1)*blockDim().x+threadIdx().x
+    if idx <= nfx*nfz
+        @inbounds begin
+            a=(idx-1)%nfx+1; c=(idx-1)÷nfx+1; good=1.0
+            for b in 1:nfy; if OK[a,b,c] < 0.5; good=0.0; end; end
+            OKL[a,c]=good
+        end
+    end
+    return nothing
+end
+function _okline_z!(OKL, OK, nfx::Int, nfy::Int, nfz::Int)
+    idx=(blockIdx().x-1)*blockDim().x+threadIdx().x
+    if idx <= nfx*nfy
+        @inbounds begin
+            a=(idx-1)%nfx+1; b=(idx-1)÷nfx+1; good=1.0
+            for c in 1:nfz; if OK[a,b,c] < 0.5; good=0.0; end; end
+            OKL[a,b]=good
+        end
+    end
+    return nothing
+end
+@inline function _wenoJ5(J1,J2,J3,J4,J5)
+    (weno5z(J1[1],J2[1],J3[1],J4[1],J5[1]), weno5z(J1[2],J2[2],J3[2],J4[2],J5[2]),
+     weno5z(J1[3],J2[3],J3[3],J4[3],J5[3]), weno5z(J1[4],J2[4],J3[4],J4[4],J5[4]),
+     weno5z(J1[5],J2[5],J3[5],J4[5],J5[5]))
+end
+function _weno_flux_lj_x!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int,g::Int,nfx::Int, Ma::Float64, s3f::Float64)
+    idx=(blockIdx().x-1)*blockDim().x+threadIdx().x; nf=nx+1
+    if idx <= nf*ny*nz
+        @inbounds begin
+            f=(idx-1)%nf+1; r=(idx-1)÷nf; j=r%ny+1; k=r÷ny+1
+            b=g+j; c=g+k; il=g+f-1
+            cL=_cellG(G,il,b,c); cR=_cellG(G,il+1,b,c)
+            W1=_cellG(V,_clamp(il-2,nfx),b,c); W2=_cellG(V,_clamp(il-1,nfx),b,c); W3=_cellG(V,_clamp(il,nfx),b,c)
+            W4=_cellG(V,_clamp(il+1,nfx),b,c); W5=_cellG(V,_clamp(il+2,nfx),b,c); W6=_cellG(V,_clamp(il+3,nfx),b,c)
+            mL, mR = weno_faces_dev(W1,W2,W3,W4,W5,W6,cL,cR)
+            if OKL[b,c] > 0.5
+                J1=_vj5(VJ,_clamp(il-2,nfx),b,c); J2=_vj5(VJ,_clamp(il-1,nfx),b,c); J3=_vj5(VJ,_clamp(il,nfx),b,c)
+                J4=_vj5(VJ,_clamp(il+1,nfx),b,c); J5=_vj5(VJ,_clamp(il+2,nfx),b,c); J6=_vj5(VJ,_clamp(il+3,nfx),b,c)
+                mL=_override_marg_dev(mL,midx,marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
+                mR=_override_marg_dev(mR,midx,marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
+            end
+            FH=_hll_states(mL,mR,1,Ma,s3f); FL=_hll_states(cL,cR,1,Ma,s3f)
+            for m in 1:35; FHO[m,f,j,k]=FH[m]; FLO[m,f,j,k]=FL[m]; end
+        end
+    end
+    return nothing
+end
+function _weno_flux_lj_y!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int,g::Int,nfy::Int, Ma::Float64, s3f::Float64)
+    idx=(blockIdx().x-1)*blockDim().x+threadIdx().x; nf=ny+1
+    if idx <= nf*nx*nz
+        @inbounds begin
+            f=(idx-1)%nf+1; r=(idx-1)÷nf; i=r%nx+1; k=r÷nx+1
+            a=g+i; c=g+k; jl=g+f-1
+            cL=_cellG(G,a,jl,c); cR=_cellG(G,a,jl+1,c)
+            W1=_cellG(V,a,_clamp(jl-2,nfy),c); W2=_cellG(V,a,_clamp(jl-1,nfy),c); W3=_cellG(V,a,_clamp(jl,nfy),c)
+            W4=_cellG(V,a,_clamp(jl+1,nfy),c); W5=_cellG(V,a,_clamp(jl+2,nfy),c); W6=_cellG(V,a,_clamp(jl+3,nfy),c)
+            mL, mR = weno_faces_dev(W1,W2,W3,W4,W5,W6,cL,cR)
+            if OKL[a,c] > 0.5
+                J1=_vj5(VJ,a,_clamp(jl-2,nfy),c); J2=_vj5(VJ,a,_clamp(jl-1,nfy),c); J3=_vj5(VJ,a,_clamp(jl,nfy),c)
+                J4=_vj5(VJ,a,_clamp(jl+1,nfy),c); J5=_vj5(VJ,a,_clamp(jl+2,nfy),c); J6=_vj5(VJ,a,_clamp(jl+3,nfy),c)
+                mL=_override_marg_dev(mL,midx,marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
+                mR=_override_marg_dev(mR,midx,marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
+            end
+            FH=_hll_states(mL,mR,2,Ma,s3f); FL=_hll_states(cL,cR,2,Ma,s3f)
+            for m in 1:35; FHO[m,i,f,k]=FH[m]; FLO[m,i,f,k]=FL[m]; end
+        end
+    end
+    return nothing
+end
+function _weno_flux_lj_z!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int,g::Int,nfz::Int, Ma::Float64, s3f::Float64)
+    idx=(blockIdx().x-1)*blockDim().x+threadIdx().x; nf=nz+1
+    if idx <= nf*nx*ny
+        @inbounds begin
+            f=(idx-1)%nf+1; r=(idx-1)÷nf; i=r%nx+1; j=r÷nx+1
+            a=g+i; b=g+j; kl=g+f-1
+            cL=_cellG(G,a,b,kl); cR=_cellG(G,a,b,kl+1)
+            W1=_cellG(V,a,b,_clamp(kl-2,nfz)); W2=_cellG(V,a,b,_clamp(kl-1,nfz)); W3=_cellG(V,a,b,_clamp(kl,nfz))
+            W4=_cellG(V,a,b,_clamp(kl+1,nfz)); W5=_cellG(V,a,b,_clamp(kl+2,nfz)); W6=_cellG(V,a,b,_clamp(kl+3,nfz))
+            mL, mR = weno_faces_dev(W1,W2,W3,W4,W5,W6,cL,cR)
+            if OKL[a,b] > 0.5
+                J1=_vj5(VJ,a,b,_clamp(kl-2,nfz)); J2=_vj5(VJ,a,b,_clamp(kl-1,nfz)); J3=_vj5(VJ,a,b,_clamp(kl,nfz))
+                J4=_vj5(VJ,a,b,_clamp(kl+1,nfz)); J5=_vj5(VJ,a,b,_clamp(kl+2,nfz)); J6=_vj5(VJ,a,b,_clamp(kl+3,nfz))
+                mL=_override_marg_dev(mL,midx,marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
+                mR=_override_marg_dev(mR,midx,marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
+            end
+            FH=_hll_states(mL,mR,3,Ma,s3f); FL=_hll_states(cL,cR,3,Ma,s3f)
+            for m in 1:35; FHO[m,i,j,f]=FH[m]; FLO[m,i,j,f]=FL[m]; end
+        end
+    end
+    return nothing
+end
+
+# ===========================================================================
 # PASS 2a — per interior cell, the six per-face θ* into Th (6,nx,ny,nz):
 #   row 1=x-right, 2=x-left, 3=y-right, 4=y-left, 5=z-right, 6=z-left.
 # Mirrors highorder_3d.jl Pass-2a exactly (factor-6 bound, dt=0 short-circuit).
@@ -498,6 +714,7 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
                                     s3max::Real = 40.0, threads::Int = 128,
                                     theta_closed::Bool = true,
+                                    use_logjacobi_recon::Bool = false,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                                 zlo=false, zhi=false))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
@@ -520,18 +737,49 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     fx = (nx+1)*ny*nz; fy = (ny+1)*nx*nz; fz = (nz+1)*nx*ny
     bint = cld(nx*ny*nz, threads)
 
-    # --- Pass 1: per axis Ppt → Vavg → faces ---
+    # marginal-J scratch (opt-in log-Jacobi); PJ/VJ/OKc reused per axis
+    if use_logjacobi_recon
+        PJ  = CUDA.zeros(Float64, 5, nfx, nfy, nfz)
+        VJ  = CUDA.zeros(Float64, 5, nfx, nfy, nfz)
+        OKc = CUDA.zeros(Float64, nfx, nfy, nfz)
+    end
+
+    # --- Pass 1: per axis Ppt → Vavg → faces (raw); log-Jacobi marginal override opt-in ---
     @cuda threads=threads blocks=bcube _ppt_x!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_x!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f)
+    if use_logjacobi_recon
+        OKLx = CUDA.zeros(Float64, nfy, nfz)
+        @cuda threads=threads blocks=bcube _ppt_marg_x!(PJ, OKc, G, _MARG_IDX[1], nfx, nfy, nfz)
+        @cuda threads=threads blocks=bcube _vavg_marg_x!(VJ, PJ, nfx, nfy, nfz)
+        @cuda threads=threads blocks=cld(nfy*nfz, threads) _okline_x!(OKLx, OKc, nfx, nfy, nfz)
+        @cuda threads=threads blocks=cld(fx, threads) _weno_flux_lj_x!(FHOx, FLOx, G, V, VJ, OKLx, _MARG_IDX[1], nx, ny, nz, g, nfx, Maf, s3f)
+    else
+        @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f)
+    end
 
     @cuda threads=threads blocks=bcube _ppt_y!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_y!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f)
+    if use_logjacobi_recon
+        OKLy = CUDA.zeros(Float64, nfx, nfz)
+        @cuda threads=threads blocks=bcube _ppt_marg_y!(PJ, OKc, G, _MARG_IDX[2], nfx, nfy, nfz)
+        @cuda threads=threads blocks=bcube _vavg_marg_y!(VJ, PJ, nfx, nfy, nfz)
+        @cuda threads=threads blocks=cld(nfx*nfz, threads) _okline_y!(OKLy, OKc, nfx, nfy, nfz)
+        @cuda threads=threads blocks=cld(fy, threads) _weno_flux_lj_y!(FHOy, FLOy, G, V, VJ, OKLy, _MARG_IDX[2], nx, ny, nz, g, nfy, Maf, s3f)
+    else
+        @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f)
+    end
 
     @cuda threads=threads blocks=bcube _ppt_z!(P, G, nfx, nfy, nfz)
     @cuda threads=threads blocks=bcube _vavg_z!(V, P, nfx, nfy, nfz)
-    @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f)
+    if use_logjacobi_recon
+        OKLz = CUDA.zeros(Float64, nfx, nfy)
+        @cuda threads=threads blocks=bcube _ppt_marg_z!(PJ, OKc, G, _MARG_IDX[3], nfx, nfy, nfz)
+        @cuda threads=threads blocks=bcube _vavg_marg_z!(VJ, PJ, nfx, nfy, nfz)
+        @cuda threads=threads blocks=cld(nfx*nfy, threads) _okline_z!(OKLz, OKc, nfx, nfy, nfz)
+        @cuda threads=threads blocks=cld(fz, threads) _weno_flux_lj_z!(FHOz, FLOz, G, V, VJ, OKLz, _MARG_IDX[3], nx, ny, nz, g, nfz, Maf, s3f)
+    else
+        @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f)
+    end
 
     # --- Pass 2: θ* per cell, then blend + residual ---
     @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
@@ -555,10 +803,11 @@ order-3 residual, return the interior `(35, nx, ny, nz)`.
 """
 function residual3d_order3_gpu(G_host::Array{Float64,4}, nx::Int, ny::Int, nz::Int, g::Int,
                                dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
-                               s3max::Real = 40.0, threads::Int = 128, theta_closed::Bool = true)
+                               s3max::Real = 40.0, threads::Int = 128, theta_closed::Bool = true,
+                               use_logjacobi_recon::Bool = false)
     Gd = CuArray(G_host)
     R  = CUDA.zeros(Float64, 35, nx, ny, nz)
-    residual3d_order3_box_gpu!(R, Gd, nx, ny, nz, g, dx, dy, dz, Ma, dt; s3max=s3max, threads=threads, theta_closed=theta_closed)
+    residual3d_order3_box_gpu!(R, Gd, nx, ny, nz, g, dx, dy, dz, Ma, dt; s3max=s3max, threads=threads, theta_closed=theta_closed, use_logjacobi_recon=use_logjacobi_recon)
     CUDA.synchronize()
     return Array(R)
 end
