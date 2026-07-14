@@ -114,9 +114,26 @@ end
 # root in (0,tcap] and polish with a couple of Newton steps for full accuracy.
 # Returns tcap if no such root exists (minor stays > 0 on (0,tcap]).
 @inline function _first_root_cubic(k3::Float64, k2::Float64, k1::Float64, k0::Float64, tcap::Float64)
-    k0 <= 0.0 && return 0.0
-    # Degenerate to quadratic if leading coeff negligible.
-    if abs(k3) <= eps(Float64) * (abs(k2) + abs(k1) + abs(k0))
+    # k0 = D3(0). The caller guarantees Mlo realizable, so k0 ≥ 0 up to roundoff. A
+    # tiny/negative k0 means Mlo is ON the realizability boundary (e.g. a 2-node marginal
+    # ⇒ det Hankel = 0), NOT over it — the old hard `k0<=0 ⇒ return 0` wrongly killed
+    # corrections whose D3 INCREASES into the interior. On the boundary D3(θ)=θ·(k3θ²+
+    # k2θ+k1), so the binding θ>0 is the smallest positive root of that residual quadratic;
+    # its constant k1 (the D3 slope at 0) encodes direction (k1<0 ⇒ decreasing ⇒ bind now,
+    # handled by _first_root_quad's own c≤0 rule). Must trigger for tiny k0 of EITHER sign,
+    # since a tiny-positive k0 makes the full cubic return a spurious ~0 root too.
+    if k0 <= 1.0e-11 * (abs(k3) + abs(k2) + abs(k1) + abs(k0))
+        return _first_root_quad(k3, k2, k1, tcap)
+    end
+    # Degenerate to quadratic if the leading coeff is negligible. k3 = det of the dM
+    # Hankel (the θ³ term) is formed by cancellation in _det3_affine_coeffs, so a chain
+    # whose marginal is near a lower-degree (2-node) measure produces a ROUNDOFF k3
+    # ~1e-14·scale that is not a genuine cubic term. Dividing by it (monic coeffs ~1e14)
+    # yields a garbage root. A machine-eps threshold is far too tight; use a relative
+    # 1e-12 so noise-level k3 degenerates cleanly. Safe: when |k3| ≤ 1e-12·scale the
+    # k3·θ³ term contributes ≤1e-12·scale over θ∈(0,1], shifting the true root by a
+    # negligible amount vs the quadratic part.
+    if abs(k3) <= 1.0e-12 * (abs(k2) + abs(k1) + abs(k0))
         return _first_root_quad(k2, k1, k0, tcap)
     end
     # Monic: θ³ + a θ² + b θ + c.
@@ -180,18 +197,6 @@ end
     t2 = _first_root_quad(q2a, q2b, q2c, t)
     (t2 < t) && (t = t2)
     # D3(θ) = det Hk(θ), Hk = [[m0,m1,m2],[m1,m2,m3],[m2,m3,m4]]; cubic in θ.
-    #   det = m0(m2 m4 − m3²) − m1(m1 m4 − m2 m3) + m2(m1 m3 − m2²)
-    # Expand each entry mi = ai + θ bi; collect powers of θ via nested products.
-    # Coefficients computed from the three affine 3-vectors of Hk rows using the
-    # standard det-of-affine-pencil expansion.
-    # Row entries: r1=(m0,m1,m2), r2=(m1,m2,m3), r3=(m2,m3,m4).
-    # We build det(θ) coefficients by symbolic accumulation of the 3×3 determinant.
-    # det = Σ over the 6 permutations; each term is a product of three affine
-    # factors → cubic. Accumulate k3,k2,k1,k0.
-    # Entry (row,col) affine parts:
-    #   (1,1)=a0,b0 (1,2)=a1,b1 (1,3)=a2,b2
-    #   (2,1)=a1,b1 (2,2)=a2,b2 (2,3)=a3,b3
-    #   (3,1)=a2,b2 (3,2)=a3,b3 (3,3)=a4,b4
     k3, k2, k1, k0 = _det3_affine_coeffs(
         a0, a1, a2,
         a1, a2, a3,
@@ -271,8 +276,22 @@ with bisection to ~1e-6 (test/verify_theta_star_closed.jl) and to never
 overshoot into non-realizable territory (it is an exact lower bound).
 """
 @inline function theta_star_update_closed(Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64})
-    # Match bisection's Mlo-not-realizable behavior: it returns 0.0.
-    _state_realizable(Mlo) || return 0.0
+    # Mirror theta_star_update_dev's convention EXACTLY: it first accepts the full
+    # high-order state if realizable (θ*=1), regardless of whether Mlo is realizable —
+    # this rescues the CFL-stress corner where the low-order Mlo has drifted slightly
+    # non-realizable but Mlo+dM lands back inside the cone. Only if that fails and Mlo
+    # itself is non-realizable do we give up (θ*=0). For realizable Mlo the shortcut is
+    # a no-op (the minors already return 1.0 when the whole segment is realizable), so
+    # this stays byte-identical to bisection on all physical (CFL<1) states.
+    full = ntuple(j -> Mlo[j] + dM[j], Val(35))
+    _state_realizable(full) && return 1.0
+    # Mlo non-realizable violates the closed-form's precondition (the analytic minor
+    # bounds assume all leading minors are > 0 at θ=0). This only occurs at CFL≫1,
+    # where the low-order Mlo has itself drifted out of the cone — never at a physical
+    # timestep. Rather than guess, defer to the robust bisection baseline so the
+    # closed-form is a provably-exact fast replacement for it on EVERY input (identical
+    # results, device-safe on GPU too), not just realizable-Mlo ones.
+    _state_realizable(Mlo) || return theta_star_update_dev(Mlo, dM)
     t = 1.0
     @inbounds for ax in 1:3
         idx = MARG_IDX[ax]

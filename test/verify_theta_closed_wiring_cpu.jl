@@ -3,11 +3,11 @@ verify_theta_closed_wiring_cpu.jl — CPU-side validation of the theta_closed
 opt-in wiring in residual_ho_3d_order3! (src/numerics/highorder_3d.jl).
 
 Checks, on a small 3D order-3 residual with a nonzero dt (θ actually binds):
-  (1) theta_closed=false (default) is byte-for-byte identical to the historical
-      call (no kwarg). relL2 exactly 0.0.
-  (2) theta_closed=true vs false: the residual differs only by the θ* limiter's
-      ~1e-6 (bisection 2^-24) resolution, i.e. tiny relL2, and the marched state
-      stays finite/realizable.
+  (1) theta_closed=true (the current default, PR#19) is byte-for-byte identical to
+      the historical call (no kwarg). relL2 exactly 0.0.
+  (2) theta_closed=true vs false: closed-form vs bisection differ only by the θ*
+      limiter's ~1e-6 (bisection 2^-24) resolution, i.e. tiny relL2, and the
+      marched state stays finite/realizable.
 
 The GPU byte-identity gate (flag off == prior kernel bit-for-bit) is run
 separately (test/verify_theta_closed_gpu.jl); this is the CPU analogue and a
@@ -67,15 +67,15 @@ relL2(a,b) = (nrm = sqrt(sum(abs2, b)); sqrt(sum(abs2, a .- b)) / (nrm == 0 ? 1.
 bytes_identical(a,b) = all(reinterpret(UInt64, vec(a)) .== reinterpret(UInt64, vec(b)))
 
 @printf("== CPU wiring: theta_closed opt-in ==\n")
-@printf("  flag OFF vs historical (no kwarg):\n")
-@printf("     bit-identical:  %s\n", bytes_identical(R_off, R_hist))
-@printf("     relL2:          %.3e\n", relL2(R_off, R_hist))
+@printf("  default (no kwarg) vs flag ON (closed, the default):\n")
+@printf("     bit-identical:  %s\n", bytes_identical(R_hist, R_on))
+@printf("     relL2:          %.3e\n", relL2(R_hist, R_on))
 @printf("  flag ON vs OFF (closed vs bisection):\n")
 @printf("     relL2:          %.3e\n", relL2(R_on, R_off))
 @printf("     max|Δ|:         %.3e\n", maximum(abs, R_on .- R_off))
 @printf("     all finite ON:  %s\n", all(isfinite, R_on))
 
-@assert bytes_identical(R_off, R_hist) "flag OFF is NOT byte-identical to historical!"
+@assert bytes_identical(R_hist, R_on) "default (no kwarg) is NOT the closed-form path!"
 @assert relL2(R_on, R_off) < 1e-4 "closed form disagrees too much: $(relL2(R_on,R_off))"
 @assert all(isfinite, R_on) "flag ON produced non-finite residual!"
 
@@ -105,4 +105,4 @@ rhomin = minimum(@view Mw[halo+1:halo+nx, halo+1:halo+ny, :, 1])
 @printf("     realizable:  %d / %d\n", nreal, ntot)
 @assert rhomin > 0.0 "flag ON march produced rho<=0!"
 @assert nreal == ntot "flag ON march produced non-realizable cells: $(ntot-nreal)"
-println("\nOK: flag OFF byte-identical; flag ON agrees to ~limiter resolution, finite, rho>0, realizable.")
+println("\nOK: default==closed byte-identical; closed vs bisection agrees to ~limiter resolution, finite, rho>0, realizable.")
