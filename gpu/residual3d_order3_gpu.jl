@@ -55,20 +55,16 @@ using .HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
 include(joinpath(@__DIR__, "..", "src", "numerics", "weno5_dev.jl"))
 using .Weno5Dev: weno5z, deconv5, conv5, smooth5
 include(joinpath(@__DIR__, "..", "src", "numerics", "logjacobi_recon_dev.jl"))
-using .LogJacobiReconDev: marg_m_to_J, marg_J_to_m
+using .LogJacobiReconDev: marg_m_to_J, marg_J_to_m, _affine_remap
 # per-axis 5 marginal slot indices (= moment_indices.MARG_IDX; hardcoded to avoid a
 # device include of the indices module; verified against IJK: x=(1..5), y=(0,1,2,3,4)_y,
 # z=(0,1,2,3,4)_z).
 const _MARG_IDX = ((1,2,3,4,5), (1,6,10,13,15), (1,16,20,23,25))
-# NTuple rebuild overriding the 5 marginal slots (device copy of CPU _override_marginal).
-@inline function _override_marg_dev(m::NTuple{35,Float64}, midx::NTuple{5,Int}, jv::NTuple{5,Float64})
-    ntuple(Val(35)) do q
-        q == midx[1] ? jv[1] :
-        q == midx[2] ? jv[2] :
-        q == midx[3] ? jv[3] :
-        q == midx[4] ? jv[4] :
-        q == midx[5] ? jv[5] : m[q]
-    end
+# Realizability-safe log-J override: affine-remap the whole state so its AX-marginal
+# matches the log-J (rho,u,var) reconstruction jv (device copy of CPU residual_line3).
+@inline function _lj_remap_dev(m::NTuple{35,Float64}, v::Val, jv::NTuple{5,Float64})
+    ρ = jv[1]; u = jv[2] / ρ; vv = jv[3] / ρ - u * u
+    _affine_remap(m, v, ρ, u, vv)
 end
 @inline _marg5(G, midx, a, b, c) = @inbounds (G[midx[1],a,b,c], G[midx[2],a,b,c], G[midx[3],a,b,c], G[midx[4],a,b,c], G[midx[5],a,b,c])
 @inline _vj5(VJ, a, b, c) = @inbounds (VJ[1,a,b,c], VJ[2,a,b,c], VJ[3,a,b,c], VJ[4,a,b,c], VJ[5,a,b,c])
@@ -452,8 +448,8 @@ function _weno_flux_lj_x!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int
             if OKL[b,c] > 0.5
                 J1=_vj5(VJ,_clamp(il-2,nfx),b,c); J2=_vj5(VJ,_clamp(il-1,nfx),b,c); J3=_vj5(VJ,_clamp(il,nfx),b,c)
                 J4=_vj5(VJ,_clamp(il+1,nfx),b,c); J5=_vj5(VJ,_clamp(il+2,nfx),b,c); J6=_vj5(VJ,_clamp(il+3,nfx),b,c)
-                mL=_override_marg_dev(mL,midx,marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
-                mR=_override_marg_dev(mR,midx,marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
+                mL=_lj_remap_dev(mL,Val(1),marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
+                mR=_lj_remap_dev(mR,Val(1),marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
             end
             FH=_hll_states(mL,mR,1,Ma,s3f); FL=_hll_states(cL,cR,1,Ma,s3f)
             for m in 1:35; FHO[m,f,j,k]=FH[m]; FLO[m,f,j,k]=FL[m]; end
@@ -474,8 +470,8 @@ function _weno_flux_lj_y!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int
             if OKL[a,c] > 0.5
                 J1=_vj5(VJ,a,_clamp(jl-2,nfy),c); J2=_vj5(VJ,a,_clamp(jl-1,nfy),c); J3=_vj5(VJ,a,_clamp(jl,nfy),c)
                 J4=_vj5(VJ,a,_clamp(jl+1,nfy),c); J5=_vj5(VJ,a,_clamp(jl+2,nfy),c); J6=_vj5(VJ,a,_clamp(jl+3,nfy),c)
-                mL=_override_marg_dev(mL,midx,marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
-                mR=_override_marg_dev(mR,midx,marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
+                mL=_lj_remap_dev(mL,Val(2),marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
+                mR=_lj_remap_dev(mR,Val(2),marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
             end
             FH=_hll_states(mL,mR,2,Ma,s3f); FL=_hll_states(cL,cR,2,Ma,s3f)
             for m in 1:35; FHO[m,i,f,k]=FH[m]; FLO[m,i,f,k]=FL[m]; end
@@ -496,8 +492,8 @@ function _weno_flux_lj_z!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int
             if OKL[a,b] > 0.5
                 J1=_vj5(VJ,a,b,_clamp(kl-2,nfz)); J2=_vj5(VJ,a,b,_clamp(kl-1,nfz)); J3=_vj5(VJ,a,b,_clamp(kl,nfz))
                 J4=_vj5(VJ,a,b,_clamp(kl+1,nfz)); J5=_vj5(VJ,a,b,_clamp(kl+2,nfz)); J6=_vj5(VJ,a,b,_clamp(kl+3,nfz))
-                mL=_override_marg_dev(mL,midx,marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
-                mR=_override_marg_dev(mR,midx,marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
+                mL=_lj_remap_dev(mL,Val(3),marg_J_to_m(_wenoJ5(J1,J2,J3,J4,J5)))
+                mR=_lj_remap_dev(mR,Val(3),marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
             end
             FH=_hll_states(mL,mR,3,Ma,s3f); FL=_hll_states(cL,cR,3,Ma,s3f)
             for m in 1:35; FHO[m,i,j,f]=FH[m]; FLO[m,i,j,f]=FL[m]; end

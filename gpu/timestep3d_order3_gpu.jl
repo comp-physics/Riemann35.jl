@@ -237,7 +237,7 @@ in place and left with its outflow halos refilled.
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
-                             theta_closed::Bool = true)
+                             theta_closed::Bool = true, use_logjacobi_recon::Bool = false)
     @assert size(G, 1) == 35 "G must be (35,nf,nf,nf)"
     nf = size(G, 2)
     @assert size(G) == (35, nf, nf, nf) "G must be a cube (35,nf,nf,nf)"
@@ -273,7 +273,8 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         for (a, b, c) in stages
             @cuda threads=threads blocks=bcube _refill_halo!(G, nf, g, n)
             residual3d_order3_box_gpu!(R, G, n, n, n, g, dxf, dxf, dxf, Maf, dt;
-                                       s3max=s3f, threads=threads, theta_closed=theta_closed)
+                                       s3max=s3f, threads=threads, theta_closed=theta_closed,
+                                       use_logjacobi_recon=use_logjacobi_recon)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, n, n, g, Maf, s3f)
             if stage_bgk

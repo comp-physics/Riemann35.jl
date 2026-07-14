@@ -30,7 +30,92 @@ module LogJacobiReconDev
 
 include(joinpath(@__DIR__, "weno5_dev.jl")); using .Weno5Dev: weno5z, deconv5, conv5, smooth5
 
-export marg_m_to_J, marg_J_to_m, logjacobi_marginal_faces
+export marg_m_to_J, marg_J_to_m, logjacobi_marginal_faces, affine_remap_axis, _affine_remap
+
+# ---------------------------------------------------------------------------
+# Realizability-safe marginal override via an AFFINE velocity remap.
+#
+# The naive override (swap the 5 axis-marginal raw moments, keep the 30 others)
+# breaks joint realizability: a sharper marginal variance leaves the cross moments
+# oversized, the correlation exceeds 1, and the wave-speed eig NaNs (root-caused
+# 2026-07-13). Instead we apply log-J's marginal as an affine map of the axis
+# velocity, u -> beta + alpha*u (alpha = sigma_new/sigma_raw), matching log-J's
+# mean+variance while transforming EVERY moment (cross included) consistently.
+# Realizability is invariant under an affine change of one velocity variable, so
+# the result is realizable by construction (no gate). Density is matched by a
+# uniform scale gamma. Skew/kurtosis stay at the raw (scaled) values (only 2 DOF
+# in an affine map); the measured log-J fidelity gain is 2nd-order, so this keeps it.
+#
+# M'_{ijk} = gamma * sum_{p=0}^{e} C(e,p) alpha^p beta^{e-p} M_{sib(p)}   (e = axis power)
+# ---------------------------------------------------------------------------
+const _IJK35 = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
+                (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),
+                (0,3,0),(1,3,0),(0,4,0),
+                (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),
+                (0,0,3),(1,0,3),(0,0,4),
+                (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),
+                (0,1,2),(1,1,2),(0,1,3),(0,2,2))
+const _MARG_LJ = ((1,2,3,4,5),(1,6,10,13,15),(1,16,20,23,25))  # marginal slots per axis
+# per-axis: axis power e_q, and sibling slots for p=0..e padded to length 5 (pad=1)
+const _AXPOW, _SIB = let
+    slot = Dict(t=>q for (q,t) in enumerate(_IJK35))
+    axpow = ntuple(ax->ntuple(q->_IJK35[q][ax], 35), 3)
+    sib = ntuple(ax->ntuple(q->begin
+            e = _IJK35[q][ax]
+            ntuple(pp->begin p = pp-1
+                p <= e ? slot[ntuple(d->d==ax ? p : _IJK35[q][d], 3)] : 1
+            end, 5)
+        end, 35), 3)
+    (axpow, sib)
+end
+# branch-based binomial (device-safe: no runtime tuple indexing) for e,p <= 4
+@inline _binom4(e::Int, p::Int) =
+    e == 1 ? 1.0 :
+    e == 2 ? (p == 1 ? 2.0 : 1.0) :
+    e == 3 ? (p == 1 || p == 2 ? 3.0 : 1.0) :
+    e == 4 ? (p == 2 ? 6.0 : (p == 1 || p == 3 ? 4.0 : 1.0)) : 1.0
+# exact integer power by repeated multiply (identical CPU/GPU; avoids the runtime
+# `x^p` -> pow(x, Float64(p)) = exp(p*log x) path that diverges ~1e-7 on device)
+@inline function _ipow(x::Float64, p::Int)
+    r = 1.0
+    @inbounds for _ in 1:p
+        r *= x
+    end
+    r
+end
+
+# Device-safe core: AX is a compile-time axis (Val), so every table lookup and the
+# per-slot loop bound fold to constants (required for GPU). Remaps the full 35-moment
+# state `m` so its AX-marginal has (rho_new,u_new,var_new) via the affine velocity map.
+# Guards: degenerate raw/target marginal (rho<=0, var<=0) -> return `m` unchanged.
+@inline function _affine_remap(m::NTuple{35,Float64}, ::Val{AX},
+                               rho_new::Float64, u_new::Float64, var_new::Float64) where {AX}
+    mg = _MARG_LJ[AX]
+    rho = m[mg[1]]
+    (isfinite(rho) && rho > 0.0) || return m
+    u_raw   = m[mg[2]] / rho
+    var_raw = m[mg[3]] / rho - u_raw * u_raw
+    (var_raw > 0.0 && var_new > 0.0 && rho_new > 0.0 && isfinite(var_new) && isfinite(u_new)) || return m
+    α = sqrt(var_new / var_raw)
+    β = u_new - α * u_raw
+    γ = rho_new / rho
+    axp = _AXPOW[AX]; sibs = _SIB[AX]
+    ntuple(Val(35)) do q
+        @inbounds e = axp[q]
+        @inbounds sib = sibs[q]
+        acc = 0.0
+        @inbounds for pp in 0:e
+            acc += _binom4(e, pp) * _ipow(α, pp) * _ipow(β, e - pp) * m[sib[pp+1]]
+        end
+        γ * acc
+    end
+end
+
+# CPU convenience: runtime axis (branch into the compile-time core; keeps device parity).
+@inline affine_remap_axis(m::NTuple{35,Float64}, ax::Int, rn::Float64, un::Float64, vn::Float64) =
+    ax == 1 ? _affine_remap(m, Val(1), rn, un, vn) :
+    ax == 2 ? _affine_remap(m, Val(2), rn, un, vn) :
+              _affine_remap(m, Val(3), rn, un, vn)
 
 # ---------------------------------------------------------------------------
 # m -> J on a 5-element marginal (m0,m1,m2,m3,m4). Returns (ok, J::NTuple{5}).

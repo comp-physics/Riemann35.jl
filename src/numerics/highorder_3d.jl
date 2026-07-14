@@ -10,7 +10,7 @@ include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
     recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev, recon_vars_realizable
 # OPT-IN log-Jacobi marginal reconstruction (default OFF; byte-identical when off).
 include(joinpath(@__DIR__, "logjacobi_recon_dev.jl")); using .LogJacobiReconDev:
-    logjacobi_marginal_faces
+    logjacobi_marginal_faces, affine_remap_axis
 using .MomentIndices: MARG_IDX
 
 # ---------------------------------------------------------------------------
@@ -41,20 +41,6 @@ end
 #           conv5 (recon-var averages) → weno5z L/R → from_recon_vars_dev →
 #           realizability fallback → _face_flux_tup (HLL).
 # ---------------------------------------------------------------------------
-# Override the 5 marginal slots (canonical indices `midx`, per axis) of a raw
-# 35-moment NTuple with the log-Jacobi-reconstructed marginal `jvals`. Device-safe
-# (branch-light NTuple rebuild; the 5 marginal slots differ per axis so a per-slot
-# ternary chain is used rather than scatter-assignment). Only reached under the flag.
-@inline function _override_marginal(m::NTuple{35,Float64}, midx::NTuple{5,Int},
-                                    jvals::NTuple{5,Float64})
-    ntuple(Val(35)) do q
-        q == midx[1] ? jvals[1] :
-        q == midx[2] ? jvals[2] :
-        q == midx[3] ? jvals[3] :
-        q == midx[4] ? jvals[4] :
-        q == midx[5] ? jvals[5] : m[q]
-    end
-end
 
 """
     residual_line3(Mext, ds, axis, Ma; g=4, s3max=40.0) -> (F_HO, F_LO)
@@ -138,14 +124,18 @@ function residual_line3(Mext::AbstractMatrix, ds::Real, axis::Int, Ma::Real;
         # Zhang–Shu realizability scaling toward the cell mean — all in weno_faces_dev.
         mL, mR = weno_faces_dev(_vv(il-2), _vv(il-1), _vv(il),
                                 _vv(il+1), _vv(il+2), _vv(il+3), cL, cR)
-        # OPT-IN: override the marginal slots with the log-Jacobi reconstruction
-        # (realizable-by-construction 1D chain; contact-exact). Cross moments in
-        # mL/mR are unchanged. Off by default → this branch is skipped entirely.
+        # OPT-IN: apply the log-Jacobi marginal via a realizability-safe AFFINE remap
+        # of the whole face state (mean+variance+density matched to log-J; cross moments
+        # transform consistently, so the joint state stays in the cone — see
+        # affine_remap_axis). Replaces the naive 5-slot swap, which broke joint
+        # realizability and NaN'd the wave-speed eig at sharp high-Ma edges. Off by
+        # default → this branch is skipped entirely.
         if lj_ok
-            midx = MARG_IDX[axis]
             jL = lj_L[f]; jR = lj_R[f]
-            mL = _override_marginal(mL, midx, jL)
-            mR = _override_marginal(mR, midx, jR)
+            ρL = jL[1]; uL = jL[2]/ρL; vL = jL[3]/ρL - uL*uL
+            ρR = jR[1]; uR = jR[2]/ρR; vR = jR[3]/ρR - uR*uR
+            mL = affine_remap_axis(mL, axis, ρL, uL, vL)
+            mR = affine_remap_axis(mR, axis, ρR, uR, vR)
         end
         F_HO[f] = _face_flux_tup(mL, mR, axis, Ma, s3max)
         F_LO[f] = _face_flux_tup(cL, cR, axis, Ma, s3max)
