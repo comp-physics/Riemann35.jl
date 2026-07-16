@@ -282,3 +282,33 @@ NBATCH=2097152 julia gpu/bench/bench_eig.jl   # batched-eig GPU vs CPU benchmark
 The scripts `Pkg.activate(@__DIR__)` — first run `Pkg.add("CUDA")` in this dir (writes to the scratch
 depot). `gpu/validation/test_cuda.jl` also writes `LocalPreferences.toml` with `[CUDA_Runtime_jll] version="local"`
 if you want the system toolkit instead of artifacts.
+
+### Compile time — pass `-g0` (measured ~24× faster ptxas)
+
+The order-3 kernels (WENO5 + θ\*-IDP + realizability, fused into one huge kernel) are so large that
+`ptxas` spends most of its time generating **debug/line-info metadata**, not optimizing. Launching Julia
+with **`-g0`** (debug level 0) drops `--generate-line-info` and the `.target debug` header — release-mode
+ptxas. Measured on a **Tesla V100** with a clean same-script A/B:
+
+| | ptxas time |
+|---|---|
+| default (`-g1`) | ~742 s (~12 min) |
+| **`-g0`** | **~31 s** |
+
+That's a **~24× compile-time cut**, and it's **numerically byte-identical** — only debug info is stripped;
+the emitted SASS (and therefore every result) is unchanged. Use the convenience wrapper:
+
+```bash
+gpu/run_g0.sh gpu/run_staged.jl <args...>     # = julia -g0 --project=gpu/gpuenv2 ...
+```
+
+or just add `-g0` to any invocation (`julia -g0 --project=gpu/gpuenv2 …`). (Note: the include-based scripts
+recompile from scratch every process — Julia's persistent cubin cache only persists cubins compiled during
+**package** precompilation, which these are not — so `-g0` is paid on every launch and is worth automating.)
+
+**Where the per-step time actually goes** (V100, manual per-call `CUDA.@elapsed` timing, ms): the θ\*-IDP/WENO5
+residual is **71% of the whole step** (33.4 ms vs 4.2 ms for a plain first-order HLL residual → the limiter
+machinery is 87% of the residual), and the halo refill is the 2nd biggest at 7.1 ms; projection/BGK/RK are
+each <0.4 ms. So for **smooth, shock-free flows the θ\*-IDP limiter is dead weight** — dropping to order-2
+both compiles far faster and runs ~8× faster per residual. Keep order-3 for the shock/vacuum-heavy high-Ma
+runs where the limiter earns its keep.
