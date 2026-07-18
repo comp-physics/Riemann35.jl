@@ -31,15 +31,25 @@ function apply_flux_update_3d!(Mnp::Array{Float64,4}, M::Array{Float64,4}, F::Ar
                                vpmin::Array{Float64,3}, vpmax::Array{Float64,3},
                                vpmin_ext::Array{Float64,3}, vpmax_ext::Array{Float64,3},
                                nx::Int, ny::Int, nz::Int, halo::Int, dt::Float64, ds::Float64,
-                               decomp, axis::Int)
+                               decomp, axis::Int; ghost_lo::Bool=false, ghost_hi::Bool=false)
     # Initialize with current state
     Mnp .= M
-    
+
+    # ghost_lo/ghost_hi (OPT-IN, default false): treat a GLOBAL boundary in this
+    # axis as ghost-backed — i.e. update the interface through the halo value the
+    # caller prescribed (via apply_physical_bc_3d!) instead of letting pas_HLL apply
+    # its internal zero-gradient BC. This is exactly how a processor (MPI) boundary
+    # is already handled; it lets a physical inflow/outflow/periodic BC use its
+    # ghost. Defaults false => byte-identical to the original :copy path.
+    # Only meaningful at a true global boundary (no MPI neighbor on that side).
+
     if axis == 1
         # X-direction flux update (loop over j, k)
-        has_left_neighbor = (decomp.neighbors.left != -1)
-        has_right_neighbor = (decomp.neighbors.right != -1)
-        
+        # A ghost-backed global boundary behaves like a processor boundary
+        # (use the prescribed halo, skip pas_HLL's internal zero-gradient BC).
+        has_left_neighbor = (decomp.neighbors.left != -1) || ghost_lo
+        has_right_neighbor = (decomp.neighbors.right != -1) || ghost_hi
+
         for k in 1:nz
             for j in 1:ny
                 jh = j + halo
@@ -107,9 +117,11 @@ function apply_flux_update_3d!(Mnp::Array{Float64,4}, M::Array{Float64,4}, F::Ar
         
     elseif axis == 2
         # Y-direction flux update (loop over i, k)
-        has_down_neighbor = (decomp.neighbors.down != -1)
-        has_up_neighbor = (decomp.neighbors.up != -1)
-        
+        # A ghost-backed global boundary behaves like a processor boundary
+        # (use the prescribed halo, skip pas_HLL's internal zero-gradient BC).
+        has_down_neighbor = (decomp.neighbors.down != -1) || ghost_lo
+        has_up_neighbor = (decomp.neighbors.up != -1) || ghost_hi
+
         for k in 1:nz
             for i in 1:nx
                 ih = i + halo
