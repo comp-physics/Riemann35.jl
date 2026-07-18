@@ -72,7 +72,11 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     scheme::Symbol=:recommended, pressure_recon=nothing, stage_bgk=nothing, Kn::Real=Inf,
                     s3max::Real=max(40.0, 4.0 + abs(Ma) / 2.0),
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
-                    theta_closed::Bool=true,
+                    theta_closed::Bool=true, bc=:copy, inlet=nothing, live_diag::Bool=false,
+                    inlet_fn=nothing,
+                    obst_state=nothing, obst_cx::Real=0.0, obst_cy::Real=0.0, obst_r2::Real=0.0,
+                    sponge_ref=nothing, sponge_width::Int=0, sponge_rate::Real=0.0,
+                    noise_amp::Real=0.0, noise_box=nothing, fluct_intensity::Real=0.0,
                     params=Dict{String,Any}(), include_initial::Bool=true, web_dir=nothing)
     @assert size(M0, 1) == 35 "M0 must be (35,nx,ny,nz)"
     @assert snapshot_interval >= 1 "snapshot_interval must be >= 1"
@@ -107,10 +111,17 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     # z-slab march (march3d_slab_gpu!(order=3)) in the segment loop below.
     order3 = (order == 3)
     order3_single = order3 && !multigpu
+    bc in (:copy, :crossflow, :crossflow_absorb_y) ||
+        throw(ArgumentError("unknown bc=$bc (use :copy, :crossflow, or :crossflow_absorb_y)"))
+    if bc != :copy
+        order3_single ||
+            error("bc=$bc is supported on the single-GPU order-3 path only (got order=$order, multigpu=$multigpu)")
+        inlet === nothing && error("bc=$bc requires inlet (35-vector inlet Maxwellian)")
+    end
     G3 = nothing
     if order3_single
-        (size(M0, 3) == n && nzloc == n) ||
-            error("order-3 GPU requires a cubic interior (nx==ny==nz); got interior $(size(M0)[2:4])")
+        # Rectangular interiors are supported (build_haloed_cube + march3d_order3_gpu!
+        # generalize nx,ny,nz; the cubic crossing-jets path is the nx==ny==nz case).
         (limiter || proj_first_order || riemann_solver !== :hll) &&
             error("order-3 GPU path does not support the order-1/2 flux options " *
                   "(limiter/proj_first_order/riemann_solver); got limiter=$limiter " *
@@ -145,6 +156,26 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
         if writer
             snap += 1
             _write_snap!(jf, snap, G, t, step)
+            # In-situ shedding diagnostic (opt-in). Wake antisymmetric transverse-
+            # momentum dipole D = Σ_wake ρv·(y-yc): ~0/steady for a symmetric or
+            # steadily-deflected wake, OSCILLATING if the wake sheds. Also the
+            # centerline v and field-max |v|. Printed live so the trend is visible
+            # within a few D/U (no need to wait for the whole run).
+            if live_diag
+                nx, ny = size(G, 1), size(G, 2); kk = 1
+                yc = (ny + 1) / 2
+                x0 = cld(nx, 3) + 3                     # just downstream of the bubble (Lx/3)
+                D = 0.0; mv = 0.0
+                @inbounds for i in x0:nx, j in 1:ny
+                    rho = G[i, j, kk, 1]; rv = G[i, j, kk, 6]
+                    D += rv * (j - yc)
+                    av = abs(rv / (rho > 1e-30 ? rho : 1e-30)); mv = av > mv ? av : mv
+                end
+                vc = G[min(x0 + 5, nx), cld(ny, 2), kk, 6] / G[min(x0 + 5, nx), cld(ny, 2), kk, 1]
+                println("  [diag] t=", round(t, digits = 3), "  wake-dipole=", round(D, sigdigits = 4),
+                        "  v_centerline=", round(vc, sigdigits = 4), "  max|v|=", round(mv, digits = 4))
+                flush(stdout)
+            end
         end
         multigpu && MPI.Barrier(comm)
     end
@@ -153,10 +184,17 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     while step < nstep
         k = min(snapshot_interval, nstep - step)
         seg = dts_host === nothing ? nothing : dts_host[step+1:step+k]
+        # gentle-start: pick the ramped inlet Maxwellian for the current time (the
+        # inlet is fixed within a segment; segments are ~snapshot_interval steps).
+        seg_inlet = inlet_fn === nothing ? inlet : inlet_fn(t)
         used = if order3_single
             u = march3d_order3_gpu!(G3, dx, Ma, k; dts=seg, s3max=s3max,
                                     stage_bgk=stage_bgk, Kn=Kn, threads=threads,
-                                    theta_closed=theta_closed)
+                                    theta_closed=theta_closed, bc=bc, inlet=seg_inlet,
+                                    obst_state=obst_state, obst_cx=obst_cx, obst_cy=obst_cy, obst_r2=obst_r2,
+                                    sponge_ref=sponge_ref, sponge_width=sponge_width, sponge_rate=sponge_rate,
+                                    noise_amp=noise_amp, noise_box=noise_box,
+                                    fluct_intensity=fluct_intensity)
             interior_from_cube!(Md, G3; threads=threads)   # sync interior for the snapshot
             u
         elseif multigpu
@@ -169,6 +207,10 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                          pressure_recon=pressure_recon, stage_bgk=stage_bgk, Kn=Kn, s3max=s3max, threads=threads)
         end
         t += sum(used); step += k
+        # Reclaim per-segment march scratch (R/G0/svec/sbuf are re-allocated each
+        # march call; without this the freed-but-uncollected CuArrays accumulate and
+        # OOM long runs). Pure memory management — no effect on results.
+        GC.gc(false); CUDA.reclaim()
         dump!()
     end
 

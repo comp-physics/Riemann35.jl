@@ -98,7 +98,12 @@ function simulation_runner(params)
     # first-order anchor) it needs. See residual_ho_3d_order3!.
     # Orders 1 and 2 use halo = 2 (byte-identical to the original validated paths).
     halo = (spatial_order == 3) ? 8 : 2
-    bc = :copy
+    # Boundary condition (OPT-IN via params.bc; default :copy = zero-gradient on
+    # every face, byte-identical to the historical path). :crossflow adds an
+    # inlet-Maxwellian low-x face + zero-gradient outflow high-x face + periodic y
+    # (R.O. Fox dense-bubble validation; see apply_physical_bc_3d! and CROSSFLOW_INLET).
+    bc = get(params, :bc, :copy)
+    faces = expand_bc(bc)                       # canonical six-face BC spec (face_bc.jl)
 
     # Unpack parameters
     Nx = params.Nx
@@ -549,9 +554,92 @@ function simulation_runner(params)
         end
     end
     
+    # Crossflow inlet Maxwellian (opt-in :crossflow BC). Default: the :bubble
+    # ambient state (rho_out, u_out, T_out); override with params.inlet_state.
+    # Single rank only (periodic-y wrap has no multi-rank topology yet).
+    if has_inlet(faces)
+        nprocs == 1 ||
+            error("inlet/crossflow BC currently requires a single MPI rank (got $nprocs)")
+        inlet = get(params, :inlet_state, nothing)
+        if inlet === nothing && get(params, :ic_type, nothing) === :bubble
+            # Rebuild the ambient (matches Mr_out in the :bubble IC branch).
+            rho_out = get(params, :rho_out, 1.0)
+            u_out   = get(params, :u_out, 0.0)
+            T_out   = get(params, :T_out, T)
+            Co110 = r110 * sqrt(T_out * T_out)
+            Co101 = r101 * sqrt(T_out * T_out)
+            Co011 = r011 * sqrt(T_out * T_out)
+            inlet = InitializeM4_35(rho_out, u_out, 0.0, 0.0, T_out, Co110, Co101, T_out, Co011, T_out)
+        end
+        inlet === nothing &&
+            error(":crossflow BC requires params.inlet_state (or ic_type=:bubble to default to the ambient)")
+        CROSSFLOW_INLET[] = Float64.(collect(inlet))
+    end
+
+    # Gentle-start inlet ramp (opt-in): ramp the inlet velocity 0 -> crossflow_u
+    # over crossflow_uramp D/U. The inlet Maxwellian is recomputed each step from
+    # the current time. Default (uramp=0) leaves the inlet fixed => byte-identical.
+    crossflow_uramp = Float64(get(params, :crossflow_uramp, 0.0))
+    crossflow_u     = Float64(get(params, :crossflow_u, 0.0))
+    crossflow_rho   = Float64(get(params, :crossflow_rho, get(params, :rho_out, 1.0)))
+    crossflow_Tin   = Float64(get(params, :crossflow_T, get(params, :T_out, T)))
+
+    # Rigid immersed obstacle (opt-in, hold_obstacle=true): a disk of cells is
+    # held at a FIXED rest Maxwellian (u=0, ambient rho/T => no density-contrast
+    # acoustic) every step — a rigid, incompressible, no-slip cylinder (crude
+    # diffuse-wall/bounce-back). Unlike the compressible dense-gas bubble (which
+    # breathes), this sheds a Kármán street above Re_c, matching the McMullen &
+    # Gallis rigid-cylinder setup. Precompute the interior mask once.
+    hold_obstacle = get(params, :hold_obstacle, false)
+    obst_state = Float64[]
+    obst_mask = falses(0, 0)
+    if hold_obstacle
+        oxc  = Float64(get(params, :obstacle_xc, get(params, :bubble_xc, (xmin+xmax)/2)))
+        oyc  = Float64(get(params, :obstacle_yc, get(params, :bubble_yc, (ymin+ymax)/2)))
+        orad = Float64(get(params, :obstacle_radius, get(params, :bubble_radius, 0.5)))
+        owrho = Float64(get(params, :obstacle_rho, get(params, :rho_out, 1.0)))
+        owT   = Float64(get(params, :obstacle_T, get(params, :T_out, T)))
+        oC110 = r110*sqrt(owT*owT); oC101 = r101*sqrt(owT*owT); oC011 = r011*sqrt(owT*owT)
+        obst_state = Float64.(collect(
+            InitializeM4_35(owrho, 0.0, 0.0, 0.0, owT, oC110, oC101, owT, oC011, owT)))
+        obst_mask = falses(nx, ny)
+        for ii in 1:nx, jj in 1:ny
+            gi = i0i1[1] + ii - 1; gj = j0j1[1] + jj - 1
+            xc = xmin + (gi - 0.5) * dx_global; yc = ymin + (gj - 0.5) * dy_global
+            obst_mask[ii, jj] = (xc - oxc)^2 + (yc - oyc)^2 <= orad^2
+        end
+    end
+
+    # Non-reflecting sponge layer (opt-in via any :sponge face; see sponge.jl).
+    # A boundary zone relaxes the moments toward a fixed freestream Maxwellian
+    # (exact-exp, like BGK) so outgoing waves are absorbed instead of reflected
+    # off the periodic/outflow face — the fix for the periodic-y box-resonance
+    # mode. No sponge face => sponge_ramp is empty => byte-identical no-op.
+    sponge_ramp = zeros(Float64, 0, 0, 0)
+    sponge_ref  = Float64[]
+    sponge_rate = 0.0
+    if has_sponge(faces)
+        sw   = Int(get(params, :sponge_width, max(4, round(Int, 0.08 * min(nx, ny)))))
+        sponge_rate = Float64(get(params, :sponge_rate, 10.0))   # 1/time (U=D=1 code units)
+        sref = get(params, :sponge_ref, nothing)
+        if sref === nothing
+            sref = CROSSFLOW_INLET[]                              # crossflow freestream, if set
+        end
+        if sref === nothing
+            # default freestream: ambient Maxwellian at the freestream velocity
+            rho_ref = Float64(get(params, :crossflow_rho, get(params, :rho_out, 1.0)))
+            u_ref   = Float64(get(params, :sponge_u, get(params, :crossflow_u, get(params, :u_out, 0.0))))
+            T_ref   = Float64(get(params, :T_out, T))
+            sCo110 = r110*sqrt(T_ref*T_ref); sCo101 = r101*sqrt(T_ref*T_ref); sCo011 = r011*sqrt(T_ref*T_ref)
+            sref = InitializeM4_35(rho_ref, u_ref, 0.0, 0.0, T_ref, sCo110, sCo101, T_ref, sCo011, T_ref)
+        end
+        sponge_ref  = Float64.(collect(sref))
+        sponge_ramp = build_sponge_ramp(faces, nx, ny, nz, sw)
+    end
+
     # Initial halo exchange
     halo_exchange_3d!(M, decomp, bc)
-    
+
     # Save initial condition as first snapshot if requested
     i0i1 = decomp.istart_iend
     j0j1 = decomp.jstart_jend
@@ -648,8 +736,16 @@ function simulation_runner(params)
     while t < tmax && nn < nnmax
         nn += 1
         step_start_time = time()
-        
-        
+
+        # Gentle-start: update the inlet Maxwellian to the ramped velocity at the
+        # current time (no-op when crossflow_uramp == 0).
+        if has_inlet(faces) && crossflow_uramp > 0.0
+            u_now = crossflow_u * min(1.0, t / crossflow_uramp)
+            CROSSFLOW_INLET[] = Float64.(collect(
+                InitializeM4_35(crossflow_rho, u_now, 0.0, 0.0, crossflow_Tin,
+                                0.0, 0.0, crossflow_Tin, 0.0, crossflow_Tin)))
+        end
+
         # Compute fluxes and wave speeds for interior cells
         for k in 1:nz
             for i in 1:nx
@@ -856,17 +952,27 @@ function simulation_runner(params)
                                stage_bgk_kn=(stage_bgk ? Kn : nothing))
         else
             # --- FIRST-ORDER PATH (spatial_order=1, default) ---
-            # Byte-identical to the original validated path.
+            # Byte-identical to the original validated path (bc == :copy).
+            # Ghost-back an axis whose face carries a PRESCRIBED halo (inlet or
+            # periodic) so those ghosts drive the interface flux instead of
+            # pas_HLL's internal zero-gradient. A plain :outflow or :sponge face
+            # keeps pas_HLL's internal zero-gradient (waves leave; the sponge
+            # absorbs in the interior). For :crossflow both x and y are prescribed
+            # => byte-identical to the old xf=true; for :copy neither => xf=false.
+            xghost = (faces.xlo in (:inlet, :periodic)) || (faces.xhi in (:inlet, :periodic))
+            yghost = (faces.ylo in (:inlet, :periodic)) || (faces.yhi in (:inlet, :periodic))
 
             # X-direction flux update
             Mnpx = similar(M)
             apply_flux_update_3d!(Mnpx, M, Fx, vpxmin, vpxmax, vpxmin_ext, vpxmax_ext,
-                                  nx, ny, nz, halo, dt, dx, decomp, 1)
+                                  nx, ny, nz, halo, dt, dx, decomp, 1;
+                                  ghost_lo=xghost, ghost_hi=xghost)
 
             # Y-direction flux update
             Mnpy = similar(M)
             apply_flux_update_3d!(Mnpy, M, Fy, vpymin, vpymax, vpymin_ext, vpymax_ext,
-                                  nx, ny, nz, halo, dt, dy, decomp, 2)
+                                  nx, ny, nz, halo, dt, dy, decomp, 2;
+                                  ghost_lo=yghost, ghost_hi=yghost)
 
             # Z-direction flux update
             Mnpz = similar(M)
@@ -881,6 +987,16 @@ function simulation_runner(params)
                 Mnpy[halo+1:halo+nx, halo+1:halo+ny, :, :] +
                 Mnpz[halo+1:halo+nx, halo+1:halo+ny, :, :] -
                 2.0 .* M[halo+1:halo+nx, halo+1:halo+ny, :, :]
+
+            # Crossflow inlet: pin the leftmost interior column to the inlet
+            # Maxwellian (MATLAB main loop sets Mnpx(1,:)=Minlet). Single rank, so
+            # this column is the global low-x face. The ambient inlet is y-uniform.
+            if faces.xlo === :inlet && decomp.neighbors.left == -1
+                inlet = CROSSFLOW_INLET[]
+                @inbounds for m in 1:Nmom
+                    M[halo+1, halo+1:halo+ny, :, m] .= inlet[m]
+                end
+            end
 
             # Exchange halos before realizability enforcement
             halo_exchange_3d!(M, decomp, bc)
@@ -921,7 +1037,25 @@ function simulation_runner(params)
             end
             M[halo+1:halo+nx, halo+1:halo+ny, :, :] = Mnp[halo+1:halo+nx, halo+1:halo+ny, :, :]
         end
-        
+
+        # Rigid immersed obstacle: re-impose the held rest Maxwellian on the disk
+        # cells so the obstacle stays fixed (no-slip, no breathing) every step.
+        if hold_obstacle
+            @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+                if obst_mask[i, j]
+                    for m in 1:Nmom
+                        M[i+halo, j+halo, k, m] = obst_state[m]
+                    end
+                end
+            end
+        end
+
+        # Non-reflecting sponge: absorb outgoing waves in the boundary zone by
+        # relaxing toward the freestream (exact-exp). No-op when no :sponge face.
+        if !isempty(sponge_ref)
+            apply_sponge!(M, sponge_ramp, sponge_ref, sponge_rate, dt, halo)
+        end
+
         # Exchange halos for next iteration
         halo_exchange_3d!(M, decomp, bc)
         

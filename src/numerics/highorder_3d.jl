@@ -544,7 +544,7 @@ function _project_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma) / 2.0)
     end
 end
 
-function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc::Symbol,
+function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc,
                             nx,ny,nz,halo, dx,dy,dz, Ma;
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                             stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0,

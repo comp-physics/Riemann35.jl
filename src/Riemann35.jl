@@ -19,6 +19,16 @@ using JLD2  # Always needed for snapshot I/O
 # Set at runtime from params in `simulation_runner` (defaults to true).
 const POSITIVITY_ENABLED = Ref(true)
 
+# Crossflow boundary condition (OPT-IN, default unused). Holds the inlet
+# Maxwellian moment vector (Minlet) for the `:crossflow` BC = inlet-Dirichlet on
+# the low-x face, zero-gradient outflow on the high-x face, periodic in y. Added
+# for R.O. Fox's dense-bubble-in-crossflow validation (2026-07-14), after the
+# McMullen & Gallis vortex-shedding case (SAND2024-13841J) and the MATLAB
+# reference main_2Dbubble_heating_3DHyQMOM35.m. `nothing` => `:crossflow` unused;
+# set from params in `simulation_runner` when bc == :crossflow. The default
+# bc == :copy path is untouched (byte-identical).
+const CROSSFLOW_INLET = Ref{Union{Nothing,Vector{Float64}}}(nothing)
+
 # Near-vacuum density floor for high-order reconstruction (0 disables). Below this
 # density the cell velocity (M100/M000) and variance (M200/M000 - u^2) are
 # cancellation-dominated noise, so the interface falls back to the first-order
@@ -140,6 +150,7 @@ include("numerics/highorder_flux.jl")
 include("numerics/ssp_rk.jl")
 include("numerics/highorder_3d.jl")
 include("numerics/collision35.jl")
+include("numerics/sponge.jl")
 include("numerics/flux_HLL.jl")
 include("numerics/pas_HLL.jl")
 include("numerics/apply_flux_update.jl")
@@ -149,6 +160,7 @@ include("numerics/apply_flux_update_3d.jl")
 include("mpi/mpi_utils.jl")
 include("mpi/setup_mpi_cartesian_2d.jl")
 include("mpi/setup_mpi_cartesian_3d.jl")
+include("mpi/face_bc.jl")
 include("mpi/halo_exchange_2d.jl")
 include("mpi/halo_exchange_3d.jl")
 include("mpi/compute_halo_fluxes_and_wavespeeds_3d.jl")

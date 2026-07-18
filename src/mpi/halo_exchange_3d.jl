@@ -23,7 +23,7 @@ A = zeros(nx+2*halo, ny+2*halo, nz, Nmom)
 halo_exchange_3d!(A, decomp, :copy)
 ```
 """
-function halo_exchange_3d!(A::Array{T,4}, decomp, bc::Symbol) where T
+function halo_exchange_3d!(A::Array{T,4}, decomp, bc) where T
     h = decomp.halo
     nx = decomp.local_size[1]
     ny = decomp.local_size[2]
@@ -155,52 +155,79 @@ Fill halos at global boundaries based on bc type.
 # Notes
 - Also applies copy BC in z-direction at global z boundaries (no decomposition in z)
 """
-function apply_physical_bc_3d!(A::Array{T,4}, decomp, bc::Symbol) where T
+function apply_physical_bc_3d!(A::Array{T,4}, decomp, bc) where T
     h = decomp.halo
-    nx = decomp.local_size[1]
-    ny = decomp.local_size[2]
-    nz = decomp.local_size[3]
-    
-    if h == 0
-        return A
+    h == 0 && return A
+    faces = expand_bc(bc)                       # canonical six-face spec (see face_bc.jl)
+    nv = size(A, 4)
+
+    # inlet Maxwellian, fetched once if any face is an inlet
+    inlet = nothing
+    if has_inlet(faces)
+        inlet = CROSSFLOW_INLET[]
+        inlet === nothing &&
+            error(":inlet face needs CROSSFLOW_INLET[] set (inlet Maxwellian moment vector)")
+        length(inlet) == nv ||
+            error(":inlet length $(length(inlet)) != nvar $nv")
     end
-    
-    if bc == :copy
-        # Left boundary (global)
-        if decomp.neighbors.left == -1
-            for ih in 1:h
-                A[ih, :, :, :] .= view(A, h+1, :, :, :)
+
+    # Direction-agnostic refill over the CPU-haloed spatial axes (x=1, y=2). The z
+    # axis (dim 3) carries no halo padding here, so its BC is applied in the flux
+    # update, not by this refill. Faces are applied x-then-y so corner ghosts get
+    # the same final writer as the legacy hand-written branches (byte-identical for
+    # the :copy and :crossflow presets). A :sponge face is :outflow at the halo;
+    # its absorbing source lives in the interior (see sponge.jl).
+    axinfo = ((1, :xlo, :xhi, :left, :right), (2, :ylo, :yhi, :down, :up))
+    for (a, lokey, hikey, lonb_f, hinb_f) in axinfo
+        na    = decomp.local_size[a]
+        lonb  = getproperty(decomp.neighbors, lonb_f)
+        hinb  = getproperty(decomp.neighbors, hinb_f)
+        lotyp = faces[lokey]
+        hityp = faces[hikey]
+
+        if lotyp === :periodic                  # (hityp === :periodic guaranteed by expand_bc)
+            if lonb == -1 && hinb == -1
+                for ih in 1:h
+                    selectdim(A, a, ih)          .= selectdim(A, a, na + ih)   # lo ghost <- hi interior
+                    selectdim(A, a, h + na + ih) .= selectdim(A, a, h + ih)     # hi ghost <- lo interior
+                end
+            elseif lonb == -1 || hinb == -1
+                error("periodic BC on axis $a requires a single rank spanning that axis " *
+                      "(multi-rank wrap-around topology is not supported)")
             end
+            continue
         end
-        
-        # Right boundary (global)
-        if decomp.neighbors.right == -1
-            for ih in 1:h
-                A[h+nx+ih, :, :, :] .= view(A, h+nx, :, :, :)
-            end
+
+        # lo face
+        if lonb == -1
+            _refill_face!(A, a, 1:h, h + 1, halo_face_type(lotyp), inlet, nv)
         end
-        
-        # Bottom boundary (global)
-        if decomp.neighbors.down == -1
-            for ih in 1:h
-                A[:, ih, :, :] .= view(A, :, h+1, :, :)
-            end
+        # hi face
+        if hinb == -1
+            _refill_face!(A, a, (h + na + 1):(h + na + h), h + na, halo_face_type(hityp), inlet, nv)
         end
-        
-        # Top boundary (global)
-        if decomp.neighbors.up == -1
-            for ih in 1:h
-                A[:, h+ny+ih, :, :] .= view(A, :, h+ny, :, :)
-            end
-        end
-        
-        # Z boundaries (always global since no z decomposition)
-        # Note: No halos in z direction, but we still need BC at k=1 and k=nz
-        # This is handled in the flux update for z-direction
-    else
-        error("Unknown bc type: $bc")
     end
-    
+
+    return A
+end
+
+# Fill the ghost planes `dst_idxs` along spatial axis `a` per face type `typ`,
+# copying from interior plane `src_idx` for :outflow (zero-gradient). Axis-generic
+# via `selectdim`; byte-identical to the explicit `A[ih,:,:,:] .= view(...)` form.
+@inline function _refill_face!(A, a::Int, dst_idxs, src_idx::Int, typ::Symbol, inlet, nv::Int)
+    if typ === :inlet
+        @inbounds for d in dst_idxs
+            sd = selectdim(A, a, d)             # view over (other-spatial..., var); var is the last dim
+            vd = ndims(sd)
+            for m in 1:nv
+                selectdim(sd, vd, m) .= inlet[m]
+            end
+        end
+    else                                        # :outflow (zero-gradient)
+        for d in dst_idxs
+            selectdim(A, a, d) .= selectdim(A, a, src_idx)
+        end
+    end
     return A
 end
 
