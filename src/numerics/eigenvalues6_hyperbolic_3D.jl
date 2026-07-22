@@ -70,7 +70,18 @@ moments, set S112=S110, S121=S101, S211=S011, floor S220/S202/S022 at 1/3,
 rebuild the central moments and convert back to raw moments. No realizability
 projection is applied here (matches the MATLAB reference).
 """
+# Opt-in selector for the hyperbolicity correction. Default `:blunt` keeps this
+# function BYTE-IDENTICAL to `correct_moments_dev` (the shipped path). Set to
+# `:minnorm` (e.g. from the runner) to use the minimal-norm correction
+# (src/numerics/moment_correction_minnorm.jl) — an opt-in feature.
+const HYP_CORRECTION = Ref(:blunt)
+const HYP_FIRE_COUNT = Ref(0)     # diagnostic: # of correction firings since last reset
+
 function correct_moments_hyperbolic_3D(M::AbstractVector)
+    HYP_FIRE_COUNT[] += 1
+    if HYP_CORRECTION[] === :minnorm
+        return correct_moments_minnorm(M)
+    end
     return collect(correct_moments_dev(M...))
 end
 
