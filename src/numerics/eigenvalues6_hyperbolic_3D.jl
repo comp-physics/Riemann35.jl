@@ -70,10 +70,15 @@ moments, set S112=S110, S121=S101, S211=S011, floor S220/S202/S022 at 1/3,
 rebuild the central moments and convert back to raw moments. No realizability
 projection is applied here (matches the MATLAB reference).
 """
-# Opt-in selector for the hyperbolicity correction. Default `:blunt` keeps this
-# function BYTE-IDENTICAL to `correct_moments_dev` (the shipped path). Set to
-# `:minnorm` (e.g. from the runner) to use the minimal-norm correction
-# (src/numerics/moment_correction_minnorm.jl) — an opt-in feature.
+# Opt-in selector for the hyperbolicity correction.
+#   :blunt   (default) — zero the cross 3rd-order moments (correct_moments_dev).
+#            Keeps this function BYTE-IDENTICAL to the shipped path.
+#   :minnorm            — minimal-norm correction (correct_moments_minnorm,
+#            src/numerics/moment_correction_minnorm.jl): the smallest weighted
+#            change to the six S210-perms + six S310-perms that restores
+#            hyperbolicity. ~8.8x gentler / higher coverage, but a slower
+#            prototype. See docs/design/minimal-norm-hyperbolicity-correction.md.
+# Set e.g. `Riemann35.HYP_CORRECTION[] = :minnorm` (opt-in; default off).
 const HYP_CORRECTION = Ref(:blunt)
 const HYP_FIRE_COUNT = Ref(0)     # diagnostic: # of correction firings since last reset
 

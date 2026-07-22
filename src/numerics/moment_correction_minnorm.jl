@@ -15,6 +15,10 @@ leaves `correct_moments_hyperbolic_3D` byte-identical to `correct_moments_dev`.
 
 Prototype-grade (Dict-based, allocates); an allocation-free rewrite is future work.
 Uses the package's `jacobian15`, `M4toC4_3D`, `C4toM4_3D`, `eig3_realparts`.
+
+Full rationale, the eq-(41)/(43)/(45) mechanism, the 3D coupling/frame/margin
+subtleties, and the measured coverage/fidelity numbers are documented in
+`docs/design/minimal-norm-hyperbolicity-correction.md`.
 """
 
 # 12 adjustable standardized moments: 6 third-order + 6 fourth-order (eq-43 axis)
