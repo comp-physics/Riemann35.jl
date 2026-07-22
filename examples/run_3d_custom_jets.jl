@@ -51,6 +51,16 @@ using MPI
 using Printf
 using JLD2  # Always needed for snapshot saving/loading
 
+# OPT-IN minimal-norm hyperbolicity correction (env HYP_CORRECTION=minnorm).
+# Default (unset) leaves the shipped blunt-reset correction untouched.
+if get(ENV, "HYP_CORRECTION", "blunt") == "minnorm"
+    Riemann35.HYP_CORRECTION[] = :minnorm
+    @info "HYP_CORRECTION = :minnorm (opt-in minimal-norm correction)"
+    atexit() do
+        println("HYP_FIRE_COUNT_TOTAL=", Riemann35.HYP_FIRE_COUNT[], " method=:minnorm")
+    end
+end
+
 # Load parameter parsing utilities
 include("parse_params.jl")
 
