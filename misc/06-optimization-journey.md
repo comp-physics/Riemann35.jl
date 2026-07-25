@@ -304,7 +304,7 @@ recorded here as a recommendation rather than applied.
 The solvers are selected by **multiple dispatch on singleton types** — set the relevant
 `const` and recompile (default values reproduce the validated paths byte-for-byte):
 
-- Wave speeds (`gpu/wavespeed_dev.jl`): `const WAVE4_SOLVER = QRWave()` →
+- Wave speeds (`src/numerics/wavespeed_dev.jl`): `const WAVE4_SOLVER = QRWave()` →
   `FerrariWave()` (closed-form companion quartic) or `TridiagWave()` (symmetric-tridiagonal
   Q4 — the robust, principled form). Dispatched as
   `_wave4_minmax(::QRWave|::FerrariWave|::TridiagWave, e84,e99,e114,e129, m00,m10,m20,m30,m40)`.

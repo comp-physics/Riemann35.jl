@@ -5,7 +5,7 @@
 using CUDA, Printf
 H=joinpath(@__DIR__, "..")
 include(joinpath(H,"realize_gpu.jl")); using .RealizeGPU
-include(joinpath(H,"..","src","numerics","flux_closure_dev.jl")); using .FluxClosureDev
+using Riemann35.FluxClosureDev
 DATA=get(ENV, "RIEMANN35_DATA", joinpath(joinpath(@__DIR__, ".."), "..", "data"))
 input=collect(reinterpret(Float64, read("$DATA/flxg_in.f64")))
 g=collect(reinterpret(Float64, read("$DATA/flxg_out.f64")))

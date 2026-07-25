@@ -35,27 +35,23 @@ module Residual3DOrder3GPU
 
 using CUDA
 
-include(joinpath(@__DIR__, "wavespeed_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "flux_closure_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "riemann_flux_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "idp_limiter_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "hiorder3_recon_dev.jl"))
-
-using .RiemannFluxDev: riemann_flux_dev
-using .WavespeedDev: realize_and_speed_Mr_dev
-using .FluxClosureDev: flux_closure35_dev
-using .RealizeDev: realizable_3D_M4_dev
-using .ReconDev: to_recon_vars_tup
-using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
-using .HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
+# Device kernels come from the package — ONE instance per process, shared with the
+# CPU solver and every other GPU module. Do NOT `include` them here: `include`
+# splices text, so each include site builds a separate module that is
+# type-inferred, LLVM'd and ptxas'd from scratch. This module alone used to pull in
+# nine of them, several already instantiated by Residual3DGPU. See the
+# device-kernel block in src/Riemann35.jl and misc/04-gotchas.md.
+using Riemann35.RiemannFluxDev: riemann_flux_dev
+using Riemann35.WavespeedDev: realize_and_speed_Mr_dev
+using Riemann35.FluxClosureDev: flux_closure35_dev
+using Riemann35.RealizeDev: realizable_3D_M4_dev
+using Riemann35.ReconDev: to_recon_vars_tup
+using Riemann35.IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
+using Riemann35.HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
 
 # --- opt-in log-Jacobi marginal reconstruction (device pieces) ---
-include(joinpath(@__DIR__, "..", "src", "numerics", "weno5_dev.jl"))
-using .Weno5Dev: weno5z, deconv5, conv5, smooth5
-include(joinpath(@__DIR__, "..", "src", "numerics", "logjacobi_recon_dev.jl"))
-using .LogJacobiReconDev: marg_m_to_J, marg_J_to_m, _affine_remap
+using Riemann35.Weno5Dev: weno5z, deconv5, conv5, smooth5
+using Riemann35.LogJacobiReconDev: marg_m_to_J, marg_J_to_m, _affine_remap
 # per-axis 5 marginal slot indices (= moment_indices.MARG_IDX; hardcoded to avoid a
 # device include of the indices module; verified against IJK: x=(1..5), y=(0,1,2,3,4)_y,
 # z=(0,1,2,3,4)_z).

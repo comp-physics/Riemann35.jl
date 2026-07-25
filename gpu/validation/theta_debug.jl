@@ -2,8 +2,7 @@
 # minors D1,D2,D3 as functions of θ at θc (closed) and θb (bisection), and show which
 # minor is negative (state non-realizable) or which root the cubic missed.
 using Riemann35, Printf, Random
-include(joinpath(@__DIR__, "..", "..", "src", "numerics", "idp_limiter_dev.jl"))
-using .IdpLimiterDev
+using Riemann35.IdpLimiterDev
 const ID = IdpLimiterDev
 const _real = ID.RiemannFluxDev._state_realizable
 const MI = ID.RiemannFluxDev.RoePS3Dev.MomentIndices.MARG_IDX

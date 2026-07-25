@@ -26,10 +26,11 @@ module RoePS3Dev
 
 using StaticArrays
 
-include(joinpath(@__DIR__, "..", "moments", "moment_indices.jl"))
-using .MomentIndices: MARG_IDX, ODD_MASK
-include(joinpath(@__DIR__, "recurrence_dev.jl"))
-using .RecurrenceDev: recurrence5_dev
+# Siblings, loaded once by the owner (src/Riemann35.jl's device-kernel block, or a
+# GPU module's equivalent). Do NOT `include` them here: a nested include would make
+# a second instance of each module, recompiled from scratch (see misc/04-gotchas.md).
+using ..MomentIndices: MARG_IDX, ODD_MASK
+using ..RecurrenceDev: recurrence5_dev
 
 export roeps3_diss_dev
 

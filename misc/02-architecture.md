@@ -3,17 +3,21 @@
 ## Directory layout
 
 ```
-gpu/                 GPU source only — kernels/drivers + README + gpuenv2/ (the GPU project)
-  schur4.jl, wavespeed_dev.jl, residual3d_gpu.jl, realize_gpu.jl,
-  timestep3d_gpu.jl, gpu_run.jl
+gpu/                 GPU source only — CUDA kernels/drivers + README + gpuenv2/ (the GPU project)
+  residual3d_gpu.jl, realize_gpu.jl, timestep3d_gpu.jl, gpu_run.jl
 gpu/validation/      correctness validators (validate_*.jl), CUDA sanity (test_cuda.jl),
                      and reference-data generators (dump_*.jl)
 gpu/bench/           performance benchmarks (bench_*.jl)
 ```
 
-Validators/benches `include` the source modules via `joinpath(@__DIR__, "..", "<mod>.jl")`
-(they live one level under `gpu/`). The per-cell physics itself is single-sourced from
-`src/` (next section).
+Everything under `gpu/` is CUDA-dependent. Every CUDA-free per-cell device kernel lives
+in `src/` and is owned by the package — including the device eigen backend
+(`src/numerics/wavespeed_dev.jl`, `src/numerics/schur4.jl`), which moved out of `gpu/`
+on 2026-07-24 so that exactly one instance exists per process.
+
+Validators/benches `include` the GPU **driver** modules via
+`joinpath(@__DIR__, "..", "<mod>.jl")` (they live one level under `gpu/`). They must never
+`include` a device kernel — those come from the package (next section).
 
 ## Single-source: device kernels live in `src/`, CPU delegates
 
@@ -47,26 +51,37 @@ load-bearing detail is that the shared `@fastmath` central-moment helpers are
 ```
 gpu/timestep3d_gpu.jl   (module Timestep3DGPU)  — march3d_gpu! (single) + march3d_slab_gpu! (multi)
   ├── gpu/residual3d_gpu.jl   (Residual3DGPU)   — residual3d_box_gpu! (rectangular) + residual3d_gpu! (cubic wrapper)
-  │     ├── gpu/wavespeed_dev.jl (WavespeedDev)  — realize_and_speed_*_dev, jac15_eig_dev
-  │     │     └── gpu/schur4.jl (Schur4)         — custom 4×4 real-Schur eig (no LAPACK)
-  │     ├── src/numerics/flux_closure_dev.jl
-  │     ├── src/numerics/recon_dev.jl
-  │     └── src/realizability/realize_dev.jl
-  └── gpu/realize_gpu.jl      (RealizeGPU)        — realizable_batched! / realizable_batched (CUDA kernel)
-        ├── src/numerics/recon_dev.jl
-        └── src/realizability/realize_dev.jl
+  └── gpu/realize_gpu.jl      (RealizeGPU)      — realizable_batched! / realizable_batched (CUDA kernel)
+
+Both consume device kernels from the package's single instance:
+  using Riemann35.{WavespeedDev, Schur4, FluxClosureDev, ReconDev, RealizeDev,
+                   RiemannFluxDev, IdpLimiterDev, HiOrder3ReconDev, Weno5Dev, LogJacobiReconDev}
 ```
 
-That is the complete set of driver files. `gpu/schur4.jl`, `wavespeed_dev.jl`,
-`bench_eig.jl`, `test_cuda.jl` round it out. Everything else under `gpu/` is a
-`validate_*`/`dump_*`/`bench_*` harness.
+That is the complete set of driver files; `bench_eig.jl` and `test_cuda.jl` round it out.
+Everything else under `gpu/` is a `validate_*`/`dump_*`/`bench_*` harness.
 
-### Module-wiring rule (avoid double-include of `ReconDev`)
+### Module-wiring rule: ONE instance per process, never `include` a device kernel
 
-`realize_dev.jl`/`residual3d_gpu.jl` reference the already-loaded `ReconDev` via
-`using ..ReconDev` (not a second `include`). Each consumer `include`s `recon_dev.jl`
-as a sibling **first**. Re-including a module file defines a stale second copy — this
-bit the recon/realize ports; keep the include order and the `..ReconDev` reference.
+Device modules are included **exactly once**, by the device-kernel block in
+`src/Riemann35.jl`, in dependency order. They reference each other as siblings
+(`using ..ReconDev`). Consumers — CPU files, GPU modules, validators — only ever write
+`using Riemann35.ReconDev: ...`.
+
+Two distinct reasons, both load-bearing:
+
+1. **Correctness.** Re-including a module file defines a stale second copy; this bit the
+   recon/realize ports originally.
+2. **Compile time.** `include` splices text, so every include site builds a separate
+   module that Julia type-infers and LLVM-compiles and `ptxas` then recompiles per
+   kernel. Because the package *and* each GPU module included device files, and device
+   files included each other recursively, loading `gpu/timestep3d_gpu.jl` used to compile
+   **1.94x** the device code it needed — `realize_dev` x3, `recon_dev` x4,
+   `riemann_flux_dev` x4, `roeps3_dev` x4, `recurrence_dev` x6; 6258 duplicated lines of
+   the most expensive arithmetic in the repo. Fixed 2026-07-24.
+
+Adding a device module: include it once in that block, in dependency order, and reach its
+siblings with `using ..Sibling`.
 
 ## Residual: one rectangular kernel set
 

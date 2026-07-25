@@ -13,9 +13,9 @@ their physical fluxes for the given axis, plus the HLL wave-speed bounds.
 """
 module RiemannFluxDev
 
-include(joinpath(@__DIR__, "roeps3_dev.jl"))
-using .RoePS3Dev: roeps3_diss_dev
-using .RoePS3Dev.MomentIndices: MARG_IDX
+# Siblings, loaded once by the owner — see the note in roeps3_dev.jl.
+using ..RoePS3Dev: roeps3_diss_dev
+using ..MomentIndices: MARG_IDX
 
 # standardized shape parameters (q̂ = central-3rd/σ³, K = central-4th/σ⁴) of a
 # 5-moment marginal chain — the dimensionless "is this side Maxwellian-like,

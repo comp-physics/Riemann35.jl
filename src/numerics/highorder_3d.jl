@@ -1,15 +1,17 @@
 # ---------------------------------------------------------------------------
-# Order-3 (WENO5 + θ*-IDP) modules — included here so they stay out of the
-# default order=1,2 code path (byte-identical guarantee). The modules create
-# sub-modules of Riemann35 and their names are brought into this file's scope.
+# Order-3 (WENO5 + θ*-IDP) device modules. These are sub-modules of Riemann35,
+# loaded ONCE by the device-kernel block in src/Riemann35.jl; this file only
+# brings their names into scope. They are NOT included here — a nested include
+# would create a second instance of each module and recompile it from scratch
+# (see misc/04-gotchas.md).
 # ---------------------------------------------------------------------------
-include(joinpath(@__DIR__, "idp_limiter_dev.jl")); using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
+using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
 # Single-source device-safe order-3 reconstruction primitives, shared VERBATIM with
 # the GPU order-3 kernels (hiorder3_recon_dev.jl) — residual_line3 just composes them.
-include(joinpath(@__DIR__, "hiorder3_recon_dev.jl")); using .HiOrder3ReconDev:
+using .HiOrder3ReconDev:
     recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev, recon_vars_realizable
 # OPT-IN log-Jacobi marginal reconstruction (default OFF; byte-identical when off).
-include(joinpath(@__DIR__, "logjacobi_recon_dev.jl")); using .LogJacobiReconDev:
+using .LogJacobiReconDev:
     logjacobi_marginal_faces, affine_remap_axis
 using .MomentIndices: MARG_IDX
 

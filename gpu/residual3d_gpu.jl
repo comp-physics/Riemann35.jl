@@ -48,14 +48,14 @@ module Residual3DGPU
 
 using CUDA
 
-include(joinpath(@__DIR__, "wavespeed_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "flux_closure_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "numerics", "riemann_flux_dev.jl"))
-using .RiemannFluxDev: riemann_flux_dev, rs_code
-using .WavespeedDev: realize_and_speed_Mr_dev
-using .FluxClosureDev: flux_closure35_dev, flux_closure35_central_dev
+# Device kernels come from the package — ONE instance per process, shared with the
+# CPU solver and every other GPU module. Do NOT `include` them here: `include`
+# splices text, so each include site builds a separate module that is
+# type-inferred, LLVM'd and ptxas'd from scratch. See the device-kernel block in
+# src/Riemann35.jl and misc/04-gotchas.md.
+using Riemann35.RiemannFluxDev: riemann_flux_dev, rs_code
+using Riemann35.WavespeedDev: realize_and_speed_Mr_dev
+using Riemann35.FluxClosureDev: flux_closure35_dev, flux_closure35_central_dev
 
 # Flux-closure path — SELECTED BY MULTIPLE DISPATCH on a singleton type.
 #   StdClosure()     -> the standardized closure (standardize -> 21 closures -> destandardize).
@@ -79,10 +79,10 @@ const LIMITER_THETA_CACHE = Ref(true)
 @inline _flux35(::CentralClosure,
     a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai) =
     flux_closure35_central_dev(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai)
-using .ReconDev: to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod,
+using Riemann35.ReconDev: to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup, minmod,
                  muscl_right_face_tup, muscl_left_face_tup,
                  pressurize_recon_tup, depressurize_recon_tup
-using .RealizeDev: realizable_3D_M4_dev, delta2star_mineig_dev, scaling_theta_dev
+using Riemann35.RealizeDev: realizable_3D_M4_dev, delta2star_mineig_dev, scaling_theta_dev
 
 export residual3d_gpu!, residual3d_gpu
 

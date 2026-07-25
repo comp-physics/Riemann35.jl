@@ -33,7 +33,7 @@ include(joinpath(@__DIR__, "residual3d_gpu.jl"))
 include(joinpath(@__DIR__, "realize_gpu.jl"))
 include(joinpath(@__DIR__, "timestep3d_order3_gpu.jl"))   # order-3 WENO5+θ*-IDP single- AND multi-GPU (z-slab) marches
 using .Residual3DGPU: residual3d_gpu!, residual3d_box_gpu!
-using .Residual3DGPU.ReconDev: bgk_relax_tup
+using Riemann35.ReconDev: bgk_relax_tup   # the package's single instance, not a nested copy
 using .RealizeGPU: realizable_batched!
 using .Timestep3DOrder3GPU: march3d_slab_order3_gpu!
 

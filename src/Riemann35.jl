@@ -116,18 +116,51 @@ include("moments/hyqmom_quadrature_1d.jl")
 include("moments/chyqmom_nodes_3d.jl")
 include("moments/enforce_univariate.jl")
 
+# ---------------------------------------------------------------------------
+# DEVICE-KERNEL BLOCK — the alloc-free, CUDA-free per-cell kernels shared
+# VERBATIM by the CPU solver (which delegates to them) and the GPU kernels.
+#
+# Every file here is included EXACTLY ONCE, in dependency order, and the modules
+# refer to each other as SIBLINGS (`using ..Sibling`). Do NOT `include` any of
+# them from another device file or from a consumer: `include` splices text, so a
+# nested include creates a SECOND instance of the module, which is type-inferred,
+# LLVM'd, and (on the GPU) ptxas'd from scratch. Before this block was
+# consolidated the GPU graph compiled 1.94x the device code it actually needed
+# (realize_dev x3, recon_dev x4, riemann_flux_dev x4). See misc/04-gotchas.md.
+#
+# Consumers (highorder_3d.jl, reconstruction.jl, the GPU kernel modules) only
+# bring names into scope with `using .Module: ...` — they never include.
+# ---------------------------------------------------------------------------
+include("numerics/recurrence_dev.jl")
+include("numerics/roeps3_dev.jl")
+include("numerics/riemann_flux_dev.jl")
+using .RiemannFluxDev: riemann_flux_dev, rs_code
 # Reconstruction variables (must precede realizability, which calls standardized_to_M4)
 include("numerics/recon_dev.jl")
 using .ReconDev: to_recon_vars_dev, from_recon_vars_dev,
                  pressurize_recon_tup, depressurize_recon_tup, bgk_relax_tup
+# The CPU realizable_3D_M4 (realizability.jl -> realize_M4_projection.jl) delegates to
+# realizable_3D_M4_dev. RealizeDev references ReconDev via `using ..ReconDev`.
+include("realizability/realize_dev.jl")
+using .RealizeDev: realizable_3D_M4_dev, realizable_3D_M4_corr_dev
+include("numerics/flux_closure_dev.jl")
+using .FluxClosureDev: flux_closure35_dev
+include("numerics/moment_correction_dev.jl")
+using .MomentCorrectionDev: correct_moments_dev
+include("numerics/schur4.jl")
+include("numerics/wavespeed_dev.jl")
+# Order-3 (WENO5 + theta*-IDP) primitives. Loaded here rather than from
+# highorder_3d.jl so they exist exactly once; the default order=1,2 paths simply
+# do not call them, which preserves the byte-identical guarantee.
+include("numerics/weno5_dev.jl")
+include("numerics/hiorder3_recon_dev.jl")
+include("numerics/idp_limiter_dev.jl")
+include("numerics/logjacobi_recon_dev.jl")
+# --- end device-kernel block ----------------------------------------------
+
 include("numerics/reconstruction.jl")
 
 # Realizability
-# Single-source device kernel first: the CPU realizable_3D_M4 (in realizability.jl ->
-# realize_M4_projection.jl) delegates to realizable_3D_M4_dev. RealizeDev references the
-# already-loaded ReconDev via `using ..ReconDev`, so recon_dev.jl must precede this.
-include("realizability/realize_dev.jl")
-using .RealizeDev: realizable_3D_M4_dev, realizable_3D_M4_corr_dev
 include("realizability/realizability.jl")
 include("realizability/edge_corner_correction.jl")
 include("realizability/realizability_oracle.jl")
@@ -135,18 +168,11 @@ include("realizability/realizability_oracle.jl")
 # Numerics
 include("numerics/small_eig.jl")
 include("numerics/closure_and_eigenvalues.jl")
-include("numerics/moment_correction_dev.jl")
-using .MomentCorrectionDev: correct_moments_dev
 include("numerics/moment_correction_minnorm.jl")   # opt-in minimal-norm hyperbolicity correction (byte-identical off)
 include("numerics/eigenvalues6_hyperbolic_3D.jl")
 include("numerics/eigenvalues6z_hyperbolic_3D.jl")
-include("numerics/flux_closure_dev.jl")
-using .FluxClosureDev: flux_closure35_dev
 include("numerics/Flux_closure35_and_realizable_3D.jl")
 include("numerics/Flux_closure35_3D.jl")
-include("numerics/riemann_flux_dev.jl")
-using .RiemannFluxDev: riemann_flux_dev, rs_code
-const RoePS3Dev = RiemannFluxDev.RoePS3Dev   # stable path for tests/tools
 include("numerics/highorder_flux.jl")
 include("numerics/ssp_rk.jl")
 include("numerics/highorder_3d.jl")
