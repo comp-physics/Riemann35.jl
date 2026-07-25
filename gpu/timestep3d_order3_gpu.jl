@@ -346,7 +346,7 @@ function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3ma
 end
 
 # optional exact-exponential stage-BGK relaxation on the interior (CPU `bgk!`).
-function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64)
+function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64, pr::Float64, om::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -354,7 +354,7 @@ function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::F
             j = r % ny + 1;         k = r ÷ ny + 1
             ga = g + i; gb = g + j; gc = g + k
             C = ntuple(m -> G[m, ga, gb, gc], Val(35))
-            out = bgk_relax_tup(C, dt, kn)
+            out = bgk_relax_tup(C, dt, kn, pr, om)
             for m in 1:35; G[m, ga, gb, gc] = out[m]; end
         end
     end
@@ -494,7 +494,7 @@ in place and left with its outflow halos refilled.
 """
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                             stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
+                             stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              first_order::Bool = false, bc = :copy, inlet = nothing,
                              obst_state = nothing, obst_cx::Real = 0.0, obst_cy::Real = 0.0,
@@ -509,6 +509,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     @assert min(nx, ny, nz) >= 1 "interior extents nx,ny,nz = nf-2g must be ≥ 1 (got $nx,$ny,$nz)"
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
+    prf = Float64(Pr); omf = Float64(omega)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
@@ -598,7 +599,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f)
             if stage_bgk
-                @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf)
+                @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf)
             end
         end
         # stochastic forcing: random transverse-velocity kick (before the obstacle
@@ -678,7 +679,7 @@ unless `dts` is supplied. Returns the dt vector used. `Mi` is updated in place.
 """
 function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                                   dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                                  stage_bgk::Bool = false, Kn::Real = Inf, threads::Int = 128,
+                                  stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, threads::Int = 128,
                                   theta_closed::Bool = true)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(Mi, 1) == 35 "Mi must be (35,n,n,nz_loc)"
@@ -695,6 +696,7 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
             zlo = rank > 0, zhi = rank < nranks - 1)
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
+    prf = Float64(Pr); omf = Float64(omega)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     G    = CUDA.zeros(Float64, 35, nfx, nfx, nfz)   # resident haloed slab cube
@@ -765,7 +767,7 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, nzloc, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, n, n, nzloc, g, Maf, s3f)
             if stage_bgk
-                @cuda threads=threads blocks=bint _bgk_interior!(G, n, n, nzloc, g, dt, knf)
+                @cuda threads=threads blocks=bint _bgk_interior!(G, n, n, nzloc, g, dt, knf, prf, omf)
             end
         end
     end

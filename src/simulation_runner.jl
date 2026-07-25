@@ -241,6 +241,19 @@ function simulation_runner(params)
     # post-step `collision35` is skipped when active (no double relaxation).
     stage_bgk = get(params, :stage_bgk, scheme === :recommended)
 
+    # Pr / omega (OPT-IN, defaults reproduce the historical operator BITWISE).
+    # Pr = Prandtl number: 1.0 is plain BGK; 2/3 (monatomic) engages the ES-BGK
+    # anisotropic-Gaussian target. omega = VHS viscosity exponent, mu ~ T^omega:
+    # 0.5 is hard spheres (the historical tau), ~0.74 is argon-like. Both are
+    # grid-uniform runtime scalars, deliberately NOT type parameters (specializing
+    # would multiply the GPU kernel count). See docs/design/esbgk-vhs-transport.md.
+    Pr_coll = Float64(get(params, :Pr, 1.0))
+    omega_coll = Float64(get(params, :omega, 0.5))
+    (2/3 - 1e-12 <= Pr_coll <= 1.0) ||
+        error("Pr=$Pr_coll outside supported range [2/3, 1]; see docs/design/esbgk-vhs-transport.md")
+    (0.5 <= omega_coll <= 1.0) ||
+        error("omega=$omega_coll outside supported range [0.5, 1]")
+
     # riemann_solver (OPT-IN, default :hll): interface flux for the high-order path.
     # :roeps3 = parity-split Roe (contact-exact by the parity theorem; sharper
     # contacts, ~-8% Sod vs :hll in the 1D study). Single-source CPU/GPU.
@@ -949,7 +962,8 @@ function simulation_runner(params)
                                order=spatial_order, use_limiter=ho_realizability_limiter,
                                use_proj_recon=ho_proj_first_order,
                                use_logjacobi_recon=use_logjacobi_recon,
-                               stage_bgk_kn=(stage_bgk ? Kn : nothing))
+                               stage_bgk_kn=(stage_bgk ? Kn : nothing),
+                               Pr=Pr_coll, omega=omega_coll)
         else
             # --- FIRST-ORDER PATH (spatial_order=1, default) ---
             # Byte-identical to the original validated path (bc == :copy).
@@ -1030,7 +1044,7 @@ function simulation_runner(params)
                         ih = i + halo
                         jh = j + halo
                         MOM = M[ih, jh, k, :]
-                        MMC = collision35(MOM, dt, Kn)
+                        MMC = collision35(MOM, dt, Kn; Pr=Pr_coll, omega=omega_coll)
                         Mnp[ih, jh, k, :] = MMC
                     end
                 end

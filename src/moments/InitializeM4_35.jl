@@ -10,6 +10,20 @@ Compute 3D fourth-order joint Gaussian moments from physical parameters.
 
 # Returns
 - `M`: 35-element vector of raw moments up to 4th order
+
+!!! warning "Only a true Gaussian for DIAGONAL covariance"
+    This sets the *independent*-Gaussian standardized moments (`S400=3`, `S220=1`,
+    all cross terms 0) while accepting a full covariance. For a **correlated**
+    Gaussian, Isserlis gives `S310 = 3r`, `S220 = 1 + 2r^2`,
+    `S211 = r_yz + 2 r_xy r_xz`, etc., so passing nonzero `C110/C101/C011` here
+    produces a state whose fourth-order moments are NOT those of the Gaussian with
+    that covariance.
+
+    Harmless for every current caller — the ICs all pass `r110=r101=r011=0` — but do
+    not use this to build an anisotropic Gaussian target. The ES-BGK operator
+    (`ReconDev.bgk_relax_tup`) builds its correlated target through
+    `from_recon_vars_dev` with the full Isserlis table instead; see
+    `docs/design/esbgk-vhs-transport.md` section 5.
 """
 function InitializeM4_35(M000, umean, vmean, wmean, C200, C110, C101, C020, C011, C002)
     # Standardized moments for Maxwellian (Gaussian)

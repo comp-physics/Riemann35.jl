@@ -89,12 +89,12 @@ _cfl_from_vmax(vmax, dx) = (1.0/3.0) * dx / max(vmax, 1e-12)
 # a convex combination, so realizability is preserved. Operates on the (35,ncl)
 # reshaped view (same layout the projection uses).
 # ---------------------------------------------------------------------------
-function _bgk_kernel!(Mm, ncl::Int, dt::Float64, kn::Float64)
+function _bgk_kernel!(Mm, ncl::Int, dt::Float64, kn::Float64, pr::Float64, om::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= ncl
         @inbounds begin
             C = ntuple(q -> Mm[q, idx], Val(35))
-            out = bgk_relax_tup(C, dt, kn)
+            out = bgk_relax_tup(C, dt, kn, pr, om)
             for q in 1:35
                 Mm[q, idx] = out[q]
             end
@@ -145,7 +145,7 @@ Returns the dt vector used.
 """
 function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                       dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
-                      pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf, s3max::Real=4.0 + abs(Ma) / 2.0, threads::Int=128)
+                      pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf, Pr::Real=1.0, omega::Real=0.5, s3max::Real=4.0 + abs(Ma) / 2.0, threads::Int=128)
     @assert size(M_dev, 1) == 35 "M_dev must be (35,nx,ny,nz)"
     nx = size(M_dev, 2); ny = size(M_dev, 3); nz = size(M_dev, 4)
     dxf = Float64(dx); Maf = Float64(Ma); vacf = Float64(vacuum_floor); s3f = Float64(s3max)
@@ -163,8 +163,9 @@ function march3d_gpu!(M_dev::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Inte
                                            order=order, proj_first_order=proj_first_order, riemann_solver=riemann_solver, limiter=limiter,
                                            pressure_recon=pressure_recon, s3max=s3f, threads=threads, flat=flat, vbuf=vbuf, tbuf=tbuf)
     knf = Float64(Kn); nclM = nx * ny * nz
+    prf = Float64(Pr); omf = Float64(omega)
     bgk! = stage_bgk ?
-        ((Xm, dtv) -> (@cuda threads=threads blocks=cld(nclM, threads) _bgk_kernel!(Xm, nclM, Float64(dtv), knf); nothing)) :
+        ((Xm, dtv) -> (@cuda threads=threads blocks=cld(nclM, threads) _bgk_kernel!(Xm, nclM, Float64(dtv), knf, prf, omf); nothing)) :
         ((Xm, dtv) -> nothing)
 
     used = Vector{Float64}(undef, nstep)
@@ -186,7 +187,7 @@ unless `dts` is supplied. Returns the dt vector used.
 """
 function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                            halo::Int=2, dts=nothing, vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
-                           pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf,
+                           pressure_recon::Bool=false, stage_bgk::Bool=false, Kn::Real=Inf, Pr::Real=1.0, omega::Real=0.5,
                            s3max::Real=4.0 + abs(Ma) / 2.0,
                            threads::Int=128, theta_closed::Bool=true)
     # order==3: route to the z-slab WENO5+θ*-IDP march (its own g=8 haloed-cube path
@@ -196,7 +197,7 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
             error("order-3 z-slab GPU does not support the order-1/2 flux options " *
                   "(limiter/proj_first_order/riemann_solver); it uses WENO5 + θ*-IDP")
         return march3d_slab_order3_gpu!(M, dx, Ma, nstep, comm; dts=dts, s3max=s3max,
-                                        stage_bgk=stage_bgk, Kn=Kn, threads=threads,
+                                        stage_bgk=stage_bgk, Kn=Kn, Pr=Pr, omega=omega, threads=threads,
                                         theta_closed=theta_closed)
     end
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
@@ -219,8 +220,9 @@ function march3d_slab_gpu!(M::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Int
     M1, M2, M3, M1m, M2m, M3m, svec = _rk3_buffers(n, n, nzloc)
     Rint = CUDA.zeros(Float64, 35, n, n, nzloc)
     knf = Float64(Kn); nclM = n * n * nzloc
+    prf = Float64(Pr); omf = Float64(omega)
     bgk! = stage_bgk ?
-        ((Xm, dtv) -> (@cuda threads=threads blocks=cld(nclM, threads) _bgk_kernel!(Xm, nclM, Float64(dtv), knf); nothing)) :
+        ((Xm, dtv) -> (@cuda threads=threads blocks=cld(nclM, threads) _bgk_kernel!(Xm, nclM, Float64(dtv), knf, prf, omf); nothing)) :
         ((Xm, dtv) -> nothing)
     pin() = (h = Array{Float64}(undef, 35, n, n, halo); CUDA.pin(h); h)
     hsT = pin(); hsB = pin(); hrT = pin(); hrB = pin()

@@ -363,19 +363,110 @@ end
 # Maxwellian, so realizability is preserved. Kn=0 => e=0 (instant
 # Maxwellianization); Kn=Inf => e=1 (no-op); rho<=0 returns M unchanged.
 # ---------------------------------------------------------------------------
-@inline function bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64)::NTuple{35,Float64}
+# Pr/omega are POSITIONAL, not keyword, arguments. Keyword arguments do not survive
+# GPU compilation here: the kwarg sorter shows up as dynamic `getindex`/`convert`/
+# `jl_f_tuple` calls and the kernel fails with InvalidIRError (measured 2026-07-24 on
+# CUDA.jl + A100). The 3-argument method below preserves every existing call site.
+@inline bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64) =
+    bgk_relax_tup(M, dt, Kn, 1.0, 0.5)
+
+@inline function bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
+                               Pr::Float64, omega::Float64)::NTuple{35,Float64}
     rho = M[1]
     rho > 0.0 || return M
     u = M[2]/rho; v = M[6]/rho; w = M[16]/rho
     C200 = M[3]/rho - u*u; C020 = M[10]/rho - v*v; C002 = M[20]/rho - w*w
     Theta = (C200 + C020 + C002) / 3
     Theta = Theta > 1e-14 ? Theta : 1e-14
-    tc = Kn / (rho * sqrt(Theta) * 2)
-    e = exp(-dt/tc)
-    MG = from_recon_vars_dev(rho, u, v, w, Theta, Theta, Theta,
-        0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,   # S300,S400,S110,S210,S310,S120,S220,S030,S130,S040
-        0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,             # S101,S201,S301,S102,S202,S003,S103,S004
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)   # S011,S111,S211,S021,S121,S031,S012,S112,S013,S022
+
+    # ---- BYTE-IDENTICAL DEFAULT PATH (Pr=1, omega=1/2) -------------------
+    # Verbatim historical operator. Kept as an explicit branch, not left to the
+    # algebra collapsing: at kappa=0 the ES branch would evaluate 0.0*C200
+    # (= NaN if C200 is Inf, reachable in deep vacuum) and Theta^(-0.5), which
+    # is NOT bitwise 1/sqrt(Theta). See docs/design/esbgk-vhs-transport.md §7.
+    if Pr == 1.0 && omega == 0.5
+        tc = Kn / (rho * sqrt(Theta) * 2)
+        e = exp(-dt/tc)
+        MG = from_recon_vars_dev(rho, u, v, w, Theta, Theta, Theta,
+            0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,   # S300,S400,S110,S210,S310,S120,S220,S030,S130,S040
+            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,             # S101,S201,S301,S102,S202,S003,S103,S004
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)   # S011,S111,S211,S021,S121,S031,S012,S112,S013,S022
+        return ntuple(i -> MG[i] - e * (MG[i] - M[i]), Val(35))
+    end
+
+    # ES-BGK + VHS lives in its own @noinline method. Keeping it inline here made
+    # the combined body exceed what Julia can infer for the GPU: the kernel failed
+    # to compile with dynamic getindex/convert/jl_f_tuple calls, and it failed even
+    # when the ES branch was unreachable, because dead code is still inferred.
+    # Splitting the method fixes it and leaves the default path above untouched.
+    return _esbgk_relax_tup(M, dt, Kn, Pr, omega, rho, u, v, w, C200, C020, C002, Theta)
+end
+
+# ---------------------------------------------------------------------------
+# ES-BGK (anisotropic-Gaussian target) + VHS relaxation time. Reached only when
+# (Pr, omega) != (1, 1/2). See docs/design/esbgk-vhs-transport.md.
+# ---------------------------------------------------------------------------
+@noinline function _esbgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
+                                    Pr::Float64, omega::Float64,
+                                    rho::Float64, u::Float64, v::Float64, w::Float64,
+                                    C200::Float64, C020::Float64, C002::Float64,
+                                    Theta::Float64)::NTuple{35,Float64}
+
+    # tau_ref fixes mu = p*tau_ref INDEPENDENT of Pr, so changing the Prandtl
+    # number does not silently change the viscosity.
+    tau_ref = (Kn / 2) * Theta^(omega - 1.0) / rho
+    y = dt / tau_ref
+    y > 0.0 || return M                 # Kn=Inf / dt=0: no collision (also traps NaN)
+
+    e = exp(-Pr * y)                    # non-conserved decay
+    # kappa = (a-e)/(1-e), a = exp(-y); evaluated via expm1 for stability at small y.
+    # Branch on Pr==1 rather than relying on expm1(0)=0, because (Pr-1)*y is 0*Inf=NaN
+    # at Kn=0.
+    kappa = (Pr == 1.0) ? 0.0 :
+            -exp(-Pr * y) * expm1((Pr - 1.0) * y) / expm1(-Pr * y)
+
+    C110 = M[7]/rho  - u*v
+    C101 = M[17]/rho - u*w
+    C011 = M[26]/rho - v*w
+
+    # ES target covariance Lambda = (1-kappa)*Theta*I + kappa*C.  tr(Lambda)=3*Theta
+    # exactly, so energy is conserved.
+    omk = 1.0 - kappa
+    L11 = omk*Theta + kappa*C200
+    L22 = omk*Theta + kappa*C020
+    L33 = omk*Theta + kappa*C002
+    L12 = kappa*C110; L13 = kappa*C101; L23 = kappa*C011
+
+    # Sylvester PD guard. Unreachable for genuinely PSD C (see spec §6); it fires only
+    # on numerically corrupt states, so retreat all the way to the isotropic Maxwellian
+    # target rather than partially.
+    m1 = L11
+    m2 = L11*L22 - L12*L12
+    m3 = L11*(L22*L33 - L23*L23) - L12*(L12*L33 - L23*L13) + L13*(L12*L23 - L22*L13)
+    if !(m1 > 0.0 && m2 > 0.0 && m3 > 0.0)
+        L11 = Theta; L22 = Theta; L33 = Theta
+        L12 = 0.0;   L13 = 0.0;   L23 = 0.0
+    end
+
+    s1 = sqrt(L11); s2 = sqrt(L22); s3 = sqrt(L33)
+    r1 = L12/(s1*s2); r2 = L13/(s1*s3); r3 = L23/(s2*s3)   # correlations of Lambda
+
+    # Standardized moments of the CORRELATED Gaussian (Isserlis). At r=0 these
+    # collapse exactly to the isotropic literals used above.
+    S310 = 3.0*r1; S130 = 3.0*r1
+    S301 = 3.0*r2; S103 = 3.0*r2
+    S031 = 3.0*r3; S013 = 3.0*r3
+    S220 = 1.0 + 2.0*r1*r1
+    S202 = 1.0 + 2.0*r2*r2
+    S022 = 1.0 + 2.0*r3*r3
+    S211 = r3 + 2.0*r1*r2
+    S121 = r2 + 2.0*r1*r3
+    S112 = r1 + 2.0*r2*r3
+
+    MG = from_recon_vars_dev(rho, u, v, w, L11, L22, L33,
+        0.0, 3.0, r1, 0.0, S310, 0.0, S220, 0.0, S130, 3.0,     # S300,S400,S110,S210,S310,S120,S220,S030,S130,S040
+        r2, 0.0, S301, 0.0, S202, 0.0, S103, 3.0,               # S101,S201,S301,S102,S202,S003,S103,S004
+        r3, 0.0, S211, 0.0, S121, S031, 0.0, S112, S013, S022)  # S011,S111,S211,S021,S121,S031,S012,S112,S013,S022
     return ntuple(i -> MG[i] - e * (MG[i] - M[i]), Val(35))
 end
 

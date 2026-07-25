@@ -259,11 +259,29 @@ vacuum is a diagnostic that something upstream is wrong.
 
 ## 7. Integration points
 
-`bgk_relax_tup` remains the single source and gains two keyword arguments:
+`bgk_relax_tup` remains the single source and gains two **positional** arguments:
 
 ```julia
-bgk_relax_tup(M, dt, Kn; Pr=1.0, omega=0.5)
+bgk_relax_tup(M, dt, Kn)                    # 3-arg forwarder -> (…, 1.0, 0.5)
+bgk_relax_tup(M, dt, Kn, Pr, omega)         # 5-arg
 ```
+
+> **Correction (2026-07-24, found in implementation).** This section originally
+> specified `Pr`/`omega` as *keyword* arguments. That does not compile for the GPU:
+> the keyword-argument sorter appears in device code as dynamic `getindex` /
+> `convert` / `jl_f_tuple` calls and the kernel fails with `InvalidIRError`.
+> They must be positional. The 3-argument forwarder preserves every existing call
+> site, so nothing else changed.
+
+> **Correction (2026-07-24, found in implementation).** The ES branch must live in
+> its own `@noinline` method (`_esbgk_relax_tup`), not inline inside
+> `bgk_relax_tup`. With both branches in one body the method exceeded what Julia
+> could infer for the GPU and the kernel failed to compile — **including when the ES
+> branch was unreachable**, because dead code is still inferred. Bisection confirmed
+> it: deleting the ES body fixed compilation, while merely early-returning before it
+> did not. Splitting the method fixes it and leaves the default path byte-identical.
+> This is the same `@noinline`-as-a-tool practice already documented at the top of
+> `recon_dev.jl`, used there for FP parity rather than compilability.
 
 Call sites:
 
