@@ -10,11 +10,25 @@ dM/dt = (MG - M)/tc
 - `M`: 35-element moment vector
 - `dt`: Time step
 - `Kn`: Knudsen number
+- `Pr`: Prandtl number (default `1.0` = plain BGK; `2/3` = monatomic, via ES-BGK)
+- `omega`: VHS viscosity exponent, `mu ~ T^omega` (default `0.5` = hard spheres)
+
+`Pr = 1.0, omega = 0.5` reproduces the historical operator bitwise. Anything else
+delegates to the single-source `ReconDev.bgk_relax_tup`; see
+`docs/design/esbgk-vhs-transport.md`.
 
 # Returns
 - `Mout`: Updated moments after collision
 """
-function collision35(M, dt, Kn)
+function collision35(M, dt, Kn; Pr::Real = 1.0, omega::Real = 0.5)
+    # ES-BGK / VHS is single-sourced in `ReconDev.bgk_relax_tup`; delegate rather than
+    # duplicate the Isserlis target here. The default path below stays verbatim so the
+    # golden (test/test_golden_files.jl) is bit-for-bit unaffected.
+    if !(Pr == 1.0 && omega == 0.5)
+        return collect(bgk_relax_tup(NTuple{35,Float64}(Float64.(M)),
+                                     Float64(dt), Float64(Kn),
+                                     Float64(Pr), Float64(omega)))
+    end
     # Extract conserved quantities and compute temperature
     rho = M[1]
     umean = M[2] / rho
