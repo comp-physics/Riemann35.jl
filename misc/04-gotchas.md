@@ -30,6 +30,19 @@
   retries 4× then falls back to the git registry (`JULIA_PKG_SERVER=""`). Check the log
   for the 404 before debugging code.
 
+## Physics / scheme
+
+- **`stage_bgk` over-relaxes: mu and k are ~1.85x too small at finite Kn.** It applies the
+  collision with the FULL `dt` after each of the three SSP-RK3 stages; the convex
+  combinations compose to `F(s) = s(s+1)(s+2)/6` with `F'(1) = 11/6`, so the deviatoric
+  stress relaxes 11/6 times too fast. **Pr is unaffected** (both coefficients scale
+  identically), which is why the operator-level transport gate — verified to 1e-14 — cannot
+  see it; only a spatial measurement of an absolute rate can. Measured shear-decay ratio
+  0.5305 vs the predicted 6/11 = 0.5455, and 0.9836 with the collision applied once per
+  step. Fix is OPT-IN: `stage_bgk_exact = true`. See
+  [`docs/design/stage-bgk-transport-defect.md`](../docs/design/stage-bgk-transport-defect.md).
+  Turn it on for anything where an absolute transport coefficient matters.
+
 ## Floating-point parity
 
 - **Shared `@fastmath` central-moment helpers MUST be `@noinline`.** `@fastmath` lets

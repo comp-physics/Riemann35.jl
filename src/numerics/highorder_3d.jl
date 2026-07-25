@@ -551,7 +551,8 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc,
                             order::Int=2, use_limiter::Bool=false, use_proj_recon::Bool=false,
                             stage_bgk_kn=nothing, s3max::Real = 4.0 + abs(Ma) / 2.0,
                             use_logjacobi_recon::Bool=false,
-                            Pr::Real=1.0, omega::Real=0.5)
+                            Pr::Real=1.0, omega::Real=0.5,
+                            stage_bgk_exact::Bool=false)
     R = similar(M)
     int = (halo+1:halo+nx, halo+1:halo+ny, 1:nz, :)
     # A side is a RANK boundary iff a real neighbour rank sits there (encoded as a
@@ -582,9 +583,10 @@ function step_highorder_3d!(M::Array{Float64,4}, dt::Real, decomp, bc,
         stage_bgk_kn === nothing && return nothing
         kn = Float64(stage_bgk_kn); dtf = Float64(dt)
         prf = Float64(Pr); omf = Float64(omega)   # Pr=1, omega=0.5 => verbatim BGK
+        rk3 = stage_bgk_exact   # correct the 3-stage composite (see recon_dev.jl)
         @inbounds for k in 1:nz, j in halo+1:halo+ny, i in halo+1:halo+nx
             Mt = ntuple(q -> Mwork[i, j, k, q], Val(35))
-            out = bgk_relax_tup(Mt, dtf, kn, prf, omf)
+            out = bgk_relax_tup(Mt, dtf, kn, prf, omf, rk3)
             for q in 1:35
                 Mwork[i, j, k, q] = out[q]
             end
