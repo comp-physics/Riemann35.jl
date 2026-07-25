@@ -16,10 +16,11 @@ Pipeline, per axis line (all four steps device-safe):
 """
 module HiOrder3ReconDev
 
-include(joinpath(@__DIR__, "weno5_dev.jl"));       using .Weno5Dev: weno5z, deconv5, conv5, smooth5
-include(joinpath(@__DIR__, "recon_dev.jl"));       using .ReconDev: to_recon_vars_dev, from_recon_vars_dev,
+# Siblings, loaded once by the owner — see the note in roeps3_dev.jl.
+using ..Weno5Dev: weno5z, deconv5, conv5, smooth5
+using ..ReconDev: to_recon_vars_dev, from_recon_vars_dev,
     to_recon_vars_tup, from_recon_vars_tup
-include(joinpath(@__DIR__, "riemann_flux_dev.jl")); using .RiemannFluxDev: _state_realizable
+using ..RiemannFluxDev: _state_realizable
 
 export recon_point_dev, recon_avg_dev, weno_faces_dev, weno_scaled_face_dev,
        recon_vars_realizable

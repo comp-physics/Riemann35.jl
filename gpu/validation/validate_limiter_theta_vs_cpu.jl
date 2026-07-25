@@ -9,9 +9,7 @@
 # only degree of freedom the limiter adds, and it must match CPU to the bisection quantum
 # (2^-20 ~ 9.54e-7). GATE: max|dtheta| <= 2^-20*(1+eps) AND no cell beyond 1e-6.
 using Riemann35
-include(joinpath(@__DIR__, "..", "..", "src", "numerics", "recon_dev.jl"))
-include(joinpath(@__DIR__, "..", "..", "src", "realizability", "realize_dev.jl"))
-using .RealizeDev: scaling_theta_dev
+using Riemann35.RealizeDev: scaling_theta_dev
 using Printf
 DATA = get(ENV, "RIEMANN35_DATA", joinpath(@__DIR__, "..", "..", "data"))
 meta = split(strip(read(joinpath(DATA,"r3d.meta"),String)),'\n'); n=parse(Int,meta[1])

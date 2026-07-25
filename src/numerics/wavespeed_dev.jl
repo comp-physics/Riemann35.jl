@@ -31,17 +31,16 @@ is [[0,1,0],[e194,e209,e224],[e195,e210,e225]]; the 4x4 block is the companion m
 `Ma` is carried through for caller-signature parity but is UNUSED in the wave-speed
 path (it is unused in the CPU `realize_and_speed` chain too).
 
-Pure addition under `gpu/`; not wired into production; fp64.
+Plain Julia, no CUDA dependency: lives in `src/numerics/` and is loaded once by the
+device-kernel block in `src/Riemann35.jl`, then shared by the CPU chain and the GPU
+kernels alike. fp64.
 """
 module WavespeedDev
 
-include(joinpath(@__DIR__, "..", "src", "numerics", "recurrence_dev.jl"))
-using .RecurrenceDev: recurrence5_dev
-include(joinpath(@__DIR__, "..", "src", "numerics", "moment_correction_dev.jl"))
-using .MomentCorrectionDev: correct_moments_dev
-
-include(joinpath(@__DIR__, "schur4.jl"))
-using .Schur4: schur4_realpart_minmax, ferrari_realpart_minmax
+# Siblings, loaded once by the owner — see the note in roeps3_dev.jl.
+using ..RecurrenceDev: recurrence5_dev
+using ..MomentCorrectionDev: correct_moments_dev
+using ..Schur4: schur4_realpart_minmax, ferrari_realpart_minmax
 
 export realize_and_speed_dev, realize_and_speed_Mr_dev, jac15_eig_dev, closure5_dev,
        correct_moments_dev, eig3_realparts_dev

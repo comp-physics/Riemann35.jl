@@ -10,9 +10,9 @@ cells sharing it (done by the residual caller).
 """
 module IdpLimiterDev
 
-include(joinpath(@__DIR__, "riemann_flux_dev.jl"))
-using .RiemannFluxDev: _state_realizable
-using .RiemannFluxDev.RoePS3Dev.MomentIndices: MARG_IDX
+# Siblings, loaded once by the owner — see the note in roeps3_dev.jl.
+using ..RiemannFluxDev: _state_realizable
+using ..MomentIndices: MARG_IDX
 
 export theta_star_update_dev, theta_star_update_closed
 

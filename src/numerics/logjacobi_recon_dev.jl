@@ -28,7 +28,8 @@ GPU port consumes these same maps.
 """
 module LogJacobiReconDev
 
-include(joinpath(@__DIR__, "weno5_dev.jl")); using .Weno5Dev: weno5z, deconv5, conv5, smooth5
+# Sibling, loaded once by the owner — see the note in roeps3_dev.jl.
+using ..Weno5Dev: weno5z, deconv5, conv5, smooth5
 
 export marg_m_to_J, marg_J_to_m, logjacobi_marginal_faces, affine_remap_axis, _affine_remap
 

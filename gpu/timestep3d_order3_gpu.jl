@@ -42,8 +42,9 @@ using Random: randn!          # CUDA.jl extends randn! for CuArrays (CUDA.randn!
 
 include(joinpath(@__DIR__, "residual3d_order3_gpu.jl"))
 using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
-using .Residual3DOrder3GPU.RealizeDev: realizable_3D_M4_dev
-using .Residual3DOrder3GPU.ReconDev: bgk_relax_tup
+# the package's single instances, not nested copies
+using Riemann35.RealizeDev: realizable_3D_M4_dev
+using Riemann35.ReconDev: bgk_relax_tup
 
 export march3d_order3_gpu!, march3d_slab_order3_gpu!, build_haloed_cube, interior_from_cube!
 

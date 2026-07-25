@@ -125,9 +125,9 @@ from the standalone autogen `M4toC4_3D`/`C4toM4_3D`, which the `1/sC200^k` stand
 CPU path delegates only the **correction** (`realizable_3D_M4_corr_dev`) and finishes with the autogen
 `standardized_to_M4`, so the reconstructed moments stay bit-for-bit with the reference.
 
-**Wave-speed is intentionally NOT single-sourced** (`gpu/wavespeed_dev.jl` + `gpu/schur4.jl` stay here).
-Its core is the eigenvalue computation, and the CPU/GPU versions are two *legitimately different*
-implementations — not duplication — because LAPACK cannot run inside a CUDA kernel:
+**Wave-speed is intentionally NOT single-sourced with the CPU eigen path.** The CPU keeps LAPACK;
+the device path keeps its own solvers. These are two *legitimately different* implementations — not
+duplication — because LAPACK cannot run inside a CUDA kernel:
 - 4×4 non-symmetric block: CPU `jac4_realpart_minmax` (LAPACK `dgeev`) vs GPU `schur4` (custom Francis QR).
   These differ by rel ~4.6e-8 on ill-conditioned high-Ma companion blocks (verified, `validate_schur4.jl`)
   — far above the golden 1e-10, so the CPU cannot adopt `schur4` without breaking byte-parity.
@@ -137,6 +137,29 @@ implementations — not duplication — because LAPACK cannot run inside a CUDA 
 So the port is **complete**: the genuinely-duplicated algebra is shared; the only per-platform code left
 is the eigenvalue backend, which *must* differ between CPU (LAPACK, golden-accurate) and GPU (custom
 kernels, LAPACK-free).
+
+**Where the device eigen backend lives (moved 2026-07-24).** `wavespeed_dev.jl` and `schur4.jl` now sit
+in `src/numerics/` with every other `*_dev.jl`. This is a *location* change only, made so the package
+owns exactly one instance of each device module (see below) — it does **not** change the numerics above.
+The CPU wave-speed path still uses LAPACK and still does not call `schur4`; the 4.6e-8 companion-block
+discrepancy is exactly why it must not, and that remains true.
+
+## One instance per process (do not `include` device kernels)
+
+Every shared device module is included **exactly once**, by the device-kernel block in
+`src/Riemann35.jl`, and consumers reach them as `using Riemann35.ReconDev: ...`. Nothing under `gpu/`
+includes a device file any more.
+
+This matters for compile time, not just tidiness. `include` splices text, so each include site builds a
+*separate* module that Julia type-infers and LLVM-compiles, and that `ptxas` then compiles again per
+kernel. The old graph included device files from both the package and each GPU module, recursively
+(device files included each other), so loading `gpu/timestep3d_gpu.jl` compiled **1.94x** the device
+code it needed: `realize_dev` x3, `recon_dev` x4, `riemann_flux_dev` x4, `roeps3_dev` x4,
+`recurrence_dev` x6. That is 6258 duplicated lines of the most expensive arithmetic in the repo, on top
+of the `-g0` ptxas cost documented below.
+
+If you add a device module: include it once in that block, in dependency order, and refer to its
+siblings with `using ..Sibling` — never `include` a sibling.
 
 ---
 
@@ -175,7 +198,7 @@ eig (realizability + closure). cuSOLVER `syevjBatched` is the right tool; `versi
 > `realize_gpu` → `wavespeed_dev` → `schur4`, plus the `src/*_dev` single-source kernels). The speedup
 > numbers below are **historical milestones**; the scripts that produced them are recoverable from git
 > history (branch `gpu-single-source-port`, before the prune commit). The custom Schur eig itself lives on
-> in `schur4.jl` (validated by `validate_schur4.jl`) and is used by the 3D path via `wavespeed_dev.jl`.
+> in `src/numerics/schur4.jl` (validated by `validate_schur4.jl`) and is used by the 3D path via `src/numerics/wavespeed_dev.jl`.
 
 ## Non-symmetric 4×4 wave-speed eig — SOLVED with a custom batched kernel
 

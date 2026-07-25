@@ -23,11 +23,10 @@ module RealizeGPU
 
 using CUDA
 
-# realize_dev.jl (module RealizeDev) references ReconDev as a sibling via `using
-# ..ReconDev`, so recon_dev.jl must be included into THIS module first.
-include(joinpath(@__DIR__, "..", "src", "numerics", "recon_dev.jl"))
-include(joinpath(@__DIR__, "..", "src", "realizability", "realize_dev.jl"))
-using .RealizeDev: realizable_3D_M4_dev
+# Device kernels come from the package — ONE instance per process. Do NOT
+# `include` them here (see src/Riemann35.jl's device-kernel block).
+using Riemann35: ReconDev, RealizeDev
+using Riemann35.RealizeDev: realizable_3D_M4_dev
 
 export realizable_batched!, realizable_batched
 

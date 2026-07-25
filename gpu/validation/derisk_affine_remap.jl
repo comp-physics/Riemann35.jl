@@ -1,7 +1,6 @@
 # derisk_affine_remap.jl — does _affine_remap compile + run in a GPU kernel, matching CPU?
 using CUDA, Printf
-include(joinpath(@__DIR__, "..", "..", "src", "numerics", "logjacobi_recon_dev.jl"))
-using .LogJacobiReconDev: _affine_remap
+using Riemann35.LogJacobiReconDev: _affine_remap
 include(joinpath(@__DIR__, "..", "..", "src", "Riemann35.jl"))  # for InitializeM4_35 (CPU ref)
 using .Riemann35: InitializeM4_35
 

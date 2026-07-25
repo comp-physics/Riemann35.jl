@@ -2,8 +2,7 @@
 # chains (built from random node measures, so realizable + arbitrary shape). θ* reads
 # only the 15 marginal slots (MARG_IDX), so cross slots are irrelevant. Find the bug.
 using Riemann35, Printf, Random
-include(joinpath(@__DIR__, "..", "..", "src", "numerics", "idp_limiter_dev.jl"))
-using .IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
+using Riemann35.IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
 const _real = IdpLimiterDev.RiemannFluxDev._state_realizable
 const MI = IdpLimiterDev.RiemannFluxDev.RoePS3Dev.MomentIndices.MARG_IDX
 
