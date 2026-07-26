@@ -5,6 +5,10 @@
 #   :outflow  — zero-gradient (copy nearest interior cell)
 #   :inlet    — Dirichlet Maxwellian (CROSSFLOW_INLET[]); low-x by convention
 #   :periodic — wrap-around (must be set on BOTH faces of an axis)
+#   :wall     — Maxwell-accommodating wall (grid-aligned, stationary in the normal
+#               direction; tangential motion allowed). Per-face parameters live in
+#               `WALL_SPEC[]`: (Tw, uw1, uw2, alpha), alpha=0 fully specular (EXACT),
+#               alpha=1 fully diffuse. See src/numerics/wall_ghost_dev.jl.
 #   :sponge   — absorbing layer: the HALO behaves as :outflow, and a spatially
 #               ramped exact-exponential relaxation to a freestream Maxwellian
 #               is applied in the interior near the face (see sponge.jl). This
@@ -16,7 +20,28 @@
 # byte-for-byte identical to the hand-written branches they replace.
 
 const FACE_KEYS     = (:xlo, :xhi, :ylo, :yhi, :zlo, :zhi)
-const FACE_BC_TYPES = (:outflow, :inlet, :periodic, :sponge)
+const FACE_BC_TYPES = (:outflow, :inlet, :periodic, :sponge, :wall)
+
+# Per-face wall parameters, set from params by simulation_runner (nothing => no :wall
+# face is in use). Mirrors the CROSSFLOW_INLET[] pattern: a Ref rather than threading an
+# extra argument through every halo call. Each face maps to (Tw, uw1, uw2, alpha) where
+# uw1/uw2 are the TANGENTIAL wall velocities in cyclic order after the face normal.
+const WALL_SPEC = Ref{Union{Nothing,NamedTuple}}(nothing)
+
+"""
+    wall_face_params(face::Symbol) -> (Tw, uw1, uw2, alpha)
+
+Wall parameters for one face. Falls back to a stationary fully-diffuse wall at T=1 if the
+face is absent from `WALL_SPEC[]`, so a partially-specified spec is still well defined.
+"""
+function wall_face_params(face::Symbol)
+    spec = WALL_SPEC[]
+    spec === nothing && return (1.0, 0.0, 0.0, 1.0)
+    fp = get(spec, face, nothing)
+    fp === nothing && return (1.0, 0.0, 0.0, 1.0)
+    (Float64(get(fp, :Tw, 1.0)), Float64(get(fp, :uw1, 0.0)),
+     Float64(get(fp, :uw2, 0.0)), Float64(get(fp, :alpha, 1.0)))
+end
 
 # Preset -> canonical six-face spec.
 const _BC_PRESETS = Dict{Symbol,NamedTuple}(
@@ -55,6 +80,9 @@ end
 # How a face type presents to the HALO refill: a sponge face is zero-gradient at
 # the halo (its absorbing effect is an interior source, not a ghost value).
 @inline halo_face_type(t::Symbol) = t === :sponge ? :outflow : t
+
+"The faces carrying a Maxwell-accommodating wall."
+wall_faces(spec::NamedTuple) = Tuple(k for k in FACE_KEYS if spec[k] === :wall)
 
 # The faces (subset of FACE_KEYS) carrying an absorbing sponge layer.
 sponge_faces(spec::NamedTuple) = Tuple(k for k in FACE_KEYS if spec[k] === :sponge)

@@ -200,11 +200,19 @@ function apply_physical_bc_3d!(A::Array{T,4}, decomp, bc) where T
 
         # lo face
         if lonb == -1
-            _refill_face!(A, a, 1:h, h + 1, halo_face_type(lotyp), inlet, nv)
+            if lotyp === :wall
+                _refill_wall_face!(A, a, h, na, false, FACE_KEYS[2a-1], nv)
+            else
+                _refill_face!(A, a, 1:h, h + 1, halo_face_type(lotyp), inlet, nv)
+            end
         end
         # hi face
         if hinb == -1
-            _refill_face!(A, a, (h + na + 1):(h + na + h), h + na, halo_face_type(hityp), inlet, nv)
+            if hityp === :wall
+                _refill_wall_face!(A, a, h, na, true, FACE_KEYS[2a], nv)
+            else
+                _refill_face!(A, a, (h + na + 1):(h + na + h), h + na, halo_face_type(hityp), inlet, nv)
+            end
         end
     end
 
@@ -231,3 +239,42 @@ end
     return A
 end
 
+
+
+# ---------------------------------------------------------------------------
+# Maxwell-accommodating wall ghost fill.
+#
+# Ghost layer k MIRRORS interior layer k about the face, then the wall transform is
+# applied to the mirrored state. Mirroring (rather than copying the nearest interior
+# cell, as :outflow does) is what makes the multi-layer halo consistent: specular
+# reflection of a half-space IS the mirror map, so ghost layer k must see the interior
+# cell at the same distance from the wall. This matters at order 3, where g = 8.
+#
+#   lo face: ghost d in 1..h   mirrors interior 2h+1-d
+#   hi face: ghost h+na+q      mirrors h+na+1-q
+#
+# Requires na >= h (interior at least as wide as the halo), which is asserted.
+# ---------------------------------------------------------------------------
+function _refill_wall_face!(A::Array{T,4}, a::Int, h::Int, na::Int, hi::Bool,
+                            face::Symbol, nv::Int) where T
+    na >= h || error("wall BC on axis $a needs interior width na=$na >= halo h=$h " *
+                     "(ghost layer k mirrors interior layer k)")
+    Tw, uw1, uw2, alpha = wall_face_params(face)
+    outward = hi ? 1.0 : -1.0
+    @inbounds for k in 1:h
+        dst = hi ? (h + na + k) : (h + 1 - k)
+        src = hi ? (h + na + 1 - k) : (h + k)
+        sd = selectdim(A, a, dst); ss = selectdim(A, a, src)
+        vd = ndims(sd)
+        # iterate the transverse plane; each cell gets its own wall transform
+        sz = size(ss)[1:end-1]
+        for idx in CartesianIndices(sz)
+            M = ntuple(m -> ss[idx, m], Val(35))
+            G = wall_ghost_tup(M, a, outward, Tw, uw1, uw2, alpha)
+            for m in 1:35
+                sd[idx, m] = G[m]
+            end
+        end
+    end
+    return A
+end

@@ -256,6 +256,20 @@ function simulation_runner(params)
     # by 11/6, making mu and k each ~1.85x too small (Pr is unaffected, which is why
     # operator-level checks cannot see it). NOT byte-identical when enabled.
     stage_bgk_exact = Bool(get(params, :stage_bgk_exact, false))
+
+    # wall_spec (OPT-IN): per-face Maxwell-accommodating wall parameters, consumed by the
+    # :wall face type. Each entry is (Tw, uw1, uw2, alpha) with uw1/uw2 the TANGENTIAL
+    # wall velocities in cyclic order after the face normal, and alpha the accommodation
+    # coefficient (0 = fully specular and EXACT, 1 = fully diffuse). Faces omitted here
+    # fall back to a stationary fully-diffuse wall at T=1.
+    #   e.g. Couette:  wall_spec = (ylo=(Tw=1.0, uw1=0.0, uw2=-U, alpha=1.0),
+    #                               yhi=(Tw=1.0, uw1=0.0, uw2=+U, alpha=1.0))
+    # Set to `nothing` (the default) when no :wall face is in use.
+    WALL_SPEC[] = get(params, :wall_spec, nothing)
+    if any(f -> faces[f] === :wall, FACE_KEYS) && WALL_SPEC[] === nothing
+        @warn "a :wall face is set but params has no :wall_spec; " *
+              "defaulting every wall to stationary fully-diffuse at T=1"
+    end
     (0.5 <= omega_coll <= 1.0) ||
         error("omega=$omega_coll outside supported range [0.5, 1]")
 
