@@ -87,3 +87,75 @@ scale: measured V100 wall time to t=0.004 (Ma=100 crossing jets) was 6.6 s/step 
 (14k cells) but 3.0 s/step at 48³ (110k cells) — 8× the cells at half the per-step time.
 Extrapolated CPU cost at 48³ is ~10 h vs ~15 min on the GPU (~40×). Use `-g0` for fast
 ptxas. Reference/sweep drivers: `scripts/build_ic.jl`, `scripts/gpu_ref_run.jl`.
+
+## Wall-bounded finding (2026-07-26): no steady state in force-driven channel flow
+
+**The projection has no steady state in planar Poiseuille at Kn_H = lambda/H in
+0.2–1.0, while full-35 under identical numerics converges to six figures.**
+
+Force-driven channel, two stationary fully-diffuse walls, ES-BGK at Pr = 2/3 and
+omega = 0.81, body force applied exactly (a uniform force is a rigid translation in
+velocity space, so central moments are untouched — `src/numerics/body_force.jl`).
+Dimensionless flow rate Q against march length, at Kn_H = 1:
+
+| TENDF (diffusion times) | Q full-35 | Q reduced-26 |
+|---|---|---|
+| 1.2 | 0.99288 | 1.15738 |
+| 3.0 | 0.99530 | 1.85082 |
+| 6.0 | 0.99531 | 2.63706 |
+
+Full-35 plateaus (0.99530 → 0.99531, drift 1.4e-6). Reduced-26 grows without bound,
+and cleanly: fitting Q ∝ T^p gives p = 0.513 and 0.511 across the two intervals, so
+Q ~ sqrt(T). That exponent is the signature of a momentum sink that fails to close —
+momentum diffusing into an effectively unbounded medium rather than pinning to the
+channel half-width — which is what a wrong wall-normal momentum transport would do.
+
+**It is not a timestep artifact.** Halving and quartering dt leaves the reduced result
+essentially unchanged (1.85082 → 1.85747 → 1.86479, 0.4% per halving), so the growth
+is intrinsic to the dynamics rather than to the once-per-step operator split.
+
+**The Ma=100 chaos argument above does not cover this case, and that is the point.**
+The section on the Ma=100 crossing jets observes separately-evolved reduced-vs-full
+differences that *grow* (~0.15–0.30) and attributes them to trajectory drift, then
+recommends assessing the reduction by the per-step residual instead. That reasoning is
+sound where chaos is genuinely present. It is unavailable here: planar Poiseuille at
+Kn ~ 1 is laminar, steady and one-dimensional, the companion full-35 run converges to
+six digits under the same numerics, and the relative difference reaches 0.86 → 1.65 —
+far past what was seen at Ma=100. Chaos cannot produce unbounded growth in a flow whose
+companion solve converges to six figures.
+
+The per-step residual and the closed-loop dynamics answer different questions. The
+residual is an *instantaneous, linearised* measure: it says the reduced manifold lies
+close to the current full-35 state. It does not bound the reduced *trajectory*. Because
+`reduce26_moments` is an exact idempotent projection (verified: R∘R = R to machine
+zero — the nine closed values depend only on retained moments, which R never touches),
+a small residual is expected whether or not the closed loop is stable. So a shrinking
+residual is necessary, not sufficient, and the two metrics can and here do disagree.
+
+### What this does and does not indict
+
+It indicts **this form of the reduction** — the per-cell per-step overwrite, which is
+what `REDUCE26[]` implements and what the notes' `sec:oblique-reduce26` measured. It
+does not settle the reduced *system*, because that system does not exist in code: the
+35-moment fifth-order closure consumes the nine dropped moments (`S410 ← S310`,
+`S311 ← S211`, `S221 ← S121, S211`, plus permutations), so carrying 26 moments requires
+its own fifth-order closure rather than the 35-moment one with nine arguments
+overwritten. Deriving those 21 closures for a 26-moment state is the open item.
+
+This is the dynamical counterpart of a static result already on record (S. Bryngelson to
+R. O. Fox, 2026-07-22): setting s310 to eq. (43) *as a value* while keeping it as an
+evolved variable restores real eigenvalues on only ~25% of the planes where dropping it
+*as a variable* works structurally. Overwrite-as-value and drop-as-variable were already
+known to differ for hyperbolicity; they differ for the dynamics too.
+
+### Reproducing
+
+    julia --project=. test/probe_poiseuille.jl          # PS_KNH, PS_TEND, PS_CFL
+    julia --project=. test/probe_reduce26_residual.jl   # per-moment closure residual
+
+Caveat on the companion residual measurement: in wall-bounded Couette the closure
+reproduces the *streamwise* odd moment S310 to 0.7–2% but misses the *wall-normal* S130
+by up to 12% (worst-cell residuals 11–22%, concentrated in wall cells). Both are ~3x the
+shear stress, which is exactly what the closure predicts at leading order — S310 =
+S110*S400 with S400 → 3 for a near-Maxwellian — so magnitude alone is not evidence
+against the reduction. The streamwise/wall-normal asymmetry is.
