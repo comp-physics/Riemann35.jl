@@ -1071,6 +1071,16 @@ function simulation_runner(params)
             M[halo+1:halo+nx, halo+1:halo+ny, :, :] = Mnp[halo+1:halo+nx, halo+1:halo+ny, :, :]
         end
 
+        # Opt-in 26-moment reduction (Rodney Fox): project the nine odd 4th-order
+        # moments onto their closure each step, mimicking the reduced-moment
+        # dynamics. Default off => full 35-moment evolution (byte-identical).
+        if REDUCE26[]
+            @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+                ih = i + halo; jh = j + halo
+                M[ih, jh, k, :] = reduce26_moments(@view M[ih, jh, k, :])
+            end
+        end
+
         # Rigid immersed obstacle: re-impose the held rest Maxwellian on the disk
         # cells so the obstacle stays fixed (no-slip, no breathing) every step.
         if hold_obstacle
