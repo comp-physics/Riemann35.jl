@@ -63,6 +63,12 @@ All second order; `prec` costs ~17% in the error constant on this case.
 
 ## Verdict
 
+> **Caveat added 2026-07-25.** `stage_bgk` carries an O(1) transport error: it makes `mu`
+> and `k` each ~1.85x too small at **finite Kn**. The contact result below is at **Kn = 0**,
+> where over-relaxation is harmless, so this study's conclusions stand — but the bundle is
+> not safe for viscous/thermal problems without `stage_bgk_exact = true`. See
+> [`stage-bgk-transport-defect.md`](stage-bgk-transport-defect.md).
+
 **Recommended bundle: `ho_pressure_recon = true` + `stage_bgk = true`**
 (exposed as `scheme = :recommended`).
 

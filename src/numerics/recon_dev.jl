@@ -367,11 +367,55 @@ end
 # GPU compilation here: the kwarg sorter shows up as dynamic `getindex`/`convert`/
 # `jl_f_tuple` calls and the kernel fails with InvalidIRError (measured 2026-07-24 on
 # CUDA.jl + A100). The 3-argument method below preserves every existing call site.
+# ---------------------------------------------------------------------------
+# SSP-RK3 composite correction for stage-wise collision.
+#
+# `stage_bgk` applies the collision once per SSP-RK3 stage with the FULL dt. With
+# L=0 and per-stage factor s, the convex combinations compose to
+#     F(s) = s/3 + s^2/2 + s^3/6 = s(s+1)(s+2)/6,
+# and F'(1) = 11/6 -- so three full-dt applications relax the deviatoric stress at
+# (11/6)/tau instead of 1/tau. MEASURED: that makes mu and k each 1.85x too small
+# (shear-wave decay ratio 0.5305 vs the predicted 6/11 = 0.5455, and 0.9836 when the
+# collision is applied once per step instead). Pr is unaffected because both mu and k
+# scale identically, which is why an operator-level or ratio-based check cannot see it.
+#
+# `_rk3_stage_factor(E)` returns the per-stage s with F(s) = E, so three stages compose
+# to exactly exp(-dt/tau). F is monotone on [0,1] (F(0)=0, F(1)=1) so Newton converges
+# from s0 ~ 3E. tau is per-CELL, so this correction must live here and cannot be a
+# caller-side dt rescale.
+#
+# SCOPE: exact for the relaxation. Interleaved transport still leaves the usual O(dt)
+# Lie-splitting error; this removes an O(1) error in the transport coefficients, not the
+# splitting error.
+# ---------------------------------------------------------------------------
+# @noinline for consistency with the other device helpers in this file. NOTE: it is
+# NOT what makes this GPU-safe -- adding it alone did not fix the kernel. The actual
+# requirement is that callers assign the corrected factor ONCE (see the ternaries in
+# bgk_relax_tup): reassigning a closure-captured local boxes it to Any and makes this
+# call dynamic, which fails GPU compilation.
+@noinline function _rk3_stage_factor(E::Float64)::Float64
+    E >= 1.0 && return 1.0
+    E <= 0.0 && return 0.0
+    s = 3.0*E; s = s > 1.0 ? 1.0 : s          # F(s) ~ s/3 for small s
+    for _ in 1:6
+        h  = s*(s + 1.0)*(s + 2.0) - 6.0*E
+        hp = 3.0*s*s + 6.0*s + 2.0
+        s -= h/hp
+        s = s < 0.0 ? 0.0 : (s > 1.0 ? 1.0 : s)
+    end
+    s
+end
+
 @inline bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64) =
-    bgk_relax_tup(M, dt, Kn, 1.0, 0.5)
+    bgk_relax_tup(M, dt, Kn, 1.0, 0.5, false)
+
+@inline bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
+                      Pr::Float64, omega::Float64) =
+    bgk_relax_tup(M, dt, Kn, Pr, omega, false)
 
 @inline function bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
-                               Pr::Float64, omega::Float64)::NTuple{35,Float64}
+                               Pr::Float64, omega::Float64,
+                               rk3::Bool)::NTuple{35,Float64}
     rho = M[1]
     rho > 0.0 || return M
     u = M[2]/rho; v = M[6]/rho; w = M[16]/rho
@@ -386,7 +430,11 @@ end
     # is NOT bitwise 1/sqrt(Theta). See docs/design/esbgk-vhs-transport.md §7.
     if Pr == 1.0 && omega == 0.5
         tc = Kn / (rho * sqrt(Theta) * 2)
-        e = exp(-dt/tc)
+        # SINGLE assignment. Reassigning `e` here boxes it (it is captured by the
+        # ntuple closure below), which makes the type Any and the _rk3_stage_factor call
+        # dynamic -> the GPU kernel fails to compile. Do not split this into an if/&&.
+        e0 = exp(-dt/tc)
+        e  = rk3 ? _rk3_stage_factor(e0) : e0
         MG = from_recon_vars_dev(rho, u, v, w, Theta, Theta, Theta,
             0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,   # S300,S400,S110,S210,S310,S120,S220,S030,S130,S040
             0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0,             # S101,S201,S301,S102,S202,S003,S103,S004
@@ -399,7 +447,7 @@ end
     # to compile with dynamic getindex/convert/jl_f_tuple calls, and it failed even
     # when the ES branch was unreachable, because dead code is still inferred.
     # Splitting the method fixes it and leaves the default path above untouched.
-    return _esbgk_relax_tup(M, dt, Kn, Pr, omega, rho, u, v, w, C200, C020, C002, Theta)
+    return _esbgk_relax_tup(M, dt, Kn, Pr, omega, rho, u, v, w, C200, C020, C002, Theta, rk3)
 end
 
 # ---------------------------------------------------------------------------
@@ -410,7 +458,7 @@ end
                                     Pr::Float64, omega::Float64,
                                     rho::Float64, u::Float64, v::Float64, w::Float64,
                                     C200::Float64, C020::Float64, C002::Float64,
-                                    Theta::Float64)::NTuple{35,Float64}
+                                    Theta::Float64, rk3::Bool)::NTuple{35,Float64}
 
     # tau_ref fixes mu = p*tau_ref INDEPENDENT of Pr, so changing the Prandtl
     # number does not silently change the viscosity.
@@ -418,12 +466,19 @@ end
     y = dt / tau_ref
     y > 0.0 || return M                 # Kn=Inf / dt=0: no collision (also traps NaN)
 
-    e = exp(-Pr * y)                    # non-conserved decay
+    # SINGLE assignment for both rates (see the note in the fast path: reassigning a
+    # closure-captured local boxes it and breaks GPU compilation). When rk3 is set, BOTH
+    # rates are corrected and kappa is built from the STAGE values, so each stage stays
+    # second-moment-exact and the composite lands on the target deviatoric factor.
+    e0 = exp(-Pr * y)                   # non-conserved decay
+    a0 = exp(-y)                        # deviatoric-stress decay (Kn-defined, Pr-free)
+    e  = rk3 ? _rk3_stage_factor(e0) : e0
+    a  = rk3 ? _rk3_stage_factor(a0) : a0
     # kappa = (a-e)/(1-e), a = exp(-y); evaluated via expm1 for stability at small y.
     # Branch on Pr==1 rather than relying on expm1(0)=0, because (Pr-1)*y is 0*Inf=NaN
     # at Kn=0.
-    kappa = (Pr == 1.0) ? 0.0 :
-            -exp(-Pr * y) * expm1((Pr - 1.0) * y) / expm1(-Pr * y)
+    kappa = (Pr == 1.0) ? 0.0 : (rk3 ? (a - e)/(1.0 - e) :
+            -exp(-Pr * y) * expm1((Pr - 1.0) * y) / expm1(-Pr * y))
 
     C110 = M[7]/rho  - u*v
     C101 = M[17]/rho - u*w

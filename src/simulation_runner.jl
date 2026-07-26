@@ -251,6 +251,11 @@ function simulation_runner(params)
     omega_coll = Float64(get(params, :omega, 0.5))
     (2/3 - 1e-12 <= Pr_coll <= 1.0) ||
         error("Pr=$Pr_coll outside supported range [2/3, 1]; see docs/design/esbgk-vhs-transport.md")
+    # stage_bgk_exact (OPT-IN, default false): correct the SSP-RK3 composite so three
+    # per-stage collisions relax exactly as one step. Without it stage_bgk over-relaxes
+    # by 11/6, making mu and k each ~1.85x too small (Pr is unaffected, which is why
+    # operator-level checks cannot see it). NOT byte-identical when enabled.
+    stage_bgk_exact = Bool(get(params, :stage_bgk_exact, false))
     (0.5 <= omega_coll <= 1.0) ||
         error("omega=$omega_coll outside supported range [0.5, 1]")
 
@@ -963,7 +968,7 @@ function simulation_runner(params)
                                use_proj_recon=ho_proj_first_order,
                                use_logjacobi_recon=use_logjacobi_recon,
                                stage_bgk_kn=(stage_bgk ? Kn : nothing),
-                               Pr=Pr_coll, omega=omega_coll)
+                               Pr=Pr_coll, omega=omega_coll, stage_bgk_exact=stage_bgk_exact)
         else
             # --- FIRST-ORDER PATH (spatial_order=1, default) ---
             # Byte-identical to the original validated path (bc == :copy).
@@ -1044,7 +1049,7 @@ function simulation_runner(params)
                         ih = i + halo
                         jh = j + halo
                         MOM = M[ih, jh, k, :]
-                        MMC = collision35(MOM, dt, Kn; Pr=Pr_coll, omega=omega_coll)
+                        MMC = collision35(MOM, dt, Kn; Pr=Pr_coll, omega=omega_coll)   # once/step: no RK3 composite
                         Mnp[ih, jh, k, :] = MMC
                     end
                 end
