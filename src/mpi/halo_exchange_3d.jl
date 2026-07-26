@@ -261,6 +261,13 @@ function _refill_wall_face!(A::Array{T,4}, a::Int, h::Int, na::Int, hi::Bool,
                      "(ghost layer k mirrors interior layer k)")
     Tw, uw1, uw2, alpha = wall_face_params(face)
     outward = hi ? 1.0 : -1.0
+    # `Tw` may be a scalar (uniform wall) or a vector giving the wall temperature per
+    # cell along the FIRST transverse index. A wall-tangential temperature gradient is
+    # what drives thermal creep -- flow with no pressure gradient at all, and no
+    # continuum analogue -- so a uniform-only wall cannot express that problem.
+    # The scalar branch below is kept separate rather than folded into one loop with a
+    # per-cell lookup, so the uniform path stays byte-identical to before this change.
+    varying = !(Tw isa Real)
     @inbounds for k in 1:h
         dst = hi ? (h + na + k) : (h + 1 - k)
         src = hi ? (h + na + 1 - k) : (h + k)
@@ -268,11 +275,23 @@ function _refill_wall_face!(A::Array{T,4}, a::Int, h::Int, na::Int, hi::Bool,
         vd = ndims(sd)
         # iterate the transverse plane; each cell gets its own wall transform
         sz = size(ss)[1:end-1]
-        for idx in CartesianIndices(sz)
-            M = ntuple(m -> ss[idx, m], Val(35))
-            G = wall_ghost_tup(M, a, outward, Tw, uw1, uw2, alpha)
-            for m in 1:35
-                sd[idx, m] = G[m]
+        if varying
+            length(Tw) == sz[1] || error("wall Tw vector on axis $a has length " *
+                "$(length(Tw)) but the transverse extent is $(sz[1]) (include halo cells)")
+            for idx in CartesianIndices(sz)
+                M = ntuple(m -> ss[idx, m], Val(35))
+                G = wall_ghost_tup(M, a, outward, Tw[idx[1]], uw1, uw2, alpha)
+                for m in 1:35
+                    sd[idx, m] = G[m]
+                end
+            end
+        else
+            for idx in CartesianIndices(sz)
+                M = ntuple(m -> ss[idx, m], Val(35))
+                G = wall_ghost_tup(M, a, outward, Tw, uw1, uw2, alpha)
+                for m in 1:35
+                    sd[idx, m] = G[m]
+                end
             end
         end
     end
