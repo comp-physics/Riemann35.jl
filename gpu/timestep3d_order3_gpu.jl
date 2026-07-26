@@ -45,6 +45,7 @@ using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
 # the package's single instances, not nested copies
 using Riemann35.RealizeDev: realizable_3D_M4_dev
 using Riemann35.ReconDev: bgk_relax_tup
+using Riemann35.WallGhostDev: wall_ghost_tup
 
 export march3d_order3_gpu!, march3d_slab_order3_gpu!, build_haloed_cube, interior_from_cube!
 
@@ -128,21 +129,34 @@ end
 # _refill_halo_crossflow! for codes (inlet,outflow,periodic,periodic,outflow,outflow).
 # A :sponge face is :outflow here (code 0); its absorbing effect is _sponge_interior!.
 # ---------------------------------------------------------------------------
+# Face codes: 0=outflow, 1=inlet, 2=periodic, 3=wall.
+#
+# A WALL returns the MIRRORED interior index (ghost layer k <- interior layer k), not the
+# clamped nearest cell: specular reflection of a half-space IS the mirror map, so ghost
+# layer k must see the interior cell at the same distance from the wall. That is what
+# makes the multi-layer halo consistent at g=8. The caller then applies the wall
+# transform to the gathered state -- unlike :inlet, a wall ghost is a FUNCTION of the
+# adjacent interior cell, not a constant vector.
+#
+# Returns (src_index, is_inlet, wall_side) with wall_side = 0 none, -1 lo face, +1 hi face.
 @inline function _axis_src(i::Int, n::Int, g::Int, clo::Int, chi::Int)
     if i <= g
-        clo == 1 && return (i, true)              # inlet
-        clo == 2 && return (i + n, false)         # periodic wrap (lo ghost <- hi interior)
-        return (g + 1, false)                     # outflow clamp
+        clo == 1 && return (i, true, 0)           # inlet
+        clo == 2 && return (i + n, false, 0)      # periodic wrap (lo ghost <- hi interior)
+        clo == 3 && return (2*g + 1 - i, false, -1)   # wall: mirror about the lo face
+        return (g + 1, false, 0)                  # outflow clamp
     elseif i >= g + n + 1
-        chi == 1 && return (i, true)
-        chi == 2 && return (i - n, false)
-        return (g + n, false)
+        chi == 1 && return (i, true, 0)
+        chi == 2 && return (i - n, false, 0)
+        chi == 3 && return (2*(g + n) + 1 - i, false, 1)  # wall: mirror about the hi face
+        return (g + n, false, 0)
     else
-        return (i, false)                         # interior along this axis
+        return (i, false, 0)                      # interior along this axis
     end
 end
 
 function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, ny::Int, nz::Int,
+                             wall_Tw::Float64, wall_uw1::Float64, wall_uw2::Float64, wall_alpha::Float64,
                              inlet, cxlo::Int, cxhi::Int, cylo::Int, cyhi::Int, czlo::Int, czhi::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nfx * nfy * nfz
@@ -151,11 +165,21 @@ function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, n
             b = r % nfy + 1;         c = r ÷ nfy + 1
             interior = (g+1 <= a <= g+nx) && (g+1 <= b <= g+ny) && (g+1 <= c <= g+nz)
             if !interior
-                sa, ia = _axis_src(a, nx, g, cxlo, cxhi)
-                sb, ib = _axis_src(b, ny, g, cylo, cyhi)
-                sc, ic = _axis_src(c, nz, g, czlo, czhi)
+                sa, ia, wa = _axis_src(a, nx, g, cxlo, cxhi)
+                sb, ib, wb = _axis_src(b, ny, g, cylo, cyhi)
+                sc, ic, wc = _axis_src(c, nz, g, czlo, czhi)
                 if ia || ib || ic
                     for m in 1:35; G[m, a, b, c] = inlet[m]; end
+                elseif wa != 0 || wb != 0 || wc != 0
+                    # Wall: gather the MIRRORED interior cell and apply the wall
+                    # transform. One axis at a time; at an edge/corner where two faces
+                    # are walls the x transform is applied (consistent with the inlet
+                    # rule above, which also lets one face dominate a corner).
+                    ax = wa != 0 ? 1 : (wb != 0 ? 2 : 3)
+                    ow = Float64(wa != 0 ? wa : (wb != 0 ? wb : wc))
+                    C = ntuple(m -> G[m, sa, sb, sc], Val(35))
+                    W = wall_ghost_tup(C, ax, ow, wall_Tw, wall_uw1, wall_uw2, wall_alpha)
+                    for m in 1:35; G[m, a, b, c] = W[m]; end
                 else
                     for m in 1:35; G[m, a, b, c] = G[m, sa, sb, sc]; end
                 end
@@ -443,7 +467,7 @@ function interior_from_cube!(Mi::CuArray{Float64,4}, G::CuArray{Float64,4}; thre
 end
 
 # Preset -> ((xlo,xhi,ylo,yhi,zlo,zhi) face codes, sponge bools). Codes: 0=outflow,
-# 1=inlet, 2=periodic. Mirrors the CPU face_bc.jl presets (this GPU module is
+# 1=inlet, 2=periodic, 3=wall. Mirrors the CPU face_bc.jl presets (this GPU module is
 # standalone — no Riemann35 dependency — so the small preset table lives here too).
 const _GPU_BC_PRESETS = Dict{Symbol,Tuple{NTuple{6,Int},NTuple{6,Bool}}}(
     :copy               => ((0,0,0,0,0,0), (false,false,false,false,false,false)),
@@ -494,7 +518,8 @@ in place and left with its outflow halos refilled.
 """
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                             stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false, threads::Int = 128,
+                             stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
+                             wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              first_order::Bool = false, bc = :copy, inlet = nothing,
                              obst_state = nothing, obst_cx::Real = 0.0, obst_cy::Real = 0.0,
@@ -510,6 +535,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
+    wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
@@ -573,7 +599,8 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # once). Byte-identical to _refill_halo! for :copy and _refill_halo_crossflow!
     # for :crossflow (same memory ops).
     refill!() = (@cuda threads=threads blocks=bcube _refill_halo_faces!(
-        G, nfx, nfy, nfz, g, nx, ny, nz, inlet_d, cxlo, cxhi, cylo, cyhi, czlo, czhi))
+        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wU1, wU2, wAl,
+        inlet_d, cxlo, cxhi, cylo, cyhi, czlo, czhi))
 
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
     stages = ((1.0, 0.0, 1.0), (0.75, 0.25, 0.25), (1.0/3.0, 2.0/3.0, 2.0/3.0))
@@ -679,7 +706,8 @@ unless `dts` is supplied. Returns the dt vector used. `Mi` is updated in place.
 """
 function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                                   dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                                  stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false, threads::Int = 128,
+                                  stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
+                             wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0, threads::Int = 128,
                                   theta_closed::Bool = true)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
     @assert size(Mi, 1) == 35 "Mi must be (35,n,n,nz_loc)"
@@ -697,6 +725,7 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
+    wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     G    = CUDA.zeros(Float64, 35, nfx, nfx, nfz)   # resident haloed slab cube

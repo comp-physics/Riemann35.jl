@@ -156,6 +156,8 @@ include("numerics/weno5_dev.jl")
 include("numerics/hiorder3_recon_dev.jl")
 include("numerics/idp_limiter_dev.jl")
 include("numerics/logjacobi_recon_dev.jl")
+include("numerics/wall_ghost_dev.jl")
+using .WallGhostDev: wall_ghost_tup
 # --- end device-kernel block ----------------------------------------------
 
 include("numerics/reconstruction.jl")

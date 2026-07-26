@@ -1,8 +1,14 @@
 # High-order spatial reconstruction — status & usage
 
-Notes for Rodney Fox and Jacob Posey on the `projection35-port` branch: the
-validated 3D port, the new high-order spatial scheme (roadmap step #2), the fixes
-and their limits, and how to run it.
+Notes for Rodney Fox and Jacob Posey: the validated 3D port, the high-order spatial
+scheme, the fixes and their limits, and how to run it.
+
+> **Refreshed 2026-07-26.** This document had drifted a full generation: it described
+> itself as notes on the `projection35-port` branch, listed `spatial_order` as only 1 or
+> 2, and said the high-order path was "not yet robust at Ma=100". All three were stale.
+> `spatial_order = 3` (WENO5 + closed-form theta*-IDP) has been the DEFAULT since #18,
+> Ma=100 is fixed and CI-guarded (`test/stress_hiorder3_ma100.jl`), and everything below
+> is against current `main`.
 
 For the general package overview see `README.md`; for the GT PACE cluster recipe
 (modules, MPI, precompile) see `RUNNING.md`.
@@ -18,7 +24,8 @@ For the general package overview see `README.md`; for the GT PACE cluster recipe
 
 2. **High-order spatial fluxes (new).** Unsplit SSP-RK3 + MUSCL reconstruction of
    the bounded standardized moments + per-face/per-cell realizability projection,
-   selectable via `spatial_order` (1 = first-order HLL, 2 = high-order). Still uses
+   selectable via `spatial_order` (1 = first-order HLL, 2 = MUSCL, **3 = WENO5 +
+   theta*-IDP, the DEFAULT**). Still uses
    HLL — the Riemann solver is the part Jacob is replacing.
 
 3. **Near-vacuum robustness fix** for high-order at high Mach (`ho_vacuum_floor`),
@@ -40,11 +47,29 @@ high-order:
 
 | param | meaning |
 | --- | --- |
-| `spatial_order` | `1` = first-order HLL (diffusive), `2` = high-order HLL+MUSCL+SSP-RK3 |
+| `spatial_order` | `1` = first-order HLL (diffusive), `2` = HLL+MUSCL+SSP-RK3, **`3` = WENO5 + closed-form theta*-IDP (DEFAULT)** |
 | `ho_vacuum_floor` | below this density the high-order path falls back to first order (0 = off, default). Set to ~10× the background density for high-Ma robustness; see §3. **Default and unchanged.** |
 | `ho_realizability_limiter` | **OPT-IN, default `false`.** When `true`, switches the high-order reconstruction from the binary `recon_face_pair` fallback to a continuous Zhang–Shu scaling limiter (`scaling_limited_faces`). For each cell face the limiter finds the largest θ∈[0,1] keeping the reconstructed face state in the realizable set R; θ=1 recovers full accuracy in smooth regions, θ→0 at individual faces near vacuum. This is a local, graduated alternative to the global density floor: no hand-set threshold, realizability guaranteed by construction, reaches deeper vacuum while preserving more high-order accuracy near the vacuum interface. `ho_vacuum_floor` remains the default path and is not removed. See `docs/realizability-highorder-literature.md` §6 for the underlying theory. |
 | `ho_proj_first_order` | **OPT-IN, default `false`.** Rodney Fox's projection-triggered control: a cell whose mean is flagged for the realizability projection (smallest Δ₂ eigenvalue < 0, i.e. `realizability_margin < 0`) reconstructs **first-order**; all other cells get full MUSCL. One Δ₂ eigenvalue per cell (the same signal the projection uses), local by construction. In the 3D Mach-ladder (Np=64) it is **sharper *and* ~2.5× cheaper** than `ho_realizability_limiter` and retains sharpness at Ma=100 — see `docs/riemann-solver-scope.md` §1. Takes precedence over `ho_realizability_limiter` if both set. Demo env: `REPRO_PROJREC=1`. |
 | `riemann_solver` | **OPT-IN, default `:hll`.** Interface flux for the high-order path. `:hll` = original two-wave HLL (byte-identical default); `:rusanov` = robust local Lax–Friedrichs; `:hllc` = contact-restoring HLLC (implemented, verified genuine); `:hllem` = HLLEM anti-diffusion (implemented, verified correct). **Important:** for this 35-moment closure **both `:hllc` and `:hllem` reduce to ≈`:hll`** on the crossing jets — `:hllc` because its star states leave the realizable cone in the collision (fallback), `:hllem` because physical contact/shear jumps don't project onto the computed λ=uₙ eigenspace. See `docs/riemann-solver-scope.md` §6b/§6c. `:kinetic` = realizable-by-construction abscissa-upwind/KFVS flux on the in-house `chyqmom_nodes_3d` velocity-node inversion — **EXPERIMENTAL, NOT for production: it is numerically UNSTABLE** (timestep collapses to NaN within a few steps, even at uniform density). Root cause: `chyqmom_nodes_3d` recovers only 29/35 moments (6 high-order cross moments structurally truncated), so the flux is inconsistent with the moments the system transports. Kept as an opt-in, documented research building block (default off, golden byte-identical). See `docs/riemann-solver-scope.md` §6d. The low-diffusion win needs a *non-truncating* node inversion (consistent kinetic flux) and/or the analytic LD eigenstructure — Jacob's domain. `:hllem` is also far too slow for production (per-face FD-Jacobian + `eigen`). Demo env: `REPRO_RS=hll|rusanov|hllc|hllem|kinetic`. Unknown values raise `ArgumentError`. |
+
+### Physics options added 2026-07 (all opt-in, defaults byte-identical)
+
+| param | meaning |
+|---|---|
+| `Pr` | Prandtl number. `1.0` (default) is plain BGK; `2/3` engages the ES-BGK anisotropic-Gaussian target. A monatomic gas is 2/3, so **set this for anything compared against DSMC or experiment.** |
+| `omega` | VHS viscosity exponent, `mu ~ T^omega`. `0.5` (default) is hard spheres; `0.81` is SPARTA's argon. Matching `omega` matches transport coefficients with a DSMC run by construction. |
+| `stage_bgk_exact` | **Read this before trusting any viscous result.** `stage_bgk` (which `scheme = :recommended` enables) applies the collision at every SSP-RK3 stage, over-relaxing by 11/6 and making `mu` and `k` each **~1.85x too small at finite Kn**. `Pr` is unaffected, which is why no ratio-based check catches it. Set `true` to correct the composite. Default `false` for byte-identity. See `docs/design/stage-bgk-transport-defect.md`. |
+| `bc` face `:wall` + `wall_spec` | Maxwell-accommodating wall, grid-aligned, per-face `(Tw, uw1, uw2, alpha)`; `alpha=0` is fully specular and EXACT, `alpha=1` fully diffuse. `uw1/uw2` are tangential velocities in cyclic order after the face normal. Equilibrium walls are a bitwise-exact fixed point on CPU and GPU. |
+
+```julia
+# Couette between accommodating walls, monatomic Pr, argon-matched omega
+simulation_runner(merge(params, (
+    bc = (xlo=:periodic, xhi=:periodic, ylo=:wall, yhi=:wall, zlo=:outflow, zhi=:outflow),
+    wall_spec = (ylo=(Tw=1.0, uw1=0.0, uw2=-0.2, alpha=1.0),
+                 yhi=(Tw=1.0, uw1=0.0, uw2=+0.2, alpha=1.0)),
+    Pr = 2/3, omega = 0.81, stage_bgk_exact = true)))
+```
 
 ### Quick demo (the crossing jets)
 
@@ -89,7 +114,14 @@ High-order **works and removes numerical diffusion** for **Ma ≤ 50** — peak 
 +32–76% over first-order, increasingly so with Mach. The headline figures live in
 `debug/` (e.g. the HLL-vs-MUSCL and Mach-ladder comparisons).
 
-It is **not yet robust at Ma=100**. The deep near-vacuum the crossing produces
+> **Superseded 2026-07-26.** The Ma=100 fragility described in this section was fixed:
+> `spatial_order=3` with the realizability-safe affine-remap override survives Ma=100 at
+> 32/64/128^3 and is CI-guarded by `test/stress_hiorder3_ma100.jl`. The paragraph below
+> is retained because the FAILURE MECHANISM it documents (catastrophic cancellation in
+> `u = M100/M000` and `C200` at rho ~ 1e-5) is still the thing to understand when a
+> high-Ma run misbehaves.
+
+Historically it was **not robust at Ma=100**. The deep near-vacuum the crossing produces
 (ρ → ~1e-5 behind the jets) makes the derived primitives `u = M100/M000` and
 `C200 = M200/M000 − u²` catastrophic-cancellation noise; high-order amplifies it.
 This shows up as several failure modes (non-finite reconstruction, negative/huge

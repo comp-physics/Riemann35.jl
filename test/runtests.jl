@@ -60,6 +60,7 @@ const TOL = 1e-10
         include("test_moment_correction.jl")
         include("test_face_bc.jl")   # direction-agnostic per-face BC + sponge (byte-identical presets)
         include("test_esbgk.jl")     # ES-BGK + VHS transport (opt-in; defaults bitwise BGK)
+        include("test_wall_bc.jl")   # Maxwell-accommodating wall ghost (opt-in :wall face)
 
         # θ*-IDP limiter goldens — pins BOTH the bisection baseline (frozen,
         # bit-for-bit fallback guard via theta_closed=false) and the closed-form
