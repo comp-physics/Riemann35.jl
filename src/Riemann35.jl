@@ -176,6 +176,7 @@ include("realizability/realizability_oracle.jl")
 include("numerics/small_eig.jl")
 include("numerics/closure_and_eigenvalues.jl")
 include("numerics/moment_correction_minnorm.jl")   # opt-in minimal-norm hyperbolicity correction (byte-identical off)
+include("numerics/moment_reduce26.jl")             # opt-in 26-moment reduction (Rodney Fox), diagnostic/comparison
 include("numerics/eigenvalues6_hyperbolic_3D.jl")
 include("numerics/eigenvalues6z_hyperbolic_3D.jl")
 include("numerics/Flux_closure35_and_realizable_3D.jl")

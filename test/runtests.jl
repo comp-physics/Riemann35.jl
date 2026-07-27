@@ -33,6 +33,7 @@ const TOL = 1e-10
         include("test_realizability.jl")
         include("test_realizability_oracle.jl")
         include("test_closures.jl")
+        include("test_reduce26.jl")
         include("test_hyqmom_closure_golden.jl")
         include("test_highorder_1d.jl")
         include("test_highorder_3d.jl")

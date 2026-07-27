@@ -71,6 +71,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                     comm=nothing, halo::Int=2, dts=nothing, order::Int=2, proj_first_order::Bool=false, riemann_solver::Symbol=:hll, limiter::Bool=false,
                     scheme::Symbol=:recommended, pressure_recon=nothing, stage_bgk=nothing, Kn::Real=Inf,
                     Pr::Real=1.0, omega::Real=0.5, stage_bgk_exact::Bool=false,
+                    reduce26::Bool=false,
                     s3max::Real=max(40.0, 4.0 + abs(Ma) / 2.0),
                     vacuum_floor::Real=HO_VACUUM_FLOOR_DEFAULT, threads::Int=128,
                     theta_closed::Bool=true, bc=:copy, inlet=nothing, live_diag::Bool=false,
@@ -112,6 +113,9 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
     # z-slab march (march3d_slab_gpu!(order=3)) in the segment loop below.
     order3 = (order == 3)
     order3_single = order3 && !multigpu
+    reduce26 && !order3_single &&
+        error("reduce26 (26-moment reduction) is supported on the single-GPU order-3 path only " *
+              "(got order=$order, multigpu=$multigpu)")
     bc in (:copy, :crossflow, :crossflow_absorb_y) ||
         throw(ArgumentError("unknown bc=$bc (use :copy, :crossflow, or :crossflow_absorb_y)"))
     if bc != :copy
@@ -191,6 +195,7 @@ function run_gpu_3d(M0::Array{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
         used = if order3_single
             u = march3d_order3_gpu!(G3, dx, Ma, k; dts=seg, s3max=s3max,
                                     stage_bgk=stage_bgk, Kn=Kn, Pr=Pr, omega=omega, stage_bgk_exact=stage_bgk_exact, threads=threads,
+                                    reduce26=reduce26,
                                     theta_closed=theta_closed, bc=bc, inlet=seg_inlet,
                                     obst_state=obst_state, obst_cx=obst_cx, obst_cy=obst_cy, obst_r2=obst_r2,
                                     sponge_ref=sponge_ref, sponge_width=sponge_width, sponge_rate=sponge_rate,

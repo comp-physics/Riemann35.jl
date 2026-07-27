@@ -44,10 +44,13 @@ include(joinpath(@__DIR__, "residual3d_order3_gpu.jl"))
 using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
 # the package's single instances, not nested copies
 using Riemann35.RealizeDev: realizable_3D_M4_dev
-using Riemann35.ReconDev: bgk_relax_tup
+using Riemann35.ReconDev: bgk_relax_tup, _recon_centrals, _c4tom4_35, _EPSF
 using Riemann35.WallGhostDev: wall_ghost_tup
 
 export march3d_order3_gpu!, march3d_slab_order3_gpu!, build_haloed_cube, interior_from_cube!
+
+# opt-in 26-moment reduction device kernel (Rodney Fox); reduce26_relax_tup + _reduce26_interior!
+include(joinpath(@__DIR__, "reduce26_gpu.jl"))
 
 # Halo width for the order-3 WENO5 + θ*-IDP cube. g=8 (matching the CPU order-3
 # path, be37651): the WENO5 reconstruction footprint at the outermost interior
@@ -519,6 +522,7 @@ in place and left with its outflow halos refilled.
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
+                             reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              first_order::Bool = false, bc = :copy, inlet = nothing,
@@ -628,6 +632,12 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
             if stage_bgk
                 @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe)
             end
+        end
+        # OPT-IN 26-moment reduction (Rodney Fox): per-step operator-split projection
+        # of the nine odd 4th-order moments onto their closure. Mirrors the CPU
+        # per-step REDUCE26 hook (src/simulation_runner.jl). Default off => untouched.
+        if reduce26
+            @cuda threads=threads blocks=bint _reduce26_interior!(G, nx, ny, nz, g)
         end
         # stochastic forcing: random transverse-velocity kick (before the obstacle
         # re-imposition so held cells stay exactly fixed).

@@ -61,6 +61,12 @@ if get(ENV, "HYP_CORRECTION", "blunt") == "minnorm"
     end
 end
 
+# OPT-IN 26-moment reduction (env REDUCE26=1). Default off => full 35-moment.
+if get(ENV, "REDUCE26", "0") == "1"
+    Riemann35.REDUCE26[] = true
+    @info "REDUCE26 = true (opt-in 26-moment reduction, Rodney Fox)"
+end
+
 # Load parameter parsing utilities
 include("parse_params.jl")
 
