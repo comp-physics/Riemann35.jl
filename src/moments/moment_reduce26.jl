@@ -39,26 +39,14 @@ module MomentReduce26
 
 export reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 
-# Standardized-moment keys in the canonical 35-moment layout order.
-const S_KEYS = (
-    (0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-    (0,1,0),(1,1,0),(2,1,0),(3,1,0),
-    (0,2,0),(1,2,0),(2,2,0),
-    (0,3,0),(1,3,0),
-    (0,4,0),
-    (0,0,1),(1,0,1),(2,0,1),(3,0,1),
-    (0,0,2),(1,0,2),(2,0,2),
-    (0,0,3),(1,0,3),
-    (0,0,4),
-    (0,1,1),(1,1,1),(2,1,1),
-    (0,2,1),(1,2,1),
-    (0,3,1),
-    (0,1,2),(1,1,2),
-    (0,1,3),
-    (0,2,2),
-)
-
-const S_INDEX = Dict(k => i for (i,k) in enumerate(S_KEYS))
+# The (i,j,k) -> slot map comes from the canonical table, NOT from a local copy of it.
+# This module previously carried its own `S_KEYS` tuple, which was a
+# character-for-character duplicate of `MomentIndices.IJK` — a second copy of the
+# 35-moment ordering that nothing kept in sync with the first. `S_INDEX` is retained
+# as the name here because it is what the probes import and what the notes cite, but
+# it is now an alias, so there is exactly one ordering in the package.
+using ..MomentIndices: IJK_INDEX
+const S_INDEX = IJK_INDEX
 
 "The nine odd fourth-order cross-moments the reduction drops."
 const DROPPED_KEYS = ((3,1,0),(3,0,1),(1,3,0),(0,3,1),(1,0,3),(0,1,3),(2,1,1),(1,2,1),(1,1,2))
