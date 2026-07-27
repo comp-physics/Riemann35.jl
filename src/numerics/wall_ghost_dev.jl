@@ -118,21 +118,60 @@ two TANGENTIAL wall velocity components in cyclic order after `axis`. `alpha` in
     Msp = specular_tup(M, axis)
     alpha <= 0.0 && return Msp                      # exact specular; no Gaussian needed
 
-    u = M[2]/rho; v = M[6]/rho; w = M[16]/rho
-    C200 = M[3]/rho  - u*u
-    C020 = M[10]/rho - v*v
-    C002 = M[20]/rho - w*w
-    # normal-direction mean and sigma
-    un   = axis == 1 ? u : (axis == 2 ? v : w)
-    Cnn  = axis == 1 ? C200 : (axis == 2 ? C020 : C002)
-    Cnn  = Cnn > 1e-14 ? Cnn : 1e-14
-    sig  = sqrt(Cnn)
-    # flux toward the wall: for an outward normal +n the incoming particles have v_n > 0,
-    # so flip the sign of the drift for a hi face.
-    influx = halfspace_influx(rho, outward * un, sig)
-    Tw_    = Tw > 1e-14 ? Tw : 1e-14
-    rho_w  = influx / sqrt(Tw_ * 0.15915494309189535)   # / sqrt(Tw/(2pi))
-    rho_w  = rho_w > 0.0 ? rho_w : rho
+    Tw_ = Tw > 1e-14 ? Tw : 1e-14
+
+    # ---------------------------------------------------------------------------
+    # WALL DENSITY: the DISCRETELY mass-consistent value, rho_w = rho.
+    #
+    # This used to be the continuum half-space balance,
+    #     influx = halfspace_influx(rho, outward*un, sig)
+    #     rho_w  = influx / sqrt(Tw/(2pi))        =>  rho_w = rho*sqrt(T/Tw) at un=0,
+    # which is CORRECT PHYSICS -- a hotter interior throws more flux at the wall, so the
+    # wall must re-emit at higher density to pass zero net mass. It is also what made the
+    # solver blow up, and the reason is the discretisation, not the physics.
+    #
+    # The ghost-cell form solves a FULL-LINE Riemann problem at the wall face; it has no
+    # half-space split (see the module docstring). For HLL,
+    #     F = (sR*FL - sL*FR + sL*sR*(M_R - M_L)) / (sR - sL),
+    # and at un = 0 both physical flux terms vanish, leaving pure upwind DISSIPATION acting
+    # on the density jump rho_w - rho. A physically-correct rho_w therefore manufactures a
+    # spurious mass flux through a wall that must pass none. MEASURED (Maxwellian interior,
+    # y-wall, Tw = 1):
+    #
+    #     T/Tw    1.00      1.02       1.05       1.10       1.25       1.50
+    #     flux     0.0   -1.23e-2   -3.10e-2   -6.27e-2   -1.62e-1   -3.37e-1
+    #
+    # exactly linear in alpha (flux/alpha = -6.2696e-2 at T/Tw = 1.10 for every alpha in
+    # {0.1, 0.25, 0.5, 1}), exactly zero at alpha = 0, exactly zero at T = Tw.
+    #
+    # In Couette the gas is viscously heated, so T > Tw is PERMANENT: a permanent mass
+    # source, which feeds back (more mass -> more dissipation -> more heating -> more
+    # injection). Measured consequence: interior mass 30 -> 1.9e11 by t = 6, exponential
+    # with e-folding 0.172, and -- the decisive part -- the growth RATE is timestep
+    # independent (0.1723 at dt vs 0.1717 at dt/2), so it is an eigenvalue of the
+    # semi-discrete operator with positive real part, lambda ~ 5.8 in H^2/nu. No CFL
+    # reduction touches it. It also scales with alpha exactly as the flux does
+    # (dm/m over t=0.6: -9.9e-14, 7.7e-5, 2.2e-4, 4.0e-4, 6.0e-4 at alpha = 0, .1, .25,
+    # .5, 1), which is what identified the diffuse half as the source.
+    #
+    # rho_w = rho makes the density jump vanish identically, so the dissipative mass source
+    # is gone and the feedback with it. What is given up is the continuum density
+    # adjustment at T != Tw -- a modelling approximation traded for discrete conservation,
+    # which is the right trade when the alternative diverges. The wall still cools the gas:
+    # the ghost carries Tw, so the ENERGY jump 3/2*rho*(Tw - T) survives and drives heat out
+    # of the domain, which is the physically correct direction.
+    #
+    # At T = Tw and un = 0 this is IDENTICAL to the old expression (both give rho_w = rho),
+    # so the equilibrium-wall fixed point and the specular limit are untouched.
+    # `halfspace_influx` is retained, exported and still tested (test_wall_bc.jl gate W3
+    # checks it against quadrature): it is correct as physics, it is simply not the
+    # quantity this discretisation can impose.
+    #
+    # The principled escalation, if the lost density adjustment ever matters, is the one
+    # the design always held in reserve: a genuine half-space (KFVS-at-wall) flux, which
+    # would have to touch the residual.
+    # ---------------------------------------------------------------------------
+    rho_w = rho
 
     # wall Maxwellian: no normal velocity, tangential = wall velocity
     uwx = axis == 1 ? 0.0 : (axis == 2 ? uw2 : uw1)
