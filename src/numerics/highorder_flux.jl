@@ -18,10 +18,24 @@ function realize_and_speed(M::AbstractVector, axis::Int, Ma::Real)
     return Mr, min(v5min, v6min), max(v5max, v6max)
 end
 
-"Physical flux (length 35) of moment vector M in the given axis direction."
-function _phys_flux(M::AbstractVector, axis::Int)
-    Fx, Fy, Fz = Flux_closure35_3D(M)
-    return axis == 1 ? Fx : (axis == 2 ? Fy : Fz)
+"""
+Physical flux (35 components) of moment vector `M` in the given axis direction, as an
+`NTuple{35,Float64}`.
+
+Both call sites immediately wrap the result in `NTuple{35,Float64}(...)` before handing it
+to `riemann_flux_dev`, so returning the tuple directly removes a `Vector` round-trip on
+every face without changing a single arithmetic operation.
+
+Previously this called `Flux_closure35_3D`, which computes the device kernel once and then
+`collect`s ALL THREE direction fluxes into separate 35-element `Vector`s — two of which are
+discarded immediately. Here the same kernel is called and only the requested 35-component
+slice is read out. Same kernel, same op order, bit-identical values; three `Vector`
+allocations per face removed.
+"""
+@inline function _phys_flux(M::AbstractVector, axis::Int)
+    F = flux_closure35_dev(M...)                 # NTuple{105}: 1..35 Fx, 36..70 Fy, 71..105 Fz
+    o = axis == 1 ? 0 : (axis == 2 ? 35 : 70)
+    ntuple(i -> @inbounds(F[o + i]), Val(35))
 end
 
 """

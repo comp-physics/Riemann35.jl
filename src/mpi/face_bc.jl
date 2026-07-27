@@ -39,7 +39,13 @@ function wall_face_params(face::Symbol)
     spec === nothing && return (1.0, 0.0, 0.0, 1.0)
     fp = get(spec, face, nothing)
     fp === nothing && return (1.0, 0.0, 0.0, 1.0)
-    (Float64(get(fp, :Tw, 1.0)), Float64(get(fp, :uw1, 0.0)),
+    # `Tw` is a scalar for a uniform wall, or a per-cell vector along the face's first
+    # transverse index for a wall-tangential temperature gradient (thermal creep). Only
+    # the scalar case is narrowed to Float64; a vector is passed through as-is, since
+    # `Float64(::Vector)` is an error and coercing it would defeat the purpose.
+    Tw_raw = get(fp, :Tw, 1.0)
+    Tw = Tw_raw isa Real ? Float64(Tw_raw) : convert(Vector{Float64}, Tw_raw)
+    (Tw, Float64(get(fp, :uw1, 0.0)),
      Float64(get(fp, :uw2, 0.0)), Float64(get(fp, :alpha, 1.0)))
 end
 
