@@ -75,6 +75,7 @@ export Flux_closure35_and_realizable_3D, Flux_closure35_3D
 export flux_HLL, pas_HLL, collision35
 export moment_idx, M4_to_vars, M5_to_vars
 export delta2star3D, delta2star3D_permutation, jacobian6, M4toC4_3D, C4toM4_3D, S4toC4_3D_r, C5toM5_3D
+export reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 export body_force_shift, apply_body_force!
 export axis_moment_slice
 export to_recon_vars, from_recon_vars, standardized_to_M4
@@ -111,7 +112,9 @@ include("moments/moment_indices.jl")
 using .MomentIndices
 include("moments/InitializeM4_35.jl")
 include("moments/M2CS4_35.jl")
+include("moments/moment_reduce26.jl")
 include("numerics/body_force.jl")
+using .MomentReduce26: reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 include("moments/Moments5_3D.jl")
 include("moments/hyqmom_3D.jl")
 include("moments/hyqmom_quadrature_1d.jl")
