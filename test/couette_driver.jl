@@ -36,7 +36,7 @@ catch gross non-convergence, and establish march length by an actual sweep in `t
 """
 function couette_field(KnH::Float64; cpl = 6.0, nymin = 24, Uw = 0.1, order = 2,
                        alpha = 1.0, tendf = 0.3, maxst = 400_000,
-                       Pr = 2/3, omega = 0.81)
+                       Pr = 2/3, omega = 0.81, cflf = 1.0)
     halo = order == 3 ? 8 : 2
     H    = 1.0
     lam  = KnH*H
@@ -66,7 +66,9 @@ function couette_field(KnH::Float64; cpl = 6.0, nymin = 24, Uw = 0.1, order = 2,
         M[i,j,k,:] = InitializeM4_35(rho0, ux, 0.0, 0.0, T0,0,0, T0,0, T0)
     end
 
-    dt   = 0.2*dy/(5.0*sqrt(T0))
+    # cflf scales the timestep: splitting/consistency error scales with dt, a genuine
+    # dt-dependent steady state does not. Sweeping it separates the two.
+    dt   = cflf*0.2*dy/(5.0*sqrt(T0))
     want = ceil(Int, (tendf*H*H/nu)/dt)
     nst  = min(maxst, want)
 
