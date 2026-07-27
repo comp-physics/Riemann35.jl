@@ -161,7 +161,7 @@ end
 
 function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, ny::Int, nz::Int,
                              wall_Tw::Float64, wall_uw1::Float64, wall_uw2::Float64, wall_alpha::Float64,
-                             wall_antisym::Bool,
+                             wall_antisym::Bool, wall_Tw_prof,
                              inlet, cxlo::Int, cxhi::Int, cylo::Int, cyhi::Int, czlo::Int, czhi::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nfx * nfy * nfz
@@ -188,8 +188,17 @@ function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, n
                     # two walls move at -Uw and +Uw. `ow` already carries the face side (-1 lo,
                     # +1 hi), so multiplying by it gives the antisymmetric pair from one scalar.
                     # Off by default, so the existing single-velocity behaviour is untouched.
+                    # PER-CELL WALL TEMPERATURE (thermal creep). A single scalar Tw can only make
+                    # an isothermal wall; creep is driven by a temperature gradient ALONG it.
+                    # Convention matches the CPU (halo_exchange_3d.jl, `Tw[idx[1]]` after
+                    # selectdim on the wall axis): Tw varies along the FIRST remaining axis in
+                    # natural order -- x-wall -> y, y-wall -> x, z-wall -> x -- and the vector
+                    # spans the full cube extent along it, halo cells included.
+                    # A length-1 profile means "use the scalar", so the isothermal path is
+                    # byte-identical to before.
+                    tw = length(wall_Tw_prof) > 1 ? wall_Tw_prof[ax == 1 ? b : a] : wall_Tw
                     sgn = wall_antisym ? ow : 1.0
-                    W = wall_ghost_tup(C, ax, ow, wall_Tw, sgn*wall_uw1, sgn*wall_uw2, wall_alpha)
+                    W = wall_ghost_tup(C, ax, ow, tw, sgn*wall_uw1, sgn*wall_uw2, wall_alpha)
                     for m in 1:35; G[m, a, b, c] = W[m]; end
                 else
                     for m in 1:35; G[m, a, b, c] = G[m, sa, sb, sc]; end
@@ -564,7 +573,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
                              reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
-                             wall_uw_antisym::Bool = false,
+                             wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              first_order::Bool = false, bc = :copy, inlet = nothing,
@@ -583,6 +592,9 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     gfx = Float64(gx); gfy = Float64(gy); gfz = Float64(gz); wAnti = wall_uw_antisym
+    # length-1 sentinel = isothermal wall (kernel falls back to the scalar wTw)
+    wTwP = wall_Tw_prof === nothing ? CUDA.zeros(Float64, 1) :
+                                      CuArray(convert(Vector{Float64}, wall_Tw_prof))
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
@@ -646,7 +658,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # once). Byte-identical to _refill_halo! for :copy and _refill_halo_crossflow!
     # for :crossflow (same memory ops).
     refill!() = (@cuda threads=threads blocks=bcube _refill_halo_faces!(
-        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wU1, wU2, wAl, wAnti,
+        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wU1, wU2, wAl, wAnti, wTwP,
         inlet_d, cxlo, cxhi, cylo, cyhi, czlo, czhi))
 
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
