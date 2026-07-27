@@ -58,6 +58,50 @@ function body_force_shift(M::AbstractVector{Float64}, gx, gy, gz, dt)
 end
 
 """
+    body_force_shift_dev(M::NTuple{35,Float64}, gx, gy, gz, dt) -> NTuple{35,Float64}
+
+Device-safe, allocation-free form of `body_force_shift`, for the GPU march and any other
+alloc-free caller.
+
+SAME OPERATOR, DIFFERENT ROUTE. `body_force_shift` goes through `M4toC4_3D` / `C4toM4_3D`,
+which return 5x5x5 ARRAYS and therefore allocate — fine on the CPU, impossible on the
+device. This form uses the recon-var round trip instead: `to_recon_vars_dev` returns
+`(rho, u, v, w, C200, C020, C002, S300, ...)` in exactly the argument order
+`from_recon_vars_dev` expects, so shifting the three mean-velocity slots and rebuilding is
+the whole operation. Central and standardized moments are carried across untouched, which
+is precisely the statement that a uniform force is a rigid velocity-space translation.
+
+NOT expected to be bit-identical to `body_force_shift`: the two rebuild the raw moments by
+different algebra, so they agree to roundoff, not to the last bit. The CPU path is left
+alone rather than switched to this one, so existing byte-identity baselines still hold;
+`test/test_body_force_dev.jl` measures the agreement instead of assuming it.
+"""
+@inline function body_force_shift_dev(M::NTuple{35,Float64}, gx::Float64, gy::Float64,
+                                      gz::Float64, dt::Float64)::NTuple{35,Float64}
+    # ZERO FORCE MUST BE EXACTLY THE IDENTITY, not the identity to roundoff. The recon-var
+    # round trip is not exact, so without this guard a march that calls the body-force
+    # kernel unconditionally would perturb EVERY run that has no body force, silently
+    # breaking byte-identity against existing baselines. `apply_body_force!` has the same
+    # short-circuit for the same reason. Caught by test_body_force_dev.jl.
+    (gx == 0.0 && gy == 0.0 && gz == 0.0) && return M
+    @inbounds (M[1] > 0.0) || return M
+    # Arguments written out rather than splatted. `to_recon_vars_dev(M...)` is valid Julia
+    # and works on the CPU, but SPLATTING DOES NOT LOWER ON THE DEVICE -- it emits
+    # jl_f__apply_iterate and the kernel fails with InvalidIRError. That is why every other
+    # device kernel here (e.g. _proj_interior!) spells out all 35 arguments.
+    V = @inbounds to_recon_vars_dev(
+        M[1],  M[2],  M[3],  M[4],  M[5],  M[6],  M[7],  M[8],  M[9],  M[10],
+        M[11], M[12], M[13], M[14], M[15], M[16], M[17], M[18], M[19], M[20],
+        M[21], M[22], M[23], M[24], M[25], M[26], M[27], M[28], M[29], M[30],
+        M[31], M[32], M[33], M[34], M[35])
+    @inbounds from_recon_vars_dev(
+        V[1], V[2] + gx*dt, V[3] + gy*dt, V[4] + gz*dt,
+        V[5],  V[6],  V[7],  V[8],  V[9],  V[10], V[11], V[12], V[13], V[14],
+        V[15], V[16], V[17], V[18], V[19], V[20], V[21], V[22], V[23], V[24],
+        V[25], V[26], V[27], V[28], V[29], V[30], V[31], V[32], V[33], V[34], V[35])
+end
+
+"""
     apply_body_force!(M, gx, gy, gz, dt, nx, ny, nz, halo)
 
 In-place uniform body force over the interior cells of a 4-D moment field.

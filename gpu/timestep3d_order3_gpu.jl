@@ -46,6 +46,7 @@ using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
 using Riemann35.RealizeDev: realizable_3D_M4_dev
 using Riemann35.ReconDev: bgk_relax_tup, _recon_centrals, _c4tom4_35, _EPSF
 using Riemann35.WallGhostDev: wall_ghost_tup
+using Riemann35: body_force_shift_dev
 
 export march3d_order3_gpu!, march3d_slab_order3_gpu!, build_haloed_cube, interior_from_cube!
 
@@ -160,6 +161,7 @@ end
 
 function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, ny::Int, nz::Int,
                              wall_Tw::Float64, wall_uw1::Float64, wall_uw2::Float64, wall_alpha::Float64,
+                             wall_antisym::Bool,
                              inlet, cxlo::Int, cxhi::Int, cylo::Int, cyhi::Int, czlo::Int, czhi::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nfx * nfy * nfz
@@ -181,7 +183,13 @@ function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, n
                     ax = wa != 0 ? 1 : (wb != 0 ? 2 : 3)
                     ow = Float64(wa != 0 ? wa : (wb != 0 ? wb : wc))
                     C = ntuple(m -> G[m, sa, sb, sc], Val(35))
-                    W = wall_ghost_tup(C, ax, ow, wall_Tw, wall_uw1, wall_uw2, wall_alpha)
+                    # ANTISYMMETRIC WALL MOTION. `wall_uw1/2` are single scalars shared by every
+                    # wall face, which is a uniformly-translating channel -- NOT Couette, where the
+                    # two walls move at -Uw and +Uw. `ow` already carries the face side (-1 lo,
+                    # +1 hi), so multiplying by it gives the antisymmetric pair from one scalar.
+                    # Off by default, so the existing single-velocity behaviour is untouched.
+                    sgn = wall_antisym ? ow : 1.0
+                    W = wall_ghost_tup(C, ax, ow, wall_Tw, sgn*wall_uw1, sgn*wall_uw2, wall_alpha)
                     for m in 1:35; G[m, a, b, c] = W[m]; end
                 else
                     for m in 1:35; G[m, a, b, c] = G[m, sa, sb, sc]; end
@@ -372,6 +380,34 @@ function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3ma
     return nothing
 end
 
+# Uniform body force on the interior — the GPU analogue of `apply_body_force!`
+# (src/numerics/body_force.jl), applied once per STEP after the RK stages, exactly as the
+# CPU channel probes do.
+#
+# A uniform acceleration is a rigid translation in velocity space, so this is EXACT for any
+# dt: central moments invariant, mean shifted by g*dt, realizability preserved with no
+# projection. That matters more here than convenience — the Poiseuille flow rate is a small
+# difference of an integral, and an O(dt) source term would contaminate it with
+# discretisation error that looks like physics.
+#
+# `body_force_shift_dev` short-circuits to the identity when g == 0, so a march configured
+# without a body force is byte-identical to one that never calls this.
+function _body_force_interior!(G, nx::Int, ny::Int, nz::Int, g::Int,
+                               gx::Float64, gy::Float64, gz::Float64, dt::Float64)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nx * ny * nz
+        @inbounds begin
+            i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
+            j = r % ny + 1;         k = r ÷ ny + 1
+            ga = g + i; gb = g + j; gc = g + k
+            C = ntuple(m -> G[m, ga, gb, gc], Val(35))
+            B = body_force_shift_dev(C, gx, gy, gz, dt)
+            for m in 1:35; G[m, ga, gb, gc] = B[m]; end
+        end
+    end
+    return nothing
+end
+
 # optional exact-exponential stage-BGK relaxation on the interior (CPU `bgk!`).
 function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64, pr::Float64, om::Float64, rk3::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -476,6 +512,10 @@ const _GPU_BC_PRESETS = Dict{Symbol,Tuple{NTuple{6,Int},NTuple{6,Bool}}}(
     :copy               => ((0,0,0,0,0,0), (false,false,false,false,false,false)),
     :crossflow          => ((1,0,2,2,0,0), (false,false,false,false,false,false)),
     :crossflow_absorb_y => ((1,0,0,0,0,0), (false,false,true, true, false,false)),
+    # planar channel: periodic in x, WALL on both y faces, outflow in z. Matches the CPU
+    # probes' BC (xlo/xhi periodic, ylo/yhi :wall, zlo/zhi outflow) used for Couette and
+    # Poiseuille. Face code 3 = wall.
+    :channel            => ((2,2,3,3,0,0), (false,false,false,false,false,false)),
 )
 
 # bc may be a preset Symbol or an explicit ((codes...),(sponge...)) tuple.
@@ -523,7 +563,9 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
                              reduce26::Bool = false,
-                             wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0, threads::Int = 128,
+                             wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
+                             wall_uw_antisym::Bool = false,
+                             gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              first_order::Bool = false, bc = :copy, inlet = nothing,
                              obst_state = nothing, obst_cx::Real = 0.0, obst_cy::Real = 0.0,
@@ -540,6 +582,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
+    gfx = Float64(gx); gfy = Float64(gy); gfz = Float64(gz); wAnti = wall_uw_antisym
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
@@ -603,7 +646,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # once). Byte-identical to _refill_halo! for :copy and _refill_halo_crossflow!
     # for :crossflow (same memory ops).
     refill!() = (@cuda threads=threads blocks=bcube _refill_halo_faces!(
-        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wU1, wU2, wAl,
+        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wU1, wU2, wAl, wAnti,
         inlet_d, cxlo, cxhi, cylo, cyhi, czlo, czhi))
 
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
@@ -632,6 +675,12 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
             if stage_bgk
                 @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe)
             end
+        end
+        # Uniform body force, once per step after the RK stages -- the same
+        # operator-split placement `apply_body_force!` has in the CPU channel probes.
+        # Exact (velocity-space translation), and a no-op when g == 0.
+        if gfx != 0.0 || gfy != 0.0 || gfz != 0.0
+            @cuda threads=threads blocks=bint _body_force_interior!(G, nx, ny, nz, g, gfx, gfy, gfz, dt)
         end
         # OPT-IN 26-moment reduction (Rodney Fox): per-step operator-split projection
         # of the nine odd 4th-order moments onto their closure. Mirrors the CPU
