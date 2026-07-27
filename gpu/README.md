@@ -306,32 +306,83 @@ The scripts `Pkg.activate(@__DIR__)` — first run `Pkg.add("CUDA")` in this dir
 depot). `gpu/validation/test_cuda.jl` also writes `LocalPreferences.toml` with `[CUDA_Runtime_jll] version="local"`
 if you want the system toolkit instead of artifacts.
 
-### Compile time — pass `-g0` (measured ~24× faster ptxas)
+### Compile time — the fix is `@noinline` on the rank-boundary path, NOT `-g0`
 
-The order-3 kernels (WENO5 + θ\*-IDP + realizability, fused into one huge kernel) are so large that
-`ptxas` spends most of its time generating **debug/line-info metadata**, not optimizing. Launching Julia
-with **`-g0`** (debug level 0) drops `--generate-line-info` and the `.target debug` header — release-mode
-ptxas. Measured on a **Tesla V100** with a clean same-script A/B:
+**`-g0` does almost nothing on A100. This section previously claimed a ~24× cut and that claim does not
+reproduce.** Measured 2026-07-26 on an **NVIDIA A100 80GB PCIe**, order-3, staged bubble2d 128×128×4,
+clean same-script A/B:
 
 | | ptxas time |
 |---|---|
-| default (`-g1`) | ~742 s (~12 min) |
-| **`-g0`** | **~31 s** |
+| default (`-g1`) | 863.5 s |
+| `-g0` | 766.2 s (744.2 s on a repeat) |
 
-That's a **~24× compile-time cut**, and it's **numerically byte-identical** — only debug info is stripped;
-the emitted SASS (and therefore every result) is unchanged. Use the convenience wrapper:
+That is **1.13×**, against the ~24× (742 s → 31 s) recorded here from a **Tesla V100**. The *mechanism*
+fails too, not just the magnitude: dumping PTX at both debug levels, the first 18 kernels emit 118,346
+lines at `-g0` vs 121,157 at default — a **2.4% difference**. There is essentially no line-info bulk for
+`-g0` to strip, so it cannot be where the time goes. Either the V100 result was hardware-specific or the
+original A/B was not measuring what it appeared to; it has not been re-checked on a V100. Keep `-g0` (it
+is free and mildly positive), but do not expect it to matter.
 
-```bash
-gpu/run_g0.sh gpu/run_staged.jl <args...>     # = julia -g0 --project=gpu/gpuenv2 ...
-```
+**What actually cost the time: one kernel, from six-fold inlining.** `CUDA.@device_code_ptx` over one
+order-3 step:
 
-or just add `-g0` to any invocation (`julia -g0 --project=gpu/gpuenv2 …`). (Note: the include-based scripts
-recompile from scratch every process — Julia's persistent cubin cache only persists cubins compiled during
-**package** precompilation, which these are not — so `-g0` is paid on every launch and is worth automating.)
+| kernel | PTX lines | share |
+|---|---|---|
+| `_blend_residual!` | **452,709** | **79.2%** |
+| `_weno_flux_z!` / `_y!` / `_x!` | 29,257 / 29,192 / 29,157 | 15.3% |
+| `_theta_cell!` | 17,511 | 3.1% |
+| everything else (14 kernels) | ~13,000 | 2.4% |
 
-**Where the per-step time actually goes** (V100, manual per-call `CUDA.@elapsed` timing, ms): the θ\*-IDP/WENO5
-residual is **71% of the whole step** (33.4 ms vs 4.2 ms for a plain first-order HLL residual → the limiter
-machinery is 87% of the residual), and the halo refill is the 2nd biggest at 7.1 ms; projection/BGK/RK are
-each <0.4 ms. So for **smooth, shock-free flows the θ\*-IDP limiter is dead weight** — dropping to order-2
-both compiles far faster and runs ~8× faster per residual. Keep order-3 for the shock/vacuum-heavy high-Ma
-runs where the limiter earns its keep.
+`_blend_residual!` calls `_rank_face_theta` once per face (6×); each inlined copy drags in
+`_halo_cell_mlo`, which itself inlines `_hll_states` 6× — so that one kernel carried **36 inlined copies
+of the HLL closure+eigenvalue body**. ptxas cost grows worse than linearly in function size, so it was
+essentially the whole compile. Two `@noinline` annotations fix it (see `residual3d_order3_gpu.jl`):
+
+| | compile | steady | PTX total |
+|---|---|---|---|
+| baseline | 758.1 s | 0.0483 s/step | 571,055 |
+| `@noinline _rank_face_theta` | 103.3 s | 0.0480 s/step | — |
+| **+ cold-path `_hll_states_cold`** | **66.3 s** | **0.0480 s/step** | **124,827** |
+| *(order-2, for reference)* | *45.0 s* | *0.0222 s/step* | — |
+
+**~12× on compile, and runtime is not worse** — the affected code is the rank-boundary path, which is
+cold (dormant entirely for x/y, slab edges only for z), so nothing hot was un-inlined. Verified
+**byte-identical** on the final field after 10 steps (111 MB, `cmp`), and separately on the residual with
+all six `rank_bnd` flags forced true, which is what actually executes `_rank_face_theta`.
+
+(Note: the include-based scripts recompile from scratch every process — Julia's persistent cubin cache
+only persists cubins compiled during **package** precompilation, which these are not — so the full ptxas
+cost is paid on every launch.)
+
+**Where the per-step time actually goes.** Re-measured 2026-07-26 on **A100**, `CUDA.@profile`, 20 steps,
+128×128×4 = 65,536 cells, **0.743 µs/cell/step**, GPU busy 93.3% of the trace:
+
+| kernel group | share of device time |
+|---|---|
+| `_weno_flux_{y,z,x}` | 17.2 + 16.5 + 14.4 = **48.1%** |
+| `_ppt_{z,y,x}` | 6.8 + 6.2 + 5.7 = **18.7%** |
+| `_vavg_{z,y,x}` | 4.1 + 4.1 + 3.0 = **11.1%** |
+| `_theta_cell` | 4.3% |
+| `_blend_residual` | 3.1% |
+| `_refill_halo_faces` | 3.0% |
+| `_rk_combine` | 2.0% |
+| `_proj_interior` / `_bgk_interior` | 0.9% / 0.6% |
+
+**This supersedes the previous claim that the θ\*-IDP residual is "71% of the whole step" and that the
+halo refill is second-biggest.** The θ\*-IDP machinery (`_theta_cell` + `_blend_residual`) is **7.4%**,
+and halo refill is 3.0%. The old numbers were V100 measurements against an older code path; acting on
+them means optimizing a 7% cost while ignoring a 48% one. The advice to prefer order-2 for smooth flows
+still holds on throughput (0.0222 vs 0.0480 s/step, 2.2×), but *not* for the stated reason.
+
+The open runtime target is `_ppt_*` + `_vavg_*`: **29.8% of device time from 8% of the code**. That
+inversion is the signature of memory-bound passes rather than expensive arithmetic.
+
+They run consecutively as G→P→V, which makes fusing each axis pair look free — but it is not, and the
+reason is worth recording before someone tries it. `_vavg_a!` consumes a **5-cell stencil of `P`**, not
+the local point, and each of those `P` values is itself a 5-cell stencil of `G`. Fusing therefore does
+not simply delete one write and one read of a 35-component cube: it forces `recon_point_dev` to be
+recomputed **5× per cell** and widens the `G` footprint to 9 cells along the axis. The trade is ~70
+doubles of memory traffic per cell against 5× the reconstruction arithmetic, so whether it wins depends
+on how bandwidth-starved these kernels actually are — which the profile above suggests but does not
+prove. Measure the arithmetic intensity (or just A/B a fused x-axis variant) before committing to it.

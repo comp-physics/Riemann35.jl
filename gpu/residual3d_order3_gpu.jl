@@ -569,17 +569,27 @@ end
 # Axis-generic (all six faces): used at whichever axis carries rank boundaries
 # (z-slab on the GPU; the x/y call sites are DORMANT — see `_blend_residual!`).
 # ---------------------------------------------------------------------------
+# COLD-PATH wrapper around `_hll_states`, deliberately NOT inlined. `_halo_cell_mlo`
+# calls the HLL body six times, and this is rank-boundary code: dormant entirely for
+# x/y (the GPU decomposes z only) and reached only at slab edges for z. So six inlined
+# copies of a ~14k-line body buy nothing at runtime and cost heavily at compile time.
+# The hot WENO flux kernels keep calling `_hll_states` directly and stay fully inlined —
+# that is the whole point of routing only this path through a separate function.
+@noinline _hll_states_cold(mL::NTuple{35,Float64}, mR::NTuple{35,Float64},
+                           ax::Int, Ma::Float64, s3f::Float64) =
+    _hll_states(mL, mR, ax, Ma, s3f)
+
 @inline function _halo_cell_mlo(G, px::Int, py::Int, pk::Int,
                                  λx::Float64, λy::Float64, λz::Float64,
                                  Ma::Float64, s3f::Float64)
     C = _cellG(G, px, py, pk)
     (λx == 0.0 && λy == 0.0 && λz == 0.0) && return C
-    FxL = _hll_states(_cellG(G, px-1, py, pk), C, 1, Ma, s3f)
-    FxR = _hll_states(C, _cellG(G, px+1, py, pk), 1, Ma, s3f)
-    FyD = _hll_states(_cellG(G, px, py-1, pk), C, 2, Ma, s3f)
-    FyU = _hll_states(C, _cellG(G, px, py+1, pk), 2, Ma, s3f)
-    FzB = _hll_states(_cellG(G, px, py, pk-1), C, 3, Ma, s3f)
-    FzF = _hll_states(C, _cellG(G, px, py, pk+1), 3, Ma, s3f)
+    FxL = _hll_states_cold(_cellG(G, px-1, py, pk), C, 1, Ma, s3f)
+    FxR = _hll_states_cold(C, _cellG(G, px+1, py, pk), 1, Ma, s3f)
+    FyD = _hll_states_cold(_cellG(G, px, py-1, pk), C, 2, Ma, s3f)
+    FyU = _hll_states_cold(C, _cellG(G, px, py+1, pk), 2, Ma, s3f)
+    FzB = _hll_states_cold(_cellG(G, px, py, pk-1), C, 3, Ma, s3f)
+    FzF = _hll_states_cold(C, _cellG(G, px, py, pk+1), 3, Ma, s3f)
     return ntuple(q -> C[q] - λx*(FxR[q]-FxL[q]) - λy*(FyU[q]-FyD[q])
                             - λz*(FzF[q]-FzB[q]), Val(35))
 end
@@ -593,7 +603,19 @@ end
 # the kernel) so its captured locals are fresh per call — sidestepping the Core.Box
 # hazard when several axis branches would otherwise reuse names before a closure.
 # ---------------------------------------------------------------------------
-@inline function _rank_face_theta(G, Thf::Float64, px::Int, py::Int, pk::Int,
+#
+# @noinline IS LOAD-BEARING FOR COMPILE TIME, and is the reason this file compiles in
+# minutes rather than a quarter hour. `_blend_residual!` calls this once per face, six
+# times. Inlined, each copy drags in `_halo_cell_mlo`, which itself inlines
+# `_hll_states` six times — so the kernel carried THIRTY-SIX inlined copies of the HLL
+# closure+eigenvalue body plus six of `_theta_star`. Measured on an A100 with
+# CUDA.@device_code_ptx: `_blend_residual!` emitted 452,709 lines of PTX, 79.2% of ALL
+# device code in the order-3 march and 15x the next-largest kernel (`_weno_flux_z!`,
+# 29k). ptxas cost grows worse than linearly in function size, so that one kernel was
+# essentially the entire compile.
+#
+# Do NOT "optimize" this back to @inline without re-measuring the PTX line count.
+@noinline function _rank_face_theta(G, Thf::Float64, px::Int, py::Int, pk::Int,
                                   FHOa, FLOa, fi::Int, fj::Int, fk::Int, s6λ::Float64,
                                   λx::Float64, λy::Float64, λz::Float64,
                                   Ma::Float64, s3f::Float64, use_closed::Bool)
