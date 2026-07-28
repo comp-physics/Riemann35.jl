@@ -34,15 +34,15 @@ using Riemann35: WALL_SPEC
 using Riemann35: reduce26_S, S_INDEX, DROPPED_KEYS, body_force_shift, apply_body_force!
 MPI.Initialized() || MPI.Init()
 
-const KNH   = [parse(Float64, s) for s in split(get(ENV, "PS_KNH", "0.05,0.1,0.2,0.5,1.0,2.0,5.0"), ",")]
-const CPL   = parse(Float64, get(ENV, "PS_CPL", "6.0"))
-const NYMIN = parse(Int,     get(ENV, "PS_NYMIN", "24"))
-const GACC  = parse(Float64, get(ENV, "PS_G", "0.02"))   # weak: keep the response linear
-const ORDER = parse(Int,     get(ENV, "PS_ORDER", "2"))
-const TENDF = parse(Float64, get(ENV, "PS_TEND", "0.4"))
+const KNH   = [parse(Float64, s) for s in split(envparam("PS_KNH", "0.05,0.1,0.2,0.5,1.0,2.0,5.0"), ",")]
+const CPL   = parse(Float64, envparam("PS_CPL", "6.0"))
+const NYMIN = parse(Int,     envparam("PS_NYMIN", "24"))
+const GACC  = parse(Float64, envparam("PS_G", "0.02"))   # weak: keep the response linear
+const ORDER = parse(Int,     envparam("PS_ORDER", "2"))
+const TENDF = parse(Float64, envparam("PS_TEND", "0.4"))
 # CFL scale factor. Splitting/stage-consistency error scales with dt; a genuine
 # dynamical instability of the reduced system does not. Sweeping this separates them.
-const CFLF  = parse(Float64, get(ENV, "PS_CFL", "1.0"))
+const CFLF  = parse(Float64, envparam("PS_CFL", "1.0"))
 
 stdz(Mv) = (M2CS4_35(collect(Float64, Mv)))[2]
 
@@ -156,13 +156,18 @@ function poiseuille(KnH::Float64; reduce::Bool = false, cpl = CPL, order = ORDER
     Q, ny, drift, prof
 end
 
-println("="^100)
-println("POISEUILLE FLOW RATE vs KNUDSEN NUMBER (the Knudsen minimum)")
-@printf("g=%.3f, ES-BGK Pr=2/3 omega=0.81, diffuse walls, ~%.0f cells/lambda, order=%d\n",
-        GACC, CPL, ORDER)
+# Every ENV-configurable parameter is printed, because it was NOT: this header used to
+# carry g, cells-per-mfp and the order but neither PS_TEND nor PS_CFL, and the published
+# 26-moment flow-rate table was produced at PS_TEND=1.2 rather than the default 0.4. Two
+# runs differing threefold in marched time emitted identical-looking logs, the parameter had
+# to be found by search, and the number it produced was a transient at a tenth of its
+# settling time. print_run_header prints exactly what envparam read, so the list cannot
+# drift out of step with the code again.
+print_run_header("POISEUILLE FLOW RATE vs KNUDSEN NUMBER (the Knudsen minimum)";
+                 extra = ("collision" => "ES-BGK, Pr=2/3, omega=0.81", "walls" => "diffuse"))
 println("Q should FALL, reach a MINIMUM near Kn_H ~ 1, then RISE. A monotone Q means the")
 println("scheme is behaving like Navier-Stokes-with-slip and has missed the kinetic effect.")
-println("="^100)
+println("="^92)
 flush(stdout)
 
 if !gate_body_force()

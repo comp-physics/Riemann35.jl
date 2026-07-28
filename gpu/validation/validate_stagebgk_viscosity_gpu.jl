@@ -35,19 +35,19 @@ Pkg.activate(joinpath(@__DIR__, "..", "gpuenv2"); io = devnull)
 using CUDA, Printf, Statistics, LinearAlgebra
 include(joinpath(@__DIR__, "..", "timestep3d_order3_gpu.jl"))
 using .Timestep3DOrder3GPU: march3d_order3_gpu!, build_haloed_cube, interior_from_cube!
-using Riemann35: InitializeM4_35
+using Riemann35: InitializeM4_35, envparam, print_run_header
 using Riemann35.ReconDev: bgk_relax_tup
 
 @assert CUDA.functional() "CUDA not functional"
 println("GPU: ", CUDA.name(CUDA.device()))
 
-const KN    = parse(Float64, get(ENV, "SV_KN", "0.25"))
-const NX    = parse(Int,     get(ENV, "SV_NX", "80"))
-const LDOM  = parse(Float64, get(ENV, "SV_L", "10.0"))
-const EPS   = parse(Float64, get(ENV, "SV_EPS", "1e-3"))
-const PRN   = parse(Float64, get(ENV, "SV_PR", string(2/3)))
-const OMG   = parse(Float64, get(ENV, "SV_OMEGA", "0.5"))
-const NPER  = parse(Float64, get(ENV, "SV_NPER", "2.0"))
+const KN    = parse(Float64, envparam("SV_KN", "0.25"))
+const NX    = parse(Int,     envparam("SV_NX", "80"))
+const LDOM  = parse(Float64, envparam("SV_L", "10.0"))
+const EPS   = parse(Float64, envparam("SV_EPS", "1e-3"))
+const PRN   = parse(Float64, envparam("SV_PR", string(2/3)))
+const OMG   = parse(Float64, envparam("SV_OMEGA", "0.5"))
+const NPER  = parse(Float64, envparam("SV_NPER", "2.0"))
 const BC_PX = ((2, 2, 0, 0, 0, 0), (false, false, false, false, false, false))
 
 mode_amp(q, x, k) = 2 * mean(q .* sin.(k .* x))
@@ -106,10 +106,9 @@ function run_shear(collide::Symbol; Kn = KN, Nx = NX, L = LDOM, eps = EPS,
     (-slope, decay_th)
 end
 
-println("="^88)
-println("CONTROL: does stage_bgk's per-stage collision cause the ~0.53 viscosity deficit?")
-@printf("Kn=%.3f  Nx=%d  L=%.1f  Pr=%.4f  omega=%.2f   k*lambda=%.4f\n",
-        KN, NX, LDOM, PRN, OMG, (2pi/LDOM)*(KN/2))
+print_run_header("CONTROL: does stage_bgk's per-stage collision cause the ~0.53 viscosity deficit?";
+                 extra = ("k*lambda" => string(round((2pi/LDOM)*(KN/2), digits=4)),
+                          "device"   => CUDA.name(CUDA.device())))
 @printf("prediction: stage -> 6/11 = %.4f ;  stage_exact -> ~1.0 ;  once -> ~1.0\n", 6/11)
 println("="^88)
 @printf("%-8s %16s %16s %10s\n", "collide", "measured", "theory", "ratio")

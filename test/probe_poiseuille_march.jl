@@ -38,13 +38,13 @@ MPI.Initialized() || MPI.Init()
 # The three Kn that carry the published claim: 0.2 is the peak of the gap (53%), 0.5 its
 # shoulder (51%), 0.1 the decline (28.6%) that refuted the earlier "saturates at ~50%"
 # reading. If the gap is march-sensitive anywhere it will show here.
-const KNH   = [parse(Float64, s) for s in split(get(ENV, "PM_KNH", "0.5,0.2,0.1"), ",")]
-const TENDS = [parse(Float64, s) for s in split(get(ENV, "PM_TENDS", "0.4,0.8,1.2,1.6,2.4,3.2"), ",")]
-const CPL   = parse(Float64, get(ENV, "PM_CPL", "6.0"))
-const NYMIN = parse(Int,     get(ENV, "PM_NYMIN", "24"))
-const GACC  = parse(Float64, get(ENV, "PM_G", "0.02"))
-const ORDER = parse(Int,     get(ENV, "PM_ORDER", "2"))
-const CFLF  = parse(Float64, get(ENV, "PM_CFL", "1.0"))
+const KNH   = [parse(Float64, s) for s in split(envparam("PM_KNH", "0.5,0.2,0.1"), ",")]
+const TENDS = [parse(Float64, s) for s in split(envparam("PM_TENDS", "0.4,0.8,1.2,1.6,2.4,3.2"), ",")]
+const CPL   = parse(Float64, envparam("PM_CPL", "6.0"))
+const NYMIN = parse(Int,     envparam("PM_NYMIN", "24"))
+const GACC  = parse(Float64, envparam("PM_G", "0.02"))
+const ORDER = parse(Int,     envparam("PM_ORDER", "2"))
+const CFLF  = parse(Float64, envparam("PM_CFL", "1.0"))
 
 # The nine dropped moments, re-imposed per cell per step. Verbatim from probe_poiseuille.jl
 # so the two probes apply the SAME reduction -- a reduction that differed even in operator
@@ -127,11 +127,8 @@ function poiseuille_trail(KnH::Float64; reduce::Bool = false)
     (ny, n, Qs, dms)
 end
 
-println("="^108)
-println("IS Q MARCH-CONVERGED? — the sweep probe_poiseuille.jl never ran")
-@printf("order=%d, %.0f cells/mfp, g=%.3f, CFL factor %.2f, diffuse walls, ES-BGK Pr=2/3 omega=0.81\n",
-        ORDER, CPL, GACC, CFLF)
-@printf("checkpoints (tendf, units of H^2/nu): %s\n", join(TENDS, ", "))
+print_run_header("IS Q MARCH-CONVERGED? -- the sweep probe_poiseuille.jl never ran";
+                 extra = ("collision" => "ES-BGK, Pr=2/3, omega=0.81", "walls" => "diffuse"))
 println("PUBLISHED VALUE IS AT tendf = 0.4. zeta was measured at 1.2; creep needed ~2.8.")
 println("The claim at risk is the reduced-26 GAP, not Q: a march error common to both")
 println("branches cancels in the ratio, so the gap only moves if they converge differently.")

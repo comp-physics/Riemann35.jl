@@ -36,21 +36,20 @@
 ENV["HYQMOM_SKIP_PLOTTING"] = "true"; ENV["CI"] = "true"
 include(joinpath(@__DIR__, "couette_driver.jl"))
 using Riemann35: reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
+using Riemann35: envparam, print_run_header
 MPI.Initialized() || MPI.Init()
 
-const KNH   = [parse(Float64, s) for s in split(get(ENV, "PR_KNH", "1.0,0.5,0.2,0.1"), ",")]
-const CPL   = parse(Float64, get(ENV, "PR_CPL", "6.0"))
-const UW    = parse(Float64, get(ENV, "PR_UW", "0.1"))
-const ORDER = parse(Int,     get(ENV, "PR_ORDER", "2"))
-const TENDF = parse(Float64, get(ENV, "PR_TEND", "0.3"))
+const KNH   = [parse(Float64, s) for s in split(envparam("PR_KNH", "1.0,0.5,0.2,0.1"), ",")]
+const CPL   = parse(Float64, envparam("PR_CPL", "6.0"))
+const UW    = parse(Float64, envparam("PR_UW", "0.1"))
+const ORDER = parse(Int,     envparam("PR_ORDER", "2"))
+const TENDF = parse(Float64, envparam("PR_TEND", "0.3"))
 
 "standardized 35-vector of a raw 35-vector"
 stdz(Mv) = (M2CS4_35(collect(Float64, Mv)))[2]
 
-println("="^112)
-println("CLOSURE RESIDUAL OF THE 26-MOMENT REDUCTION IN PLANAR COUETTE")
-@printf("Uw=%.2f (Ma~%.2f), order=%d, ES-BGK Pr=2/3 omega=0.81, fully diffuse walls, ~%.0f cells/lambda\n",
-        UW, UW, ORDER, CPL)
+print_run_header("CLOSURE RESIDUAL OF THE 26-MOMENT REDUCTION IN PLANAR COUETTE";
+                 extra = ("collision" => "ES-BGK, Pr=2/3, omega=0.81", "walls" => "fully diffuse"))
 println("residual = ||R(S)-S||/||S|| over the NINE dropped slots. R is reimplemented from the")
 println("notes' formulas (the original moment_reduce26.jl is missing from the repo).")
 println("="^112)

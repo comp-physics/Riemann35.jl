@@ -64,6 +64,7 @@ const TOL = 1e-10
         include("test_wall_bc.jl")   # Maxwell-accommodating wall ghost (opt-in :wall face)
         include("test_wall_conservation.jl")  # a wall must pass ZERO net mass (see header)
         include("test_body_force_dev.jl")     # device body force vs the CPU form
+        include("test_run_params.jl")         # results headers must record what was READ
 
         # θ*-IDP limiter goldens — pins BOTH the bisection baseline (frozen,
         # bit-for-bit fallback guard via theta_closed=false) and the closed-form

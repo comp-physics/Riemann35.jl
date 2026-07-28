@@ -67,6 +67,7 @@ export CubicRegion, initialize_moment_field, initialize_moment_field_mpi, crossi
 # Export key functions for testing
 export InitializeM4_35, M2CS4_35, Moments5_3D, hyqmom_3D, hyqmom_quadrature_1d
 export chyqmom_nodes_3d
+export envparam, print_run_header, run_params, reset_run_params!
 export realizability, realizable_2D, realizable_3D
 export projection35, realizable_3D_M4
 export realizability_margin, is_realizable
@@ -207,6 +208,7 @@ include("utils/axis_moment_slice.jl")
 include("utils/moment_array_utils.jl")
 include("utils/diagnostics.jl")
 include("utils/compute_standardized_field.jl")
+include("utils/run_params.jl")
 
 # Initial conditions
 include("initial_conditions.jl")
