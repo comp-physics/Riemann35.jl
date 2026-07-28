@@ -38,6 +38,11 @@ include(joinpath(GPUDIR, "timestep3d_order3_gpu.jl")); using .Timestep3DOrder3GP
 using Riemann35
 
 ny    = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 24
+# Amplitude ladder. Creep is a COEFFICIENT only in the linear regime, so the sweep has to
+# reach small enough A to show creep/A approaching a constant; a two-point check at
+# A = 0.05, 0.10 cannot distinguish "linear" from "monotone" and this file previously
+# claimed the former on that evidence.
+AMPS  = length(ARGS) >= 3 ? [parse(Float64,x) for x in split(ARGS[3], ",")] : [0.0125, 0.025, 0.05, 0.10]
 nsteps = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 6000   # tendf ~ 2.8; 600 is NOT converged
 KNH = 0.2; H = 1.0; T0 = 1.0; rho0 = 1.0
 nx = 24; nz = 8                     # x is the gradient direction, so give it extent
@@ -92,7 +97,7 @@ r0 = run(nothing)
 
 # 2/3. PERIODIC sinusoidal Tw. Sign convention: Tw = T0(1 + A sin(2 pi x/L)) has
 # dT/dx proportional to +cos, so creep (cold -> hot) gives a POSITIVE cos-projection.
-for A in (0.05, 0.10)
+for A in AMPS
     # PERIOD MUST BE nx, NOT nfx. The x wrap has period nx, so a consistent periodic wall
     # temperature must satisfy prof[a] == prof[a+nx]; building the sinusoid over the HALOED
     # extent nfx violates that and mis-phases it against the interior. Interior cell i sits at
@@ -100,16 +105,22 @@ for A in (0.05, 0.10)
     # in phase with the cos projection below.
     prof = [T0*(1 + A*sin(2pi*(a - g - 0.5)/nx)) for a in 1:nfx]
     r = run(prof)
-    @printf("[2] A = %4.2f sin(x)  wall = %+11.4e   core = %+11.4e   CREEP(w-c) = %+11.4e   dmass/m = %+.2e\n",
-            A, r.amp, r.core, r.amp - r.core, r.dmass); flush(stdout)
+    cr = r.amp - r.core
+    @printf("[2] A = %6.4f sin(x)  wall = %+11.4e  core = %+11.4e  CREEP(w-c) = %+11.4e  creep/A = %+.4e  dmass/m = %+.2e\n",
+            A, r.amp, r.core, cr, cr/A, r.dmass); flush(stdout)
 end
 println("="^92)
 println("READ: the creep signal is WALL MINUS CORE, not either band alone.")
 println("  Creep is a SHEAR across the Knudsen layer, and both bands here sit on a large")
 println("  common-mode circulation (~-2e-3) that swamps it. Every absolute statistic tried")
 println("  during development read negative for that reason and was mistaken for a sign bug.")
-println("  Converged reference (Kn_H=0.20, ny=24, A=0.10, tendf~2.8, 6000 steps):")
-println("     wall - core = +2.97e-04, POSITIVE = cold -> hot, correct creep direction;")
-println("     linear in A (+1.10e-04 at A=0.05 vs +2.71e-04 at A=0.10);")
-println("     converged to 0.4% between tendf 1.4 and 2.8.")
-println("  600 steps is tendf ~ 0.28 and is NOT converged -- use >= 3000.")
+println("  MEASURED 2026-07-28 (Kn_H=0.20, ny=24, order 3, A100). The previous reference block here
+  did NOT reproduce: it claimed +1.10e-04 at A=0.05 (actual +1.589e-04) and "converged to
+  0.4% between tendf 1.4 and 2.8" (actual 3.3% over that interval). Corrected:
+     null (uniform Tw): CREEP is EXACTLY +0.000e+00, and dmass is exactly 0;
+     A=0.05 -> +1.5894e-04, A=0.10 -> +2.9510e-04 at 12000 steps, POSITIVE = cold -> hot;
+     convergence: 3000->6000 steps moves it 3.3%, 6000->12000 only 0.16-0.66%,
+       so tendf ~ 2.8 (6000 steps) is converged and 3000 is NOT;
+     linearity: the A=0.05 -> 0.10 ratio is 1.86x for a 2x gradient, i.e. SUB-linear at
+       these amplitudes -- run the default 4-point ladder and read the creep/A column.
+  600 steps is tendf ~ 0.28 and is NOT converged -- use >= 3000.")
