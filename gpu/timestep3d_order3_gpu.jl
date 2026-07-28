@@ -401,16 +401,32 @@ end
 #
 # `body_force_shift_dev` short-circuits to the identity when g == 0, so a march configured
 # without a body force is byte-identical to one that never calls this.
+# OPTIONAL SPATIAL PROFILE. `gprof` is a dimensionless SHAPE function multiplying the
+# uniform (gx,gy,gz); `gpax` says which spatial axis indexes it. A length-1 `gprof` means
+# "uniform" and reproduces the scalar form exactly, so a march configured without a profile
+# is byte-identical to one that never had the capability.
+#
+# WHY A PROFILE IS NEEDED AT ALL. A uniform force on a periodic domain accelerates the whole
+# gas and never reaches a steady state, so a wall-free DRIVEN flow is unreachable with the
+# scalar form. That flow is the test that separates "driven steady states have no dt->0
+# limit" from "wall-bounded steady states have no dt->0 limit" -- see the Kolmogorov probe.
+#
+# INDEXED BY INTERIOR INDEX (1..n along `gpax`), not by the haloed cube index. The force
+# touches only the interior, so interior indexing is the natural convention here; note this
+# differs from `wall_Tw_prof`, which is indexed by the haloed index because it is consumed
+# inside the halo refill.
 function _body_force_interior!(G, nx::Int, ny::Int, nz::Int, g::Int,
-                               gx::Float64, gy::Float64, gz::Float64, dt::Float64)
+                               gx::Float64, gy::Float64, gz::Float64, dt::Float64,
+                               gprof, gpax::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
             i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
             j = r % ny + 1;         k = r ÷ ny + 1
             ga = g + i; gb = g + j; gc = g + k
+            sc = length(gprof) > 1 ? gprof[gpax == 1 ? i : (gpax == 2 ? j : k)] : 1.0
             C = ntuple(m -> G[m, ga, gb, gc], Val(35))
-            B = body_force_shift_dev(C, gx, gy, gz, dt)
+            B = body_force_shift_dev(C, gx*sc, gy*sc, gz*sc, dt)
             for m in 1:35; G[m, ga, gb, gc] = B[m]; end
         end
     end
@@ -525,6 +541,10 @@ const _GPU_BC_PRESETS = Dict{Symbol,Tuple{NTuple{6,Int},NTuple{6,Bool}}}(
     # probes' BC (xlo/xhi periodic, ylo/yhi :wall, zlo/zhi outflow) used for Couette and
     # Poiseuille. Face code 3 = wall.
     :channel            => ((2,2,3,3,0,0), (false,false,false,false,false,false)),
+    # fully periodic, no boundaries of any kind. Needed for a DRIVEN flow with no walls
+    # (sinusoidally forced Kolmogorov), which is the only configuration that can separate
+    # "driven steady states have no dt->0 limit" from "wall-bounded ones do" -- see #38.
+    :periodic           => ((2,2,2,2,2,2), (false,false,false,false,false,false)),
 )
 
 # bc may be a preset Symbol or an explicit ((codes...),(sponge...)) tuple.
@@ -574,6 +594,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
                              wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
+                             gprof = nothing, gprof_axis::Int = 2,
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              first_order::Bool = false, bc = :copy, inlet = nothing,
@@ -595,6 +616,9 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # length-1 sentinel = isothermal wall (kernel falls back to the scalar wTw)
     wTwP = wall_Tw_prof === nothing ? CUDA.zeros(Float64, 1) :
                                       CuArray(convert(Vector{Float64}, wall_Tw_prof))
+    # length-1 sentinel => uniform force, byte-identical to the pre-profile behaviour
+    gP = gprof === nothing ? CUDA.ones(Float64, 1) :
+                             CuArray(convert(Vector{Float64}, gprof))
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
@@ -692,7 +716,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         # operator-split placement `apply_body_force!` has in the CPU channel probes.
         # Exact (velocity-space translation), and a no-op when g == 0.
         if gfx != 0.0 || gfy != 0.0 || gfz != 0.0
-            @cuda threads=threads blocks=bint _body_force_interior!(G, nx, ny, nz, g, gfx, gfy, gfz, dt)
+            @cuda threads=threads blocks=bint _body_force_interior!(G, nx, ny, nz, g, gfx, gfy, gfz, dt, gP, gprof_axis)
         end
         # OPT-IN 26-moment reduction (Rodney Fox): per-step operator-split projection
         # of the nine odd 4th-order moments onto their closure. Mirrors the CPU
