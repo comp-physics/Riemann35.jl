@@ -43,10 +43,10 @@
 ENV["HYQMOM_SKIP_PLOTTING"] = "true"; ENV["CI"] = "true"
 using Riemann35, Printf, LinearAlgebra, Statistics
 
-const ES   = [parse(Float64, s) for s in split(get(ENV, "GR_E", "1.0,0.99,0.95,0.9,0.8"), ",")]
-const TAU0 = parse(Float64, get(ENV, "GR_TAU", "0.05"))   # collision time at T=1
-const TMAX = parse(Float64, get(ENV, "GR_TMAX", "20.0"))
-const NT   = parse(Int,     get(ENV, "GR_NT", "20000"))
+const ES   = [parse(Float64, s) for s in split(envparam("GR_E", "1.0,0.99,0.95,0.9,0.8"), ",")]
+const TAU0 = parse(Float64, envparam("GR_TAU", "0.05"))   # collision time at T=1
+const TMAX = parse(Float64, envparam("GR_TMAX", "20.0"))
+const NT   = parse(Int,     envparam("GR_NT", "20000"))
 
 "temperature and bulk velocity of a 35-moment state"
 function rhouT(M)
@@ -96,10 +96,8 @@ function granular_step(M::Vector{Float64}, dt::Float64, e::Float64, tau_ref::Flo
     [A[i] for i in idx]
 end
 
-println("="^100)
-println("GRANULAR HOMOGENEOUS COOLING STATE vs HAFF'S LAW")
-@printf("tau_ref=%.3f at T=1, t_max=%.1f, %d steps, inelastic BGK (Brey-Moreno-Dufty form)\n",
-        TAU0, TMAX, NT)
+print_run_header("GRANULAR HOMOGENEOUS COOLING STATE vs HAFF'S LAW";
+                 extra = ("collision" => "inelastic BGK (Brey-Moreno-Dufty form)",))
 println("Haff: T(t) = T0/(1 + t/t0)^2 with t0 = 2/zeta_0, zeta_0 = (1-e^2)/(3 tau_ref).")
 println("Exponent p is fitted from the late-time slope of log T vs log(1 + t/t0); Haff says p = -2.")
 println("="^100)

@@ -35,12 +35,12 @@ using Riemann35: WALL_SPEC
 using Riemann35: reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 MPI.Initialized() || MPI.Init()
 
-const KNH   = [parse(Float64, s) for s in split(get(ENV, "FN_KNH", "1.0,0.5,0.2,0.1"), ",")]
-const CPL   = parse(Float64, get(ENV, "FN_CPL", "6.0"))
-const NYMIN = parse(Int,     get(ENV, "FN_NYMIN", "24"))
-const TRAT  = parse(Float64, get(ENV, "FN_DT_RATIO", "2.0"))   # Tw_hi/Tw_lo
-const ORDER = parse(Int,     get(ENV, "FN_ORDER", "2"))
-const TENDF = parse(Float64, get(ENV, "FN_TEND", "0.3"))
+const KNH   = [parse(Float64, s) for s in split(envparam("FN_KNH", "1.0,0.5,0.2,0.1"), ",")]
+const CPL   = parse(Float64, envparam("FN_CPL", "6.0"))
+const NYMIN = parse(Int,     envparam("FN_NYMIN", "24"))
+const TRAT  = parse(Float64, envparam("FN_DT_RATIO", "2.0"))   # Tw_hi/Tw_lo
+const ORDER = parse(Int,     envparam("FN_ORDER", "2"))
+const TENDF = parse(Float64, envparam("FN_TEND", "0.3"))
 
 stdz(Mv) = (M2CS4_35(collect(Float64, Mv)))[2]
 
@@ -86,10 +86,8 @@ function fourier_field(KnH::Float64; cpl = CPL, order = ORDER, tendf = TENDF,
     [M[halo+1, halo+j, 1, :] for j in 1:ny], ny, nst
 end
 
-println("="^104)
-println("FOURIER NULL CONTROL: all nine dropped moments must vanish by x- and z-parity")
-@printf("stationary walls at T=%.2f and %.2f, ES-BGK Pr=2/3 omega=0.81, ~%.0f cells/lambda\n",
-        1.0, TRAT, CPL)
+print_run_header("FOURIER NULL CONTROL: all nine dropped moments must vanish by x- and z-parity";
+                 extra = ("collision" => "ES-BGK, Pr=2/3, omega=0.81", "walls" => "stationary, diffuse"))
 println("PREDICTION: max|S_dropped| ~ roundoff, closure residual ~ 0, reduction EXACTLY inert.")
 println("POSITIVE CONTROL: S030 (wall-normal heat flux) must be clearly nonzero, else the")
 println("flow is at equilibrium and the null result would be vacuous.")

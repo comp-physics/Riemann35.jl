@@ -23,18 +23,18 @@ Pkg.activate(joinpath(@__DIR__, "..", "gpuenv2"); io = devnull)
 using CUDA, Printf, Statistics, LinearAlgebra
 include(joinpath(@__DIR__, "..", "timestep3d_order3_gpu.jl"))
 using .Timestep3DOrder3GPU: march3d_order3_gpu!, build_haloed_cube, interior_from_cube!
-using Riemann35: InitializeM4_35
+using Riemann35: InitializeM4_35, envparam, print_run_header
 
 @assert CUDA.functional() "CUDA not functional"
 println("GPU: ", CUDA.name(CUDA.device()))
 
-const KNS   = parse.(Float64, split(get(ENV, "STG_KNS", "1.0,0.5,0.25"), ","))
-const NXS   = parse.(Int,     split(get(ENV, "STG_NXS", "80,160,320"), ","))
-const LDOM  = parse(Float64, get(ENV, "STG_L", "10.0"))
-const EPS   = parse(Float64, get(ENV, "STG_EPS", "1e-3"))
-const PRN   = parse(Float64, get(ENV, "STG_PR", string(2/3)))
-const OMG   = parse(Float64, get(ENV, "STG_OMEGA", "0.5"))
-const NPER  = parse(Float64, get(ENV, "STG_NPER", "2.0"))
+const KNS   = parse.(Float64, split(envparam("STG_KNS", "1.0,0.5,0.25"), ","))
+const NXS   = parse.(Int,     split(envparam("STG_NXS", "80,160,320"), ","))
+const LDOM  = parse(Float64, envparam("STG_L", "10.0"))
+const EPS   = parse(Float64, envparam("STG_EPS", "1e-3"))
+const PRN   = parse(Float64, envparam("STG_PR", string(2/3)))
+const OMG   = parse(Float64, envparam("STG_OMEGA", "0.5"))
+const NPER  = parse(Float64, envparam("STG_NPER", "2.0"))
 
 # periodic x, outflow y/z  (codes: 0=outflow, 1=inlet, 2=periodic)
 const BC_PX = ((2, 2, 0, 0, 0, 0), (false, false, false, false, false, false))
@@ -106,9 +106,8 @@ function linfit(xs, ys)
     ((sy - b*sx)/n, b)
 end
 
-println("="^100)
-println("SPATIAL TRANSPORT (GPU): do mu and k emerge from the discretized PDE?")
-@printf("L=%.1f  eps=%.1e  Pr=%.4f  omega=%.2f  nper=%.1f  order=3\n", LDOM, EPS, PRN, OMG, NPER)
+print_run_header("SPATIAL TRANSPORT (GPU): do mu and k emerge from the discretized PDE?";
+                 extra = ("order" => "3", "device" => CUDA.name(CUDA.device())))
 println("ratio = measured decay / (nu k^2 or alpha k^2). NS theory is recovered only as")
 println("BOTH dx -> 0 and k*lambda -> 0; the CPU pilot showed finite k*lambda pushes the")
 println("ratio BELOW 1 (sub-NS kinetic damping), which is not a discretization error.")
