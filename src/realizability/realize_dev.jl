@@ -80,9 +80,17 @@ export realizable_3D_M4_dev, realizable_3D_M4_corr_dev, projection35_dev,
             end
             xr = (a + b) / 2   # keep in sync with the "loop finished" return value
         end
+        # Back off strictly inside the cone. This belongs INSIDE the `S2 < 0` branch: it
+        # exists because the bisection lands ON the boundary S2 = 0, and a state that is
+        # already realizable has no boundary to back away from. Applied unconditionally it
+        # shrank the velocity correlations by 1 part in 1e4 on EVERY cell EVERY stage --
+        # an artificial dissipation on shear stress whose total scales with the NUMBER of
+        # stages, i.e. as 1/dt. See rem:kolmogorov-dt: it is why no driven steady state had
+        # a dt -> 0 limit, and why the displacement sat 100% in m110 (the shear stress) at
+        # exactly 1.00e-4 relative.
+        xr = 0.9999 * xr
     end
 
-    xr = 0.9999 * xr
     S110r = xr * S110
     S101r = xr * S101
     S011r = xr * S011

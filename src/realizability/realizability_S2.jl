@@ -25,9 +25,14 @@ function realizability_S2(S110, S101, S011)
         
         # Use bisection to find root in [0, 1]
         xr = find_zero_bisection(Y, 0.0, 1.0)
+
+        # Back off strictly inside the cone -- INSIDE the branch, because the bisection
+        # lands ON S2 = 0 and only that case needs backing off. Unconditionally it shaved
+        # 1e-4 off the velocity correlations on every cell every stage, an artificial
+        # shear-stress dissipation accumulating as 1/dt (see realize_dev.jl).
+        xr = 0.9999 * xr
     end
     
-    xr = 0.9999 * xr  # Slightly reduce to ensure strict inequality
     S110r = xr * S110
     S101r = xr * S101
     S011r = xr * S011
