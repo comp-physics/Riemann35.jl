@@ -45,7 +45,8 @@
 #
 # GATE: successive halvings must SHRINK the change. Deliberately loose -- this catches
 # divergence, not accuracy, and must not become a brittle golden.
-using Test, Riemann35, MPI, Statistics
+using Test, Riemann35, MPI   # NB: no Statistics -- it is not in the test target and was unused;
+                             # importing it failed CI on a clean env while passing locally
 using Riemann35: body_force_shift
 
 MPI.Initialized() || MPI.Init()
