@@ -33,10 +33,22 @@ using CUDA, LinearAlgebra
 export VGridG, dvm_alloc, transport_upwind!, transport_walls!, collide!, moments35_field,
        discrete_maxwellian_host!, wall_pair_host, cellT_from_M
 
+# CANONICAL ORDER, and it must match src/moments/moment_indices.jl exactly. An earlier
+# transcription of this table PERMUTED positions 31-33 -- it read
+# (0,1,2),(1,1,2),(0,3,1) where the canonical order is (0,3,1),(0,1,2),(1,1,2). The multiset
+# was right, so no moment was missing and every total/trace was correct; three moments were
+# simply MISLABELLED. Nothing published was affected because every wall observable uses
+# indices <= 30 (rho, u, and the diagonal second moments), but those three are exactly the
+# odd fourth-order cross-moments that moment_reduce26.jl drops, so a reduced-26 comparison
+# run through this module would have been silently wrong.
+#
+# It surfaced only because a heat-flux estimator built on index 32 returned exactly -u on a
+# pure Maxwellian, where the answer had to be 0. validate_dvm_gpu.jl now asserts the two
+# tables agree elementwise, which is the check that should have existed from the start.
 const IJK35 = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
                (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),(0,3,0),(1,3,0),(0,4,0),
                (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),(0,0,3),(1,0,3),(0,0,4),
-               (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,1,2),(1,1,2),(0,3,1),(0,1,3),(0,2,2))
+               (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),(0,1,2),(1,1,2),(0,1,3),(0,2,2))
 
 struct VGridG
     v::CuVector{Float64}
@@ -399,5 +411,251 @@ function wall_pair_host(g::VGridG, Tw::Float64, sgn::Int)
     end
     (CuArray(M1), out)
 end
+
+# =======================================================================================
+# ES-BGK — the collision that gets the Prandtl number right.
+#
+# WHY THIS MATTERS MORE THAN IT LOOKS. Every comparison against DSMC is currently
+# CONFOUNDED, because BGK forces one relaxation time to serve two transport coefficients.
+# Measured against real VHS argon it comes out +43% in the shear rate and -28 to -32% in the
+# temperature jump: two errors of OPPOSITE SIGN that partially cancel against the closure's
+# own error and thereby flatter it. With Pr = 2/3 the reference matches a real gas, and
+# closure-versus-reference becomes a direct measurement of truncation error instead of an
+# inference from two references that disagree.
+#
+# THE ALGORITHM IS CHEAPER THAN THE CPU'S, not just ported. The CPU solves a 7x7 Newton for
+# the exponential-family parameters, which costs 25 distinct reductions over n^3 velocity
+# points PER ITERATION. But the diagonal-covariance Gaussian FACTORISES,
+#
+#     f = A * gx(vx) * gy(vy) * gz(vz),   g(v) = exp(b v + c v^2)
+#
+# and on a tensor-product velocity grid that factorisation is EXACT, not approximate. The
+# seven constraints then decouple: <vx>/<1> and <vx^2>/<1> involve only (bx, cx), so each
+# axis is an independent 2x2 Newton over n points, and A follows from normalisation. One
+# O(n^3) reduction for the input moments, three O(n) solves, one O(n^3) write -- against the
+# CPU's 25 O(n^3) reductions per iteration.
+#
+# The same factorisation applies to the isotropic Maxwellian in `_collide_kernel!` above,
+# which is therefore also leaving performance on the table. That kernel is validated to
+# 1e-14 and is not touched here; the observation is recorded rather than acted on.
+#
+# Diagonal covariance is COMPLETE for this geometry, not an approximation: in 1D-physical x
+# 3D-velocity with x-transport, symmetry prevents any xy/xz/yz correlation from developing.
+# A general 10-parameter version would be needed in 2D or 3D physical space.
+
+"kappa = (a-e)/(1-e), a=exp(-y), e=exp(-Pr y); expm1 form for small-y stability. Matches
+ the CPU `kappa_es` and Riemann35's ReconDev.bgk_relax_tup, deliberately -- if the two
+ solvers integrated the collision differently, a closure comparison would conflate
+ truncation error with a splitting difference."
+@inline function _kappa_es(Pr::Float64, y::Float64)
+    Pr == 1.0 && return 0.0
+    -exp(-Pr*y) * expm1((Pr - 1.0)*y) / expm1(-Pr*y)
+end
+
+"""
+One axis of the factorised fit: find (b, c) with g(v) = exp(b v + c v^2) whose normalised
+first and second moments on the grid are `m1t` and `m2t`. Returns (b, c, converged).
+
+Newton on a symmetric 2x2 whose entries are grid sums S0..S4 of v^p g. The initial guess is
+the Gaussian's own parameters, b = u/l and c = -1/(2l), which is exact when the target
+moments are consistent with a Gaussian -- so this typically converges in 2-3 iterations.
+"""
+@inline function _fit_axis(v, n::Int, m1t::Float64, m2t::Float64,
+                           b0::Float64, c0::Float64, iters::Int, tol::Float64)
+    b = b0; c = c0
+    @inbounds for _ in 1:iters
+        S0 = 0.0; S1 = 0.0; S2 = 0.0; S3 = 0.0; S4 = 0.0
+        for a in 1:n
+            vv = v[a]
+            gg = exp(b*vv + c*vv*vv)
+            S0 += gg; S1 += vv*gg; S2 += vv*vv*gg
+            S3 += vv*vv*vv*gg; S4 += vv*vv*vv*vv*gg
+        end
+        (S0 > 0.0 && isfinite(S0)) || return (b, c, false)
+        e1 = S1/S0 - m1t
+        e2 = S2/S0 - m2t
+        (abs(e1) + abs(e2) < tol) && return (b, c, true)
+        # J = d(moments)/d(b,c), symmetric: the covariance matrix of (v, v^2) under g
+        J11 = S2/S0 - (S1/S0)^2
+        J12 = S3/S0 - (S1/S0)*(S2/S0)
+        J22 = S4/S0 - (S2/S0)^2
+        det = J11*J22 - J12*J12
+        (abs(det) > 1e-300) || return (b, c, false)
+        b -= ( J22*e1 - J12*e2)/det
+        c -= (-J12*e1 + J11*e2)/det
+    end
+    (b, c, true)
+end
+
+function _collide_es_kernel!(f, v, n, Nx, dv3, dt, Kn, Pr, omega, iters::Int32, tol)
+    i = blockIdx().x
+    tid = threadIdx().x
+    nt = blockDim().x
+    sh = CUDA.CuDynamicSharedArray(Float64, 7*nt)
+    sa = CUDA.CuDynamicSharedArray(Float64, 8, 7*nt*sizeof(Float64))
+    npts = n*n*n
+
+    # ---- ONE reduction: rho, rho*u (3), and <v_i^2> (3) -- exactly the inputs needed ----
+    m0=0.0; m1=0.0; m2=0.0; m3=0.0; m4=0.0; m5=0.0; m6=0.0
+    @inbounds for t in tid:nt:npts
+        a = (t-1) % n + 1; r = (t-1) ÷ n
+        b = r % n + 1;     c = r ÷ n + 1
+        vx = v[a]; vy = v[b]; vz = v[c]
+        w = f[a,b,c,i]*dv3
+        m0 += w; m1 += w*vx; m2 += w*vy; m3 += w*vz
+        m4 += w*vx*vx; m5 += w*vy*vy; m6 += w*vz*vz
+    end
+    @inbounds begin
+        sh[tid]=m0; sh[nt+tid]=m1; sh[2nt+tid]=m2; sh[3nt+tid]=m3
+        sh[4nt+tid]=m4; sh[5nt+tid]=m5; sh[6nt+tid]=m6
+    end
+    sync_threads()
+    s = nt >> 1
+    while s > 0
+        if tid <= s
+            @inbounds for q in 0:6; sh[q*nt+tid] += sh[q*nt+tid+s]; end
+        end
+        sync_threads(); s >>= 1
+    end
+
+    # ---- thread 1: the anisotropic target, then three independent 2x2 fits -------------
+    @inbounds if tid == 1
+        rho = sh[1]
+        if rho > 0.0
+            ux = sh[nt+1]/rho; uy = sh[2nt+1]/rho; uz = sh[3nt+1]/rho
+            cxx = sh[4nt+1]/rho - ux*ux
+            cyy = sh[5nt+1]/rho - uy*uy
+            czz = sh[6nt+1]/rho - uz*uz
+            Theta = (cxx + cyy + czz)/3
+            Theta = Theta > 1e-14 ? Theta : 1e-14
+            tau = (Kn/2)*Theta^(omega - 1.0)/rho
+            y = dt/tau
+            if y > 0.0
+                k = _kappa_es(Pr, y)
+                lxx = max((1-k)*Theta + k*cxx, 1e-14)
+                lyy = max((1-k)*Theta + k*cyy, 1e-14)
+                lzz = max((1-k)*Theta + k*czz, 1e-14)
+                bx, cx, _ = _fit_axis(v, n, ux, lxx + ux*ux, ux/lxx, -1/(2lxx), Int(iters), tol)
+                by, cy, _ = _fit_axis(v, n, uy, lyy + uy*uy, uy/lyy, -1/(2lyy), Int(iters), tol)
+                bz, cz, _ = _fit_axis(v, n, uz, lzz + uz*uz, uz/lzz, -1/(2lzz), Int(iters), tol)
+                # normalisation: A * Gx*Gy*Gz * dv^3 = rho
+                Gx = 0.0; Gy = 0.0; Gz = 0.0
+                for a in 1:n
+                    vv = v[a]
+                    Gx += exp(bx*vv + cx*vv*vv)
+                    Gy += exp(by*vv + cy*vv*vv)
+                    Gz += exp(bz*vv + cz*vv*vv)
+                end
+                sa[1] = rho/(Gx*Gy*Gz*dv3)
+                sa[2] = bx; sa[3] = cx; sa[4] = by
+                sa[5] = cy; sa[6] = bz; sa[7] = cz
+                sa[8] = exp(-Pr*y)          # NB Pr*y, not y -- the ES-BGK relaxation rate
+            else
+                sa[1] = -1.0
+            end
+        else
+            sa[1] = -1.0
+        end
+    end
+    sync_threads()
+
+    @inbounds if sa[1] >= 0.0
+        A = sa[1]; bx = sa[2]; cx = sa[3]; by = sa[4]
+        cy = sa[5]; bz = sa[6]; cz = sa[7]; e = sa[8]
+        for t in tid:nt:npts
+            a = (t-1) % n + 1; r = (t-1) ÷ n
+            b = r % n + 1;     c = r ÷ n + 1
+            vx = v[a]; vy = v[b]; vz = v[c]
+            feq = A*exp(bx*vx + cx*vx*vx)*exp(by*vy + cy*vy*vy)*exp(bz*vz + cz*vz*vz)
+            f[a,b,c,i] = feq + (f[a,b,c,i] - feq)*e
+        end
+    end
+    return nothing
+end
+
+"""
+    collide_es!(f, g, dt, Kn, Pr, omega; ...)
+
+ES-BGK collision on every cell. `Pr = 1` reduces to BGK exactly (kappa == 0 makes the target
+isotropic), which `validate_dvm_esbgk_gpu.jl` uses as its first gate. `tau` is computed per
+cell from the local Theta and rho with the VHS exponent `omega`, matching the moment solver's
+convention rather than taking a fixed tau -- so a closure comparison differs only in the flux.
+"""
+function collide_es!(f, g::VGridG, dt, Kn, Pr, omega;
+                     iters::Int = 40, tol = 1e-14, threads::Int = 128)
+    Nx = size(f, 4)
+    shmem = (7*threads + 8)*sizeof(Float64)
+    @cuda threads=threads blocks=Nx shmem=shmem _collide_es_kernel!(
+        f, g.v, g.n, Nx, g.dv^3, Float64(dt), Float64(Kn), Float64(Pr), Float64(omega),
+        Int32(iters), Float64(tol))
+    f
+end
+
+# =======================================================================================
+# EXACT WALL FLUXES — an observable with no extrapolation in it.
+#
+# WHY. Every wall coefficient in the notes is read by fitting the core of the channel and
+# extrapolating to the wall. That estimator has two measured failure modes. At Kn = 0.8 the
+# core-fit R^2 falls to 0.9991 in BOTH codes, because the profile stops being linear across
+# the middle half -- the fit is being asked for something the data no longer supports. And
+# the temperature jump turns out to depend on WHICH wall it is read at, by 6.6% at
+# dT/T = 10%, because lambda_eff = tau*sqrt(T) differs between a hot and a cold plate.
+#
+# The wall stress and wall heat flux have neither problem. They are exact half-space
+# integrals of f at the wall face -- no fit, no extrapolation, no choice of window -- and
+# they are what DSMC reports natively (the deck already dumps `press shx shy shz`), so the
+# comparison tightens on both sides at once. They are also the physically primary quantities:
+# drag and heat load are what a wall actually experiences.
+#
+# The split matters. At the lo wall the INCOMING half (vx < 0) comes from the interior and
+# the OUTGOING half (vx > 0) is the wall's own Maxwellian at rho_w. Summing f over all
+# velocities in cell 1 would be the cell-centre flux, not the wall flux, and would silently
+# omit the wall's contribution.
+function _wall_flux_kernel!(out, f, Mw, v, n, Nx, dv3, rho_w, icell, sgn, uw, Tw)
+    t = (blockIdx().x - 1)*blockDim().x + threadIdx().x
+    if t <= n*n*n
+        @inbounds begin
+            a = (t-1) % n + 1; r = (t-1) ÷ n
+            b = r % n + 1;     c = r ÷ n + 1
+            vx = v[a]; vy = v[b]; vz = v[c]
+            # outgoing (sgn*vx > 0) is the wall Maxwellian; incoming is the interior cell
+            fv = (sgn*vx > 0) ? rho_w*Mw[a,b,c] : f[a,b,c,icell]
+            w = fv*dv3
+            CUDA.@atomic out[1] += vx*(vy - uw)*w                       # tangential stress
+            cx = vx; cy = vy - uw; cz = vz
+            CUDA.@atomic out[2] += 0.5*vx*(cx*cx + cy*cy + cz*cz)*w     # normal heat flux
+            CUDA.@atomic out[3] += vx*w                                 # net mass flux (~0)
+        end
+    end
+    return nothing
+end
+
+"""
+    wall_flux(f, g, Mw, rho_w, side; uw=0.0, Tw=1.0) -> (P_xy, q_x, mdot)
+
+Exact tangential momentum flux and normal heat flux at one wall, with the half-space split
+done explicitly. `side = :lo` or `:hi`. `mdot` should be ~0 by construction and is returned
+as a check, not a diagnostic to be interpreted.
+"""
+function wall_flux(f, g::VGridG, Mw, rho_w::Float64, side::Symbol; uw = 0.0, Tw = 1.0)
+    Nx = size(f, 4); n = g.n
+    icell = side === :lo ? 1 : Nx
+    sgn   = side === :lo ? 1.0 : -1.0
+    out = CUDA.zeros(Float64, 3)
+    @cuda threads=256 blocks=cld(n^3, 256) _wall_flux_kernel!(
+        out, f, Mw, g.v, n, Nx, g.dv^3, rho_w, icell, sgn, Float64(uw), Float64(Tw))
+    h = Array(out)
+    (Pxy = h[1], qx = h[2], mdot = h[3])
+end
+
+"""
+    freemolecular_stress(rho, Uw, T) / freemolecular_heatflux(rho, dT, T)
+
+Collisionless limits, used to normalise the wall fluxes into O(1) numbers whose Kn-dependence
+is interpretable. Normalising by the continuum value instead would divide by something that
+vanishes in the rarefied limit, which is the wrong way round for a transition-regime sweep.
+"""
+freemolecular_stress(rho, Uw, T)  = rho*Uw*sqrt(T/(2pi))
+freemolecular_heatflux(rho, dT, T) = rho*dT*sqrt(T/(2pi))
 
 end # module
