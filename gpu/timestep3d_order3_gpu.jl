@@ -160,7 +160,8 @@ end
 end
 
 function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, ny::Int, nz::Int,
-                             wall_Tw::Float64, wall_uw1::Float64, wall_uw2::Float64, wall_alpha::Float64,
+                             wall_Tw::Float64, wall_Tw_hi::Float64,
+                             wall_uw1::Float64, wall_uw2::Float64, wall_alpha::Float64,
                              wall_antisym::Bool, wall_Tw_prof,
                              inlet, cxlo::Int, cxhi::Int, cylo::Int, cyhi::Int, czlo::Int, czhi::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -196,7 +197,16 @@ function _refill_halo_faces!(G, nfx::Int, nfy::Int, nfz::Int, g::Int, nx::Int, n
                     # spans the full cube extent along it, halo cells included.
                     # A length-1 profile means "use the scalar", so the isothermal path is
                     # byte-identical to before.
-                    tw = length(wall_Tw_prof) > 1 ? wall_Tw_prof[ax == 1 ? b : a] : wall_Tw
+                    # PER-FACE WALL TEMPERATURE (Fourier flow, the temperature jump). The two
+                    # plates of a Fourier channel are at DIFFERENT temperatures, which a single
+                    # scalar cannot express -- and `wall_Tw_prof` does not help, because it varies
+                    # along the wall TANGENT, not between the lo and hi faces. `ow` already carries
+                    # the side (-1 lo, +1 hi) and is already used exactly this way for the
+                    # antisymmetric wall velocity above, so the lo/hi split is one select.
+                    # `wall_Tw_hi` defaults to `wall_Tw` at the launcher, so every isothermal
+                    # configuration is byte-identical to before.
+                    twf = ow > 0 ? wall_Tw_hi : wall_Tw
+                    tw = length(wall_Tw_prof) > 1 ? wall_Tw_prof[ax == 1 ? b : a] : twf
                     sgn = wall_antisym ? ow : 1.0
                     W = wall_ghost_tup(C, ax, ow, tw, sgn*wall_uw1, sgn*wall_uw2, wall_alpha)
                     for m in 1:35; G[m, a, b, c] = W[m]; end
@@ -594,6 +604,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
                              wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
+                             wall_Tw_hi = nothing,
                              gprof = nothing, gprof_axis::Int = 2,
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
@@ -612,6 +623,8 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
+    # nothing => hi face matches lo, i.e. the isothermal wall, bit-for-bit as before
+    wTwH = wall_Tw_hi === nothing ? wTw : Float64(wall_Tw_hi)
     gfx = Float64(gx); gfy = Float64(gy); gfz = Float64(gz); wAnti = wall_uw_antisym
     # length-1 sentinel = isothermal wall (kernel falls back to the scalar wTw)
     wTwP = wall_Tw_prof === nothing ? CUDA.zeros(Float64, 1) :
@@ -682,7 +695,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # once). Byte-identical to _refill_halo! for :copy and _refill_halo_crossflow!
     # for :crossflow (same memory ops).
     refill!() = (@cuda threads=threads blocks=bcube _refill_halo_faces!(
-        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wU1, wU2, wAl, wAnti, wTwP,
+        G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wTwH, wU1, wU2, wAl, wAnti, wTwP,
         inlet_d, cxlo, cxhi, cylo, cyhi, czlo, czhi))
 
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
