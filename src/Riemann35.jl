@@ -210,6 +210,12 @@ include("utils/diagnostics.jl")
 include("utils/compute_standardized_field.jl")
 include("utils/run_params.jl")
 
+# The DVM-BGK reference solver: discrete velocity, 1D physical x 3D velocity, the ground
+# truth the closure is measured against. It lived as a script under the research repo, which
+# is how it acquired a kwarg that was accepted and silently ignored (see the note on
+# `transport!`). As library code it gets tests that run in CI.
+include("reference/dvm_bgk.jl")
+
 # Initial conditions
 include("initial_conditions.jl")
 
