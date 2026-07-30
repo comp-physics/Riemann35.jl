@@ -649,13 +649,42 @@ function wall_flux(f, g::VGridG, Mw, rho_w::Float64, side::Symbol; uw = 0.0, Tw 
 end
 
 """
-    freemolecular_stress(rho, Uw, T) / freemolecular_heatflux(rho, dT, T)
+    freemolecular_stress(rho, Uw, T)
+    freemolecular_heatflux(rho, Tcold, Thot)
 
 Collisionless limits, used to normalise the wall fluxes into O(1) numbers whose Kn-dependence
-is interpretable. Normalising by the continuum value instead would divide by something that
+is interpretable. Normalising by the CONTINUUM value instead would divide by something that
 vanishes in the rarefied limit, which is the wrong way round for a transition-regime sweep.
+
+THE HEAT-FLUX FORM TOOK THREE ATTEMPTS and the two wrong ones are recorded because each
+was wrong for an instructive reason. It matters because it is a DENOMINATOR: a wrong
+coefficient made the normalised wall heat flux read 1.06, 1.36 and 1.59 at Kn = 0.2, 0.4 and
+0.8 -- above the collisionless limit, which is impossible, and is what exposed it. GATE 4
+validated the stress limit and nothing validated heat; GATE 5 now does.
+
+  (i)  rho*dT*sqrt(T/2pi)                 -- 2x too SMALL. Written by analogy with the stress
+                                             formula rather than derived at all.
+  (ii) 2 rho (Th sqrt(Th/2pi) - Tc sqrt(Tc/2pi))
+                                          -- 1.5x too LARGE. The one-sided energy flux
+                                             2 rho T sqrt(T/2pi) is right (2T per molecule,
+                                             not (3/2)T), but this takes the DIFFERENCE of two
+                                             beams each at rho = 1, and they cannot both be:
+                                             zero net MASS flux forces
+                                             rho_c sqrt(Tc) = rho_h sqrt(Th), so the hot beam
+                                             is thinner, and that cancels most of the
+                                             temperature dependence.
+  (iii) 2 rho sqrt(Tbar/2pi) dT            -- correct. Substituting the mass-flux constraint
+                                             into (ii) collapses it to this, and it reproduces
+                                             the measured collisionless flux to 1.7% -- the
+                                             SAME residual GATE 4 reports for stress, i.e. the
+                                             shared discretisation error rather than anything
+                                             specific to heat.
+
+Linear in dT and therefore exact only to O(dT^2), which is the regime these runs use
+(dT/T <= 10%, and 2.5% by default since rem:zetaT-wall-ambiguity).
 """
-freemolecular_stress(rho, Uw, T)  = rho*Uw*sqrt(T/(2pi))
-freemolecular_heatflux(rho, dT, T) = rho*dT*sqrt(T/(2pi))
+freemolecular_stress(rho, Uw, T) = rho*Uw*sqrt(T/(2pi))
+freemolecular_heatflux(rho, Tcold, Thot) =
+    2*rho*sqrt(0.5*(Tcold + Thot)/(2pi))*(Thot - Tcold)
 
 end # module
