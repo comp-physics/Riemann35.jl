@@ -608,6 +608,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              gprof = nothing, gprof_axis::Int = 2,
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
+                             idp::Bool = true,   # diagnostic: false => theta==1, no IDP blend
                              first_order::Bool = false, bc = :copy, inlet = nothing,
                              obst_state = nothing, obst_cx::Real = 0.0, obst_cy::Real = 0.0,
                              obst_r2::Real = 0.0,
@@ -716,7 +717,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         for (a, b, c) in stages
             refill!()
             residual3d_order3_box_gpu!(R, G, nx, ny, nz, g, dxf, dxf, dxf, Maf, dt;
-                                       s3max=s3f, threads=threads, theta_closed=theta_closed,
+                                       s3max=s3f, threads=threads, theta_closed=theta_closed, idp=idp,
                                        use_logjacobi_recon=use_logjacobi_recon,
                                        first_order=first_order)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)

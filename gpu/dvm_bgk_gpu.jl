@@ -31,7 +31,11 @@ module DVMBGKGPU
 using CUDA, LinearAlgebra
 
 export VGridG, dvm_alloc, transport_upwind!, transport_walls!, collide!, moments35_field,
-       discrete_maxwellian_host!, wall_pair_host, cellT_from_M
+       discrete_maxwellian_host!, wall_pair_host, cellT_from_M,
+       # added with the ES-BGK collision and the exact wall fluxes (#47, #48). These were
+       # PRESENT but not exported, so `using .DVMBGKGPU` did not bring them into scope --
+       # invisible here because every call site in the sweeps is module-qualified.
+       collide_es!, wall_flux, freemolecular_stress, freemolecular_heatflux
 
 # CANONICAL ORDER, and it must match src/moments/moment_indices.jl exactly. An earlier
 # transcription of this table PERMUTED positions 31-33 -- it read
