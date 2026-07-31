@@ -47,6 +47,7 @@ using Riemann35.FluxClosureDev: flux_closure35_dev
 using Riemann35.RealizeDev: realizable_3D_M4_dev
 using Riemann35.ReconDev: to_recon_vars_tup
 using Riemann35.IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
+using Riemann35.KfvsWallDev: kfvs_wall_flux_dev
 using Riemann35.HiOrder3ReconDev: recon_point_dev, recon_avg_dev, weno_faces_dev
 
 # --- opt-in log-Jacobi marginal reconstruction (device pieces) ---
@@ -647,7 +648,12 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                           G, g::Int, λx::Float64, λy::Float64, λz::Float64,
                           Ma::Float64, s3f::Float64,
                           xlo::Bool, xhi::Bool, ylo::Bool, yhi::Bool, zlo::Bool, zhi::Bool,
-                          use_closed::Bool)
+                          use_closed::Bool,
+                          # KFVS wall faces: which global boundaries are walls, and the wall
+                          # state. All false => byte-identical to the ghost-cell path.
+                          wxlo::Bool, wxhi::Bool, wylo::Bool, wyhi::Bool, wzlo::Bool, wzhi::Bool,
+                          wTw::Float64, wTwH::Float64, wU1::Float64, wU2::Float64,
+                          wAnti::Bool)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -717,18 +723,53 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
             FHzr = _face3(FHOz, i, j, k+1); FLzr = _face3(FLOz, i, j, k+1)
             FHzl = _face3(FHOz, i, j, k  ); FLzl = _face3(FLOz, i, j, k  )
 
+            # --- KFVS override at wall faces ------------------------------------------
+            # A wall face gets the exact half-space flux instead of the ghost-cell HLL flux.
+            # The wall's TANGENTIAL velocity is antisymmetric across the pair when wAnti is
+            # set (that is what makes a Couette channel, not a translating one), and the hi
+            # face may sit at a different temperature (wTwH) for a Fourier channel.
+            uxl =  wAnti ? -wU1 : wU1;  ux2l =  wAnti ? -wU2 : wU2
+            axr = (i == nx) && wxhi; axl = (i == 1) && wxlo
+            ayr = (j == ny) && wyhi; ayl = (j == 1) && wylo
+            azr = (k == nz) && wzhi; azl = (k == 1) && wzlo
+            Wxr = axr ? _kfvs_face(G, g+nx, g+j, g+k, 1, +1.0, wTwH, wU1,  wU2)  : FHxr
+            Wxl = axl ? _kfvs_face(G, g+1,  g+j, g+k, 1, -1.0, wTw,  uxl,  ux2l) : FHxl
+            Wyr = ayr ? _kfvs_face(G, g+i, g+ny, g+k, 2, +1.0, wTwH, wU1,  wU2)  : FHyr
+            Wyl = ayl ? _kfvs_face(G, g+i, g+1,  g+k, 2, -1.0, wTw,  uxl,  ux2l) : FHyl
+            Wzr = azr ? _kfvs_face(G, g+i, g+j, g+nz, 3, +1.0, wTwH, wU1,  wU2)  : FHzr
+            Wzl = azl ? _kfvs_face(G, g+i, g+j, g+1,  3, -1.0, wTw,  uxl,  ux2l) : FHzl
+
             for m in 1:35
-                Fxr = FLxr[m] + θxr * (FHxr[m] - FLxr[m])
-                Fxl = FLxl[m] + θxl * (FHxl[m] - FLxl[m])
-                Fyr = FLyr[m] + θyr * (FHyr[m] - FLyr[m])
-                Fyl = FLyl[m] + θyl * (FHyl[m] - FLyl[m])
-                Fzr = FLzr[m] + θzr * (FHzr[m] - FLzr[m])
-                Fzl = FLzl[m] + θzl * (FHzl[m] - FLzl[m])
+                Fxr = axr ? Wxr[m] : FLxr[m] + θxr * (FHxr[m] - FLxr[m])
+                Fxl = axl ? Wxl[m] : FLxl[m] + θxl * (FHxl[m] - FLxl[m])
+                Fyr = ayr ? Wyr[m] : FLyr[m] + θyr * (FHyr[m] - FLyr[m])
+                Fyl = ayl ? Wyl[m] : FLyl[m] + θyl * (FHyl[m] - FLyl[m])
+                Fzr = azr ? Wzr[m] : FLzr[m] + θzr * (FHzr[m] - FLzr[m])
+                Fzl = azl ? Wzl[m] : FLzl[m] + θzl * (FHzl[m] - FLzl[m])
                 R[m, i, j, k] = -((Fxr-Fxl)/dx + (Fyr-Fyl)/dy + (Fzr-Fzl)/dz)
             end
         end
     end
     return nothing
+end
+
+
+# ---------------------------------------------------------------------------
+# KFVS WALL FLUX at a boundary face. @noinline for the same reason
+# `_rank_face_theta` is: this kernel already emits ~79% of the march's PTX, and
+# inlining a 35-moment closure six times is how the order-3 compile once reached
+# 758 s. Emitted once, called per wall face.
+#
+# Replaces the ghost-cell flux, which cannot represent a diffuse wall at all: f is
+# DISCONTINUOUS at v.n = 0 and a full-line Riemann problem has no half-space split,
+# so at u_n = 0 HLL leaves pure dissipation on the density jump and leaks mass
+# (-3.9e-4 against the DVM's 1e-15, issue #36). Here rho_w is set FROM zero net mass
+# flux, so conservation is exact by construction.
+# ---------------------------------------------------------------------------
+@noinline function _kfvs_face(G, px::Int, py::Int, pk::Int, axis::Int, outward::Float64,
+                              Tw::Float64, uw1::Float64, uw2::Float64)
+    M = ntuple(m -> @inbounds(G[m, px, py, pk]), Val(35))
+    kfvs_wall_flux_dev(M, axis, outward, Tw, uw1, uw2)
 end
 
 # ===========================================================================
@@ -742,6 +783,12 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     theta_closed::Bool = true,
                                     use_logjacobi_recon::Bool = false,
                                     first_order::Bool = false,
+                                    # KFVS wall faces; default all-false reproduces the
+                                    # ghost-cell path byte-for-byte.
+                                    kfvs_walls = (false,false,false,false,false,false),
+                                    wall_Tw::Float64 = 1.0, wall_Tw_hi::Float64 = 1.0,
+                                    wall_uw1::Float64 = 0.0, wall_uw2::Float64 = 0.0,
+                                    wall_antisym::Bool = false,
                                     # DIAGNOSTIC ONLY. idp=false forces theta == 1, i.e. pure
                                     # WENO5 with the IDP blend switched OFF. It exists to
                                     # separate two candidate causes of the closure's
@@ -843,7 +890,12 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                                        Bool(rank_bnd.xlo), Bool(rank_bnd.xhi),
                                                        Bool(rank_bnd.ylo), Bool(rank_bnd.yhi),
                                                        Bool(rank_bnd.zlo), Bool(rank_bnd.zhi),
-                                                       theta_closed)
+                                                       theta_closed,
+                                                       Bool(kfvs_walls[1]), Bool(kfvs_walls[2]),
+                                                       Bool(kfvs_walls[3]), Bool(kfvs_walls[4]),
+                                                       Bool(kfvs_walls[5]), Bool(kfvs_walls[6]),
+                                                       wall_Tw, wall_Tw_hi, wall_uw1, wall_uw2,
+                                                       wall_antisym)
     return nothing
 end
 

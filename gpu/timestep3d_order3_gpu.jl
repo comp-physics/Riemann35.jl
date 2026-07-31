@@ -605,6 +605,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
                              wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
                              wall_Tw_hi = nothing,
+                             kfvs_wall::Bool = false,   # exact half-space wall flux (#36)
                              gprof = nothing, gprof_axis::Int = 2,
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
@@ -638,6 +639,13 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
     (codes, spg) = _gpu_bc_codes(bc)
     cxlo, cxhi, cylo, cyhi, czlo, czhi = codes
+
+    # Which global faces are walls (face code 3) AND opted into the KFVS flux. Default off,
+    # so every existing run is byte-identical; kfvs_wall=true switches the wall faces from the
+    # ghost-cell HLL flux to the exact half-space flux, which conserves mass by construction.
+    kfvsw = kfvs_wall ? (codes[1]==3, codes[2]==3, codes[3]==3,
+                         codes[4]==3, codes[5]==3, codes[6]==3) :
+                        (false,false,false,false,false,false)
     any_inlet  = any(==(1), codes)
 
     # inlet Maxwellian on the device (35,). A dummy zeros vector when no inlet face
@@ -719,7 +727,9 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
             residual3d_order3_box_gpu!(R, G, nx, ny, nz, g, dxf, dxf, dxf, Maf, dt;
                                        s3max=s3f, threads=threads, theta_closed=theta_closed, idp=idp,
                                        use_logjacobi_recon=use_logjacobi_recon,
-                                       first_order=first_order)
+                                       first_order=first_order,
+                                       kfvs_walls=kfvsw, wall_Tw=wTw, wall_Tw_hi=wTwH,
+                                       wall_uw1=wU1, wall_uw2=wU2, wall_antisym=wAnti)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f)
             if stage_bgk
