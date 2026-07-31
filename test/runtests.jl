@@ -69,6 +69,7 @@ const TOL = 1e-10
         include("test_driven_dt_convergence.jl") # a driven steady state must have a dt -> 0 limit
         include("test_dvm_reference.jl")         # the ground truth everything is measured against
         include("test_steady_state_time_convergence.jl")  # weak guard: a steady state must have a t_end limit
+        include("test_kfvs_wall.jl")             # the wall must conserve mass exactly (#36)
 
         # θ*-IDP limiter goldens — pins BOTH the bisection baseline (frozen,
         # bit-for-bit fallback guard via theta_closed=false) and the closed-form
