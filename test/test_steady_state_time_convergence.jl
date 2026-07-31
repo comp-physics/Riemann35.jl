@@ -61,8 +61,14 @@ MPI.Initialized() || MPI.Init()
 
     "Shear rate in the channel core after integrating to `tend` (absolute time)."
     function shear(tend)
-        WALL_SPEC[] = (ylo = (Tw=T0, uw1=-Uw, uw2=0.0, alpha=1.0),
-                       yhi = (Tw=T0, uw1=+Uw, uw2=0.0, alpha=1.0))
+        # uw2, NOT uw1. For a y-normal wall uw1 is the z-tangent and uw2 the x-tangent; the
+        # first version of this file drove uw1 and read u_x, so the wall exerted NO forcing
+        # on the profile being measured and the test watched an initial shear DECAY. An
+        # "increments shrink" gate passes trivially for exponential decay, so the test was
+        # worse than vacuous -- it measured the wrong quantity and reported success.
+        # Verified from rest: uw1 gives max|u_x| = 0 exactly, uw2 gives 6.5e-2.
+        WALL_SPEC[] = (ylo = (Tw=T0, uw1=0.0, uw2=-Uw, alpha=1.0),
+                       yhi = (Tw=T0, uw1=0.0, uw2=+Uw, alpha=1.0))
         nst = max(1, ceil(Int, tend/dt))
         M = zeros(nx+2halo, ny+2halo, nz, 35)
         for k in 1:nz, j in 1:(ny+2halo), i in 1:(nx+2halo)
