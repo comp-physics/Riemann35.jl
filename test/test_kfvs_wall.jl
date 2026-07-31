@@ -55,3 +55,30 @@ using Riemann35.KfvsWall: halfline_gauss_moments
     @test abs(mx) < 1e-12 && Fx[2]  != 0.0 && Fx[16] == 0.0    # uw2 drives x
     @test Fx[2] ≈ rw*0.1*(-sqrt(1.0/(2pi))) rtol=1e-8          # exactly rho_w uw <v_n>_in
 end
+
+@testset "KFVS wall: CPU and device agree, all axes and both faces" begin
+    # THE TESTS ABOVE MISSED TWO BUGS, both found only by cross-checking the two
+    # implementations against each other. Recording the shape of each so they cannot return:
+    #
+    #   (a) OUT OF BOUNDS. The flux carries an extra v_n beyond the moment's own normal
+    #       power, so psi = v^4 needs the p = 5 half-line moment. Requesting only p <= 4 read
+    #       past the array; @inbounds suppressed the check and returned a denormal
+    #       (1.9e-309) for moment (0,4,0). The original assertions never touched it.
+    #
+    #   (b) SIGN ON LO FACES. rho_w was formed from abs(outflux). On a lo face the leaving
+    #       half has v_n < 0, so abs() flips the ratio and yields a NEGATIVE wall density and
+    #       a large spurious mass flux. The original assertions only used outward = +1.
+    #
+    # Both were caught because two independent implementations disagreed -- not by any bound,
+    # and not by inspection. That is the argument for keeping both.
+    for ax in 1:3, ow in (-1.0, 1.0), (T, Tw, un) in ((1.2,0.9,0.0), (0.8,1.3,0.05), (2.0,0.5,-0.03))
+        M = collect(Float64, InitializeM4_35(1.0, 0.02, un, 0.01, T,0,0, T,0, T))
+        Fc, rho_w, mdot = kfvs_wall_flux(M, ax, ow, Tw, 0.05, -0.05)
+        Fd = kfvs_wall_flux_dev(ntuple(i -> M[i], Val(35)), ax, ow, Tw, 0.05, -0.05)
+        @test maximum(abs.(collect(Fc) .- collect(Fd))) < 1e-12*max(maximum(abs.(collect(Fc))), 1.0)
+        @test abs(mdot) < 1e-12          # (b): lo faces must conserve too
+        @test rho_w > 0.0                # (b): a wall density is never negative
+        @test isfinite(Fc[15])           # (a): the (0,4,0) moment, which needs p = 5
+        @test abs(Fc[15]) > 1e-300       #      and is not a denormal
+    end
+end

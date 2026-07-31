@@ -142,7 +142,12 @@ function kfvs_wall_flux(M::AbstractVector{Float64}, axis::Int, outward::Float64,
     uvec = (ux, uy, uz); cvec = (cxx, cyy, czz)
     t1_ = axis % 3 + 1; t2_ = t1_ % 3 + 1
     # outgoing half of the interior Gaussian: normal component cut at 0, tangential full-line
-    Io  = halfline_gauss_moments(4, uvec[axis], cvec[axis], outward > 0 ? +1 : -1)
+    # p up to 5: the FLUX carries an extra v_n beyond the moment's own normal power,
+    # so psi = v^4 needs I_5. Requesting only p<=4 read past the array -- masked by the
+    # @inbounds below, which returned a denormal (1.9e-309) for moment (0,4,0). Found by
+    # cross-checking against the device implementation, not by the 18 assertions, which
+    # never touched that moment.
+    Io  = halfline_gauss_moments(5, uvec[axis], cvec[axis], outward > 0 ? +1 : -1)
     St1 = fullline_gauss_moments(4, uvec[t1_], cvec[t1_])
     St2 = fullline_gauss_moments(4, uvec[t2_], cvec[t2_])
     Fi = zeros(35)
@@ -150,16 +155,19 @@ function kfvs_wall_flux(M::AbstractVector{Float64}, axis::Int, outward::Float64,
         e = (p,q,r)
         Fi[m] = rho * Io[e[axis]+2] * St1[e[t1_]+1] * St2[e[t2_]+1]
     end
-    outflux = abs(rho * Io[2])                       # mass leaving, a positive magnitude
 
     # --- wall half: an analytic Maxwellian, factorised normal x tangential ------------------
     t1 = axis % 3 + 1; t2 = t1 % 3 + 1               # cyclic tangents
-    In  = halfline_gauss_moments(4, 0.0, Tw, outward > 0 ? -1 : +1)   # ENTERING the domain
+    In  = halfline_gauss_moments(5, 0.0, Tw, outward > 0 ? -1 : +1)   # ENTERING the domain
     Mt1 = fullline_gauss_moments(4, uw1, Tw)
     Mt2 = fullline_gauss_moments(4, uw2, Tw)
     # unit-density wall mass flux (negative: it enters), used to fix rho_w
-    influx_unit = In[2]                               # ⟨v_n⟩ over the entering half
-    rho_w = influx_unit != 0.0 ? -outflux/influx_unit : 0.0
+    # SIGNED, not abs(). On a lo face (outward = -1) the leaving half has v_n < 0 so Io[2] is
+    # negative while the entering In[2] is positive; taking abs() of the outflux flips the
+    # ratio and produces a NEGATIVE wall density, i.e. a large spurious mass flux. The
+    # original tests only exercised outward = +1 and never saw it; the device implementation,
+    # which uses the signed form, disagreed and was right.
+    rho_w = In[2] != 0.0 ? -rho*Io[2]/In[2] : 0.0
 
     Fw = zeros(35)
     @inbounds for (m, (p,q,r)) in enumerate(IJK35_KFVS)
