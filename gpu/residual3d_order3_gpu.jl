@@ -742,6 +742,17 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     theta_closed::Bool = true,
                                     use_logjacobi_recon::Bool = false,
                                     first_order::Bool = false,
+                                    # DIAGNOSTIC ONLY. idp=false forces theta == 1, i.e. pure
+                                    # WENO5 with the IDP blend switched OFF. It exists to
+                                    # separate two candidate causes of the closure's
+                                    # wrong-SIGN slip trend (zeta rises with Kn where truth
+                                    # falls): fourth-order moment truncation, or the limiter
+                                    # clamping near-wall fluxes harder as rarefaction pushes
+                                    # the near-wall state toward the realizability boundary.
+                                    # Both configurations otherwise run identically, so the
+                                    # difference is attributable. NOT for production: with
+                                    # theta == 1 there is no realizability guarantee at all.
+                                    idp::Bool = true,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                                 zlo=false, zhi=false))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
@@ -819,8 +830,12 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
 
     # --- Pass 2: θ* per cell (skipped for first-order: Th≡0), then blend + residual ---
     if !first_order
-        @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
-                                                   nx, ny, nz, g, λx, λy, λz, theta_closed)
+        if idp
+            @cuda threads=threads blocks=bint _theta_cell!(Th, G, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
+                                                       nx, ny, nz, g, λx, λy, λz, theta_closed)
+        else
+            fill!(Th, 1.0)      # theta == 1 => F = FHO, pure WENO5, no IDP blend
+        end
     end
     @cuda threads=threads blocks=bint _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
                                                        nx, ny, nz, dxf, dyf, dzf,
