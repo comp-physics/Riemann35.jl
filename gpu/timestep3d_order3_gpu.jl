@@ -598,6 +598,55 @@ Advance the fully-haloed order-3 cube `G (35, n+2g, n+2g, n+2g)` (g=HALO3=8) for
 used verbatim; else local CFL each step.  Returns the dt vector used.  `G` is updated
 in place and left with its outflow halos refilled.
 """
+
+# ---------------------------------------------------------------------------
+# EXPERIMENTAL REGULARIZATION. Adds C*tau*Laplacian(M) to the residual of the
+# FOURTH-ORDER moments only (the 15 indices with p+q+r = 4).
+#
+# WHY THIS FORM. R13/R26 "regularize" by writing the closing higher moments as
+# expressions in the retained moments AND THEIR GRADIENTS, from a Chapman-Enskog
+# expansion of the higher-moment equations. Substituted into the balance laws
+# that gradient closure appears as a DIFFUSION term on the moments it closes. Here
+# HyQMOM closes the 5th-order fluxes by quadrature, so the analogous correction is
+# a diffusive flux on the 4th-order moments -- which is what supports a boundary
+# layer, and the literature's account of why R26 resolves the Knudsen layer while
+# R13 (one exponential layer) does not.
+#
+# WHY IT IS A SEPARATE KERNEL. It touches neither the flux kernels nor the
+# limiter, so reg_coef = 0 is byte-identical and the experiment cannot perturb
+# anything already measured.
+#
+# WHAT IT COSTS, and this is the real question. HyQMOM's quadrature closure buys
+# HYPERBOLICITY and REALIZABILITY; a gradient closure is parabolic and respects
+# neither. The realizability projection still runs every stage, so an excursion
+# outside the moment cone is corrected rather than fatal -- but a projection that
+# fires every step is itself a modelling error (that is exactly what the 0.9999
+# back-off defect turned out to be). So the diagnostic below reports how hard the
+# projection is working, not only whether the answer moved.
+# ---------------------------------------------------------------------------
+const _M4IDX = (5, 9, 12, 14, 15, 19, 22, 24, 25, 28, 30, 31, 33, 34, 35)
+
+function _regularize_4th!(R, G, nx, ny, nz, g, coef, dx, dy, dz)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nx*ny*nz
+        @inbounds begin
+            i = (idx-1) % nx + 1; r = (idx-1) ÷ nx
+            j = r % ny + 1;       k = r ÷ ny + 1
+            px = g+i; py = g+j; pk = g+k
+            # Iterate the LITERAL tuple: Julia unrolls that at compile time. Indexing a
+            # tuple with a runtime variable (_M4IDX[t]) is not device-legal and threw a
+            # KernelException.
+            for m in (5, 9, 12, 14, 15, 19, 22, 24, 25, 28, 30, 31, 33, 34, 35)
+                lap = (G[m,px+1,py,pk] - 2G[m,px,py,pk] + G[m,px-1,py,pk])/(dx*dx) +
+                      (G[m,px,py+1,pk] - 2G[m,px,py,pk] + G[m,px,py-1,pk])/(dy*dy) +
+                      (G[m,px,py,pk+1] - 2G[m,px,py,pk] + G[m,px,py,pk-1])/(dz*dz)
+                R[m,i,j,k] += coef*lap
+            end
+        end
+    end
+    return nothing
+end
+
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
@@ -606,6 +655,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
                              wall_Tw_hi = nothing,
                              kfvs_wall::Bool = false,   # exact half-space wall flux (#36)
+                             reg_coef::Real = 0.0,      # EXPERIMENTAL: C*tau diffusion on the 4th moments
                              gprof = nothing, gprof_axis::Int = 2,
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
@@ -627,6 +677,8 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     # nothing => hi face matches lo, i.e. the isothermal wall, bit-for-bit as before
     wTwH = wall_Tw_hi === nothing ? wTw : Float64(wall_Tw_hi)
+    # regularization strength: coef = reg_coef * tau, tau = Kn/2 in the solver's convention
+    regc = Float64(reg_coef) * (isfinite(knf) ? knf/2 : 0.0)
     gfx = Float64(gx); gfy = Float64(gy); gfz = Float64(gz); wAnti = wall_uw_antisym
     # length-1 sentinel = isothermal wall (kernel falls back to the scalar wTw)
     wTwP = wall_Tw_prof === nothing ? CUDA.zeros(Float64, 1) :
@@ -730,6 +782,10 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                                        first_order=first_order,
                                        kfvs_walls=kfvsw, wall_Tw=wTw, wall_Tw_hi=wTwH,
                                        wall_uw1=wU1, wall_uw2=wU2, wall_antisym=wAnti)
+            if regc != 0.0
+                @cuda threads=threads blocks=bint _regularize_4th!(R, G, nx, ny, nz, g,
+                                                                   regc, dxf, dxf, dxf)
+            end
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f)
             if stage_bgk
