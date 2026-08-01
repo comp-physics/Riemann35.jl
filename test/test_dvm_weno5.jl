@@ -2,10 +2,14 @@
 # does not. Both are asserted: a high-order scheme that silently falls back to first order
 # is worse than no high-order scheme, because it looks like a reference.
 #
+# The reconstruction is the SHIPPED weno5z, the same one the moment solver uses, so this
+# also pins that the two codes reconstruct identically.
+#
 # The transport substep is linear scalar advection at constant speed per velocity node, so
 # for a periodic domain the EXACT solution after time t is a rigid shift of the initial
 # profile. That gives an error with no reference solver in it at all.
 using Test, CUDA
+using Riemann35          # weno5z comes from Riemann35.Weno5Dev
 include(joinpath(@__DIR__, "..", "gpu", "dvm_bgk_gpu.jl")); using .DVMBGKGPU
 
 CUDA.functional() || (@info "no CUDA device; skipping DVM WENO5 tests"; exit(0))
