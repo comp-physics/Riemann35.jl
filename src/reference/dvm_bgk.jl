@@ -8,13 +8,11 @@ module DVMBGK
 using LinearAlgebra, Printf
 export VGrid, moments35, maxwellian!, collide_cell!, transport!, rho_u_T, IJK35, discrete_maxwellian!
 
-const IJK35 = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-               (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),
-               (0,3,0),(1,3,0),(0,4,0),
-               (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),
-               (0,0,3),(1,0,3),(0,0,4),
-               (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),
-               (0,1,2),(1,1,2),(0,1,3),(0,2,2))
+using ..MomentIndices: IJK
+# Canonical table, imported not copied (issue #61). It was a local transcription; the
+# table has been mis-transcribed once before -- positions 31-33 permuted, three moments
+# mislabelled while every total and trace stayed correct, so nothing caught it.
+const IJK35 = IJK
 
 struct VGrid
     v::Vector{Float64}; dv::Float64; n::Int

@@ -49,13 +49,11 @@ export marg_m_to_J, marg_J_to_m, logjacobi_marginal_faces, affine_remap_axis, _a
 #
 # M'_{ijk} = gamma * sum_{p=0}^{e} C(e,p) alpha^p beta^{e-p} M_{sib(p)}   (e = axis power)
 # ---------------------------------------------------------------------------
-const _IJK35 = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-                (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),
-                (0,3,0),(1,3,0),(0,4,0),
-                (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),
-                (0,0,3),(1,0,3),(0,0,4),
-                (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),
-                (0,1,2),(1,1,2),(0,1,3),(0,2,2))
+using ..MomentIndices: IJK
+# Canonical table, imported not copied (issue #61). It was a local transcription; the
+# table has been mis-transcribed once before -- positions 31-33 permuted, three moments
+# mislabelled while every total and trace stayed correct, so nothing caught it.
+const _IJK35 = IJK
 const _MARG_LJ = ((1,2,3,4,5),(1,6,10,13,15),(1,16,20,23,25))  # marginal slots per axis
 # per-axis: axis power e_q, and sibling slots for p=0..e padded to length 5 (pad=1)
 const _AXPOW, _SIB = let

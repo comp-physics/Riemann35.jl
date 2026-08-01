@@ -32,7 +32,10 @@ const _MN_PLANES = (
  (:S011,:S030,:S040,:S003,:S004,:S021,:S012,:S031,:S013,:S022),  # VW
  (:S101,:S003,:S004,:S300,:S400,:S102,:S201,:S103,:S301,:S202),  # WU
  (:S011,:S003,:S004,:S030,:S040,:S012,:S021,:S013,:S031,:S022))  # WV
-const _MN_IJK35 = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),(0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),(0,3,0),(1,3,0),(0,4,0),(0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),(0,0,3),(1,0,3),(0,0,4),(0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),(0,1,2),(1,1,2),(0,1,3),(0,2,2))
+# Canonical table, imported not copied (issue #61). It was a local transcription; the
+# table has been mis-transcribed once before -- positions 31-33 permuted, three moments
+# mislabelled while every total and trace stayed correct, so nothing caught it.
+const _MN_IJK35 = IJK
 
 # discriminant of the monic characteristic cubic of the 3x3 block ( >=0 <=> real )
 @inline function _mn_discr(B)

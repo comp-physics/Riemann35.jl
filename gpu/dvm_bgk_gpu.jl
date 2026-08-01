@@ -51,10 +51,11 @@ export VGridG, dvm_alloc, transport_upwind!, transport_weno5!, dvm_alloc_weno5,
 # It surfaced only because a heat-flux estimator built on index 32 returned exactly -u on a
 # pure Maxwellian, where the answer had to be 0. validate_dvm_gpu.jl now asserts the two
 # tables agree elementwise, which is the check that should have existed from the start.
-const IJK35 = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-               (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),(0,3,0),(1,3,0),(0,4,0),
-               (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),(0,0,3),(1,0,3),(0,0,4),
-               (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),(0,1,2),(1,1,2),(0,1,3),(0,2,2))
+using Riemann35.MomentIndices: IJK
+# Canonical table, imported not copied (issue #61). It was a local transcription; the
+# table has been mis-transcribed once before -- positions 31-33 permuted, three moments
+# mislabelled while every total and trace stayed correct, so nothing caught it.
+const IJK35 = IJK
 
 struct VGridG
     v::CuVector{Float64}

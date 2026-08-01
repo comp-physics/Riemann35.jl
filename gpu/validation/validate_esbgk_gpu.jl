@@ -16,11 +16,11 @@ using Riemann35.ReconDev: bgk_relax_tup
 @assert CUDA.functional() "CUDA not functional"
 println("GPU: ", CUDA.name(CUDA.device()))
 
-const IJK35 = [
-    (0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),(0,1,0),(1,1,0),(2,1,0),(3,1,0),
-    (0,2,0),(1,2,0),(2,2,0),(0,3,0),(1,3,0),(0,4,0),(0,0,1),(1,0,1),(2,0,1),
-    (3,0,1),(0,0,2),(1,0,2),(2,0,2),(0,0,3),(1,0,3),(0,0,4),(0,1,1),(1,1,1),
-    (2,1,1),(0,2,1),(1,2,1),(0,3,1),(0,1,2),(1,1,2),(0,1,3),(0,2,2)]
+using Riemann35.MomentIndices: IJK
+# Canonical table, imported not copied (issue #61). It was a local transcription; the
+# table has been mis-transcribed once before -- positions 31-33 permuted, three moments
+# mislabelled while every total and trace stayed correct, so nothing caught it.
+const IJK35 = collect(IJK)
 
 function gh(n); J = SymTridiagonal(zeros(n), [sqrt(k) for k in 1:n-1]); F = eigen(J)
     F.values, [F.vectors[1,i]^2 for i in 1:n]; end
