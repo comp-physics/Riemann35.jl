@@ -75,6 +75,11 @@ end
         M = collect(Float64, InitializeM4_35(1.0, 0.02, un, 0.01, T,0,0, T,0, T))
         Fc, rho_w, mdot = kfvs_wall_flux(M, ax, ow, Tw, 0.05, -0.05)
         Fd = kfvs_wall_flux_dev(ntuple(i -> M[i], Val(35)), ax, ow, Tw, 0.05, -0.05)
+        # The device version now reconstructs the interior half from the FULL anisotropic
+        # Gaussian (10 moments) while this CPU reference still uses the DIAGONAL form (7).
+        # They agree only when the off-diagonal second moments vanish, which is the case for
+        # the isotropic states built above -- and that agreement is still a real regression
+        # test: the correlated form MUST reduce to the diagonal one when C_nt = 0.
         @test maximum(abs.(collect(Fc) .- collect(Fd))) < 1e-12*max(maximum(abs.(collect(Fc))), 1.0)
         @test abs(mdot) < 1e-12          # (b): lo faces must conserve too
         @test rho_w > 0.0                # (b): a wall density is never negative
