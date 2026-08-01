@@ -6,6 +6,12 @@ using Test
 using Riemann35
 using Riemann35: realizable_3D_M4, InitializeM4_35, Flux_closure35_and_realizable_3D,
                  to_recon_vars, from_recon_vars, enforce_univariate
+# `using MPI` is EXPLICIT here. Every test file is included into the same Main, so a
+# file that omits it still works as long as some earlier include did `using MPI` --
+# an order-dependent coupling that breaks the moment the file is run on its own, or
+# the include order changes. See issue #62.
+using MPI
+MPI.Initialized() || MPI.Init()
 
 @testset "s3max clamp parameter" begin
     Ma = 1.0

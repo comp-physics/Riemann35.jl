@@ -48,6 +48,11 @@
 using Test, Riemann35, MPI   # NB: no Statistics -- it is not in the test target and was unused;
                              # importing it failed CI on a clean env while passing locally
 using Riemann35: body_force_shift
+# `using MPI` is EXPLICIT here. Every test file is included into the same Main, so a
+# file that omits it still works as long as some earlier include did `using MPI` --
+# an order-dependent coupling that breaks the moment the file is run on its own, or
+# the include order changes. See issue #62.
+using MPI
 
 MPI.Initialized() || MPI.Init()
 

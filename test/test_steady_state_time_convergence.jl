@@ -45,6 +45,11 @@
 # comparison, at the resolution actually used, and never inherited from the other solver.
 using Test, Riemann35, MPI
 using Riemann35: WALL_SPEC
+# `using MPI` is EXPLICIT here. Every test file is included into the same Main, so a
+# file that omits it still works as long as some earlier include did `using MPI` --
+# an order-dependent coupling that breaks the moment the file is run on its own, or
+# the include order changes. See issue #62.
+using MPI
 
 MPI.Initialized() || MPI.Init()
 

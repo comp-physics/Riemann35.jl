@@ -37,6 +37,11 @@ ENV["HYQMOM_SKIP_PLOTTING"] = "true"; ENV["CI"] = "true"
 include(joinpath(@__DIR__, "couette_driver.jl"))
 using Riemann35: reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 using Riemann35: envparam, print_run_header
+# `using MPI` is EXPLICIT here. Every test file is included into the same Main, so a
+# file that omits it still works as long as some earlier include did `using MPI` --
+# an order-dependent coupling that breaks the moment the file is run on its own, or
+# the include order changes. See issue #62.
+using MPI
 MPI.Initialized() || MPI.Init()
 
 const KNH   = [parse(Float64, s) for s in split(envparam("PR_KNH", "1.0,0.5,0.2,0.1"), ",")]
