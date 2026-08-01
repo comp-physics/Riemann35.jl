@@ -30,7 +30,8 @@ module DVMBGKGPU
 # that claim.
 using CUDA, LinearAlgebra
 
-export VGridG, dvm_alloc, transport_upwind!, transport_walls!, collide!, moments35_field,
+export VGridG, dvm_alloc, transport_upwind!, transport_weno5!, dvm_alloc_weno5,
+       transport_walls!, collide!, moments35_field,
        discrete_maxwellian_host!, wall_pair_host, cellT_from_M,
        # added with the ES-BGK collision and the exact wall fluxes (#47, #48). These were
        # PRESENT but not exported, so `using .DVMBGKGPU` did not bring them into scope --
@@ -106,6 +107,135 @@ function transport_upwind!(f, fn, dt, dx, g::VGridG; bc::Symbol = :copy)
                                                  dt/dx, bc === :periodic ? Int32(1) : Int32(0))
     copyto!(f, fn); f
 end
+
+# ---------------------------------------------------------------------------------------
+# TRANSPORT — WENO5 + SSP-RK3, for when the DVM has to be a REFERENCE rather than a solver.
+#
+# WHY THIS EXISTS. First-order upwind damps a travelling wave at a rate O(dx) that is
+# indistinguishable from physical attenuation on any single grid. That is tolerable when the
+# DVM is being compared on a steady profile and fatal when it is asked for a decay rate, a
+# sound attenuation, or the thickness of a Knudsen layer -- numerical diffusion smooths a
+# Knudsen layer exactly the way a weak collision model does, so the two are confounded.
+# Every DVM reference in the wall study used the first-order path, including the curvature
+# ratio (DVM 1.247 against DSMC's 1.426) that was read as BGK's collision-model deficit.
+# This makes that attribution checkable instead of assumed.
+#
+# WHY IT IS CHEAP TO DO HERE, and much easier than the moment side. The transport substep is
+# LINEAR SCALAR ADVECTION AT CONSTANT SPEED, independently for each velocity node:
+# df/dt + v_a df/dx = 0. There is no Riemann problem, no coupling between nodes, and --
+# unlike the 35-moment system -- no realizable set to stay inside, so no projection and no
+# limiter interaction to reason about. Standard Jiang-Shu WENO5 with the stencil biased by
+# sign(v_a), and SSP-RK3 in time so the scheme is not left first-order in dt.
+#
+# `transport_upwind!` is KEPT and unchanged: every published number in the notes was produced
+# with it, and silently upgrading it would make those irreproducible.
+# NOTE ON THE NAMING, which is load-bearing. The centre value is `fc`, never `f0`, and every
+# coefficient is applied with an EXPLICIT `*`. Written the natural way -- centre value `f0`,
+# juxtaposition multiplication as elsewhere in this file -- the term `11f0` is not `11*f0` at
+# all: `11f0` is Julia's Float32 LITERAL syntax, the Float32 analogue of `11e0`, so it parses
+# as the number 11.0f0 and the centre value silently vanishes from the stencil. Likewise
+# `5f0`, `3f0` and `2f0`. It compiles, runs, and produces a smooth wrong answer: the operator
+# had a 78% error that did NOT converge under refinement (identical at nx = 32, 64, 128),
+# and hand-evaluating the misparse reproduced the returned 0.901952 exactly against the
+# correct 0.195400. Any rename back to `f0` reintroduces it silently.
+@inline function _w5(fm2, fm1, fc, fp1, fp2, e)
+    # reconstruction of the upwind-side interface value from a 5-point stencil
+    b0 = (13.0/12.0)*(fm2 - 2*fm1 + fc)^2 + 0.25*(fm2 - 4*fm1 + 3*fc)^2
+    b1 = (13.0/12.0)*(fm1 - 2*fc + fp1)^2 + 0.25*(fm1 - fp1)^2
+    b2 = (13.0/12.0)*(fc - 2*fp1 + fp2)^2 + 0.25*(3*fc - 4*fp1 + fp2)^2
+    # Jiang-Shu epsilon, the conventional value. It is NOT sensitive here and was measured
+    # not to be: on a resolved sine advected 200 steps, eps = 1e-40, 1e-6 and 1e10 (the last
+    # forcing the optimal linear weights) all return |mode| = 0.49999 against an exact 0.5.
+    # Recorded because an instability seen during development was first blamed on this
+    # constant; it was in fact the Float32-literal misparse described above, and changing
+    # eps did nothing to it.
+    a0 = 0.1/((e + b0)^2); a1 = 0.6/((e + b1)^2); a2 = 0.3/((e + b2)^2)
+    s  = a0 + a1 + a2
+    p0 = (2.0*fm2 - 7.0*fm1 + 11.0*fc)/6.0
+    p1 = (-fm1 + 5.0*fc + 2.0*fp1)/6.0
+    p2 = (2.0*fc + 5.0*fp1 - fp2)/6.0
+    (a0*p0 + a1*p1 + a2*p2)/s
+end
+
+@inline _idx(i, Nx, per::Bool) = per ? mod(i - 1, Nx) + 1 : clamp(i, 1, Nx)
+
+"One WENO5 spatial residual: du[a,b,c,i] = -(F_{i+1/2} - F_{i-1/2})/dx."
+function _weno5_rhs_kernel!(du, f, v, n, Nx, invdx, per::Int32, e)
+    t = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = n * n * n * Nx
+    if t <= N
+        @inbounds begin
+            a = (t - 1) % n + 1;   r = (t - 1) ÷ n
+            b = r % n + 1;         r = r ÷ n
+            c = r % n + 1;         i = r ÷ n + 1
+            s = v[a]
+            if s == 0.0
+                du[a,b,c,i] = 0.0
+            else
+                # The seven stencil values are read into locals EXPLICITLY. An earlier
+                # version used a closure `g(k) = f[a,b,c,_idx(i+k,Nx,p)]`, which is correct
+                # Julia and compiled without complaint, but produced a spatial operator with
+                # an O(1) error that did not converge under refinement (78% at nx = 32, 64
+                # and 128 alike) -- the captured, reassigned locals do not survive into the
+                # device closure the way they do on the host. Hand-evaluating the same
+                # stencil off-device reproduced the exact derivative to 5th order, which is
+                # what localised it to the closure rather than the formula.
+                p = per == Int32(1)
+                fm3 = f[a, b, c, _idx(i-3, Nx, p)]
+                fm2 = f[a, b, c, _idx(i-2, Nx, p)]
+                fm1 = f[a, b, c, _idx(i-1, Nx, p)]
+                f00 = f[a, b, c, _idx(i,   Nx, p)]
+                fp1 = f[a, b, c, _idx(i+1, Nx, p)]
+                fp2 = f[a, b, c, _idx(i+2, Nx, p)]
+                fp3 = f[a, b, c, _idx(i+3, Nx, p)]
+                if s > 0
+                    # upwind-biased from the left for both interfaces
+                    fr = _w5(fm2, fm1, f00, fp1, fp2, e)     # at i+1/2
+                    fl = _w5(fm3, fm2, fm1, f00, fp1, e)     # at i-1/2
+                else
+                    # mirror the stencil about the interface
+                    fr = _w5(fp3, fp2, fp1, f00, fm1, e)     # at i+1/2
+                    fl = _w5(fp2, fp1, f00, fm1, fm2, e)     # at i-1/2
+                end
+                du[a,b,c,i] = -s*(fr - fl)*invdx
+            end
+        end
+    end
+    return nothing
+end
+
+function _weno5_rhs!(du, f, dx, g::VGridG, per::Bool, e::Float64)
+    Nx = size(f, 4); N = g.n^3 * Nx
+    thr = 256; blk = cld(N, thr)
+    @cuda threads=thr blocks=blk _weno5_rhs_kernel!(du, f, g.v, g.n, Nx, 1.0/dx,
+                                                    per ? Int32(1) : Int32(0), e)
+    du
+end
+
+"""
+    transport_weno5!(f, u1, u2, du, dt, dx, g; bc=:periodic)
+
+WENO5 + SSP-RK3 transport, the high-order counterpart of `transport_upwind!`. `u1`, `u2` and
+`du` are scratch arrays shaped like `f` (see `dvm_alloc_weno5`).
+
+`bc = :periodic` wraps the stencil; `:copy` clamps it, which is a zero-gradient extrapolation
+and is NOT a wall -- a diffuse wall needs the half-space treatment in `transport_walls!`,
+which remains first-order and is unaffected by this routine.
+"""
+function transport_weno5!(f, u1, u2, du, dt, dx, g::VGridG; bc::Symbol = :periodic,
+                          eps::Float64 = 1.0e-6)
+    per = bc === :periodic
+    _weno5_rhs!(du, f, dx, g, per, eps)
+    @. u1 = f + dt*du                                   # stage 1
+    _weno5_rhs!(du, u1, dx, g, per, eps)
+    @. u2 = 0.75*f + 0.25*(u1 + dt*du)                  # stage 2
+    _weno5_rhs!(du, u2, dx, g, per, eps)
+    @. f = (1.0/3.0)*f + (2.0/3.0)*(u2 + dt*du)         # stage 3
+    f
+end
+
+"Scratch for `transport_weno5!`: three arrays shaped like `f`."
+dvm_alloc_weno5(f) = (similar(f), similar(f), similar(f))
 
 # ---------------------------------------------------------------------------------------
 # WALLS — the exact half-space diffuse condition. f for the INCOMING velocities IS the wall
