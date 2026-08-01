@@ -31,7 +31,7 @@ module DVMBGKGPU
 using CUDA, LinearAlgebra
 using Riemann35.Weno5Dev: weno5z
 
-export VGridG, dvm_alloc, transport_upwind!, transport_weno5!, dvm_alloc_weno5,
+export VGridG, WALL_DV_MAX, wall_dv_ok, dvm_alloc, transport_upwind!, transport_weno5!, dvm_alloc_weno5,
        transport_walls!, collide!, moments35_field,
        discrete_maxwellian_host!, wall_pair_host, cellT_from_M,
        # added with the ES-BGK collision and the exact wall fluxes (#47, #48). These were
@@ -63,10 +63,54 @@ struct VGridG
     dv::Float64
     n::Int
 end
+"""
+    VGridG(vmax, n)
+
+Uniform velocity grid on `[-vmax, vmax]` with `n` points, so `dv = 2*vmax/(n-1)`.
+
+RESOLUTION IS SET BY `dv`, NOT BY `n`, and at a wall it matters far more than in the bulk.
+Measured at Kn = 0.73 (ES-BGK, nx = 384) against 8-seed DSMC, Knudsen-layer curvature
+1.426 +/- 0.050 (SEM):
+
+    nv    dv      curvature   gap to DSMC
+    32    0.387   1.160       5.3 SEM
+    48    0.255   1.296       2.6 SEM
+    64    0.190   1.348       1.5 SEM
+    96    0.126   1.366       1.2 SEM
+    128   0.094   1.375       1.0 SEM
+
+so `nv = 32` is 18% low on the layer and only `dv <~ 0.13` reaches the reference's own
+noise floor. `vmax` is NOT the knob: a matched-`dv` pair (nv=64/vmax=6, dv=0.1905) and
+(nv=86/vmax=8, dv=0.1882) agree to 0.1% despite a 33% wider domain, while coarsening `dv`
+at fixed vmax moves it 4%. Tail truncation at 6 thermal speeds is negligible.
+
+IN THE BULK IT BARELY MATTERS: on a wall-free shear mode, refining nv 32 -> 48 changes
+the decay rate in the SEVENTH digit. A diffuse wall is a discontinuity in velocity space
+at `v_n = 0`; a smooth bulk mode is not, so a grid adequate for transport is not
+adequate at a wall.
+
+The threshold is on `dv/sqrt(T)` -- it is a resolution per thermal speed. `WALL_DV_MAX`
+is quoted for `T = 1`, the normalisation every driver here uses.
+"""
 function VGridG(vmax::Real, n::Int)
     vh = collect(range(-Float64(vmax), Float64(vmax), length = n))
     VGridG(CuArray(vh), vh, vh[2] - vh[1], n)
 end
+
+"Largest `dv` (at T = 1) that reaches the DSMC noise floor on the Knudsen layer; see `VGridG`."
+const WALL_DV_MAX = 0.13
+
+"""
+    wall_dv_ok(dv; T = 1.0) -> Bool
+
+Is this velocity resolution adequate for a WALL-bounded run? The criterion is
+`dv/sqrt(T) <= WALL_DV_MAX`, measured; see `VGridG` for the data behind it. Bulk-only
+problems are fine far coarser and this does not apply to them.
+
+Pure -- no device state. It still lives in this module, which needs CUDA to load, so it
+is exercised by `gpu/runtests_gpu.jl` rather than by the CI suite.
+"""
+wall_dv_ok(dv::Real; T::Real = 1.0) = dv / sqrt(T) <= WALL_DV_MAX
 
 "f, work buffer, and the per-cell Newton coefficient state."
 function dvm_alloc(Nx::Int, g::VGridG)
@@ -288,6 +332,16 @@ Maxwellians on the device, `outL`/`outR` their outgoing half-fluxes (host scalar
 """
 function transport_walls!(f, fn, dt, dx, g::VGridG, ML, MR, outL::Float64, outR::Float64,
                           inflx, rw)
+    # Warn ONCE. Under-resolving the velocity grid at a wall is silent -- it produces a
+    # smooth, plausible profile that is simply wrong in the Knudsen layer (18% at nv = 32),
+    # and no convergence study in nx can see it. Not an error and not a default change:
+    # published numbers came from nv = 24-32 and altering the default would make them
+    # irreproducible.
+    wall_dv_ok(g.dv) || @warn(
+        "DVM wall transport with an under-resolved velocity grid: dv = $(round(g.dv, digits=4)) " *
+        "> WALL_DV_MAX = $WALL_DV_MAX (at T = 1). The Knudsen layer will be too weak " *
+        "(measured: 18% low at dv = 0.387). Refine nv, not vmax -- see `VGridG`.",
+        maxlog = 1)
     Nx = size(f, 4); n = g.n
     fill!(inflx, 0.0)
     @cuda threads=256 blocks=cld(n^3, 256) _influx_kernel!(inflx, f, g.v, n, Nx, g.dv^3)

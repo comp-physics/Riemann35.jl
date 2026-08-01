@@ -20,6 +20,7 @@ using Test
 
 const GPU_TESTS = [
     joinpath(@__DIR__, "..", "test", "test_dvm_weno5.jl"),
+    joinpath(@__DIR__, "..", "test", "test_wall_dv_guidance.jl"),
 ]
 
 @testset "Riemann35 GPU" begin
