@@ -83,13 +83,9 @@ include(joinpath(@__DIR__, "..", "residual3d_order3_gpu.jl")); using .Residual3D
 
 const n = 16; const g = 8; const Ma = 2.0; const dx = 1.0/n
 const nf = n + 2g
-const IJK = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-             (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),
-             (0,3,0),(1,3,0),(0,4,0),
-             (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),
-             (0,0,3),(1,0,3),(0,0,4),
-             (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),
-             (0,1,2),(1,1,2),(0,1,3),(0,2,2))
+# Canonical table, imported not copied (issue #61) -- the local copy carried the same
+# name, so this is a straight replacement.
+using Riemann35.MomentIndices: IJK
 
 function build_G()
     G = zeros(35, nf, nf, nf)

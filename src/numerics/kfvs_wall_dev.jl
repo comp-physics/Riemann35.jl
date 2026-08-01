@@ -40,12 +40,14 @@ module KfvsWallDev
 # excess kurtosis = 0.0003 at every Kn, and the Gaussian normal half-flux is only 0.6% off.
 # In low-speed Couette the two wall Maxwellians differ in their TANGENTIAL velocity only, so
 # the bimodality never appears in the direction the half-space split cuts.
+using ..MomentIndices: IJK
 export kfvs_wall_flux_dev
 
-const IJK35_W = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-                 (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),(0,3,0),(1,3,0),(0,4,0),
-                 (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),(0,0,3),(1,0,3),(0,0,4),
-                 (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),(0,1,2),(1,1,2),(0,1,3),(0,2,2))
+# The moment-index table is the CANONICAL one, imported rather than copied. It used to be
+# a local transcription; the table has been mis-transcribed once before (positions 31-33
+# permuted, three moments mislabelled while every total and trace stayed correct), which
+# is why nine copies existed and why they are being removed. See issue #61.
+const IJK35_W = IJK
 
 "Abramowitz & Stegun 7.1.26, ~1.5e-7 absolute."
 @inline function _erfc(x::Float64)

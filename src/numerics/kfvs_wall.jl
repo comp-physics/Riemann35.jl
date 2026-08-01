@@ -46,10 +46,11 @@ using LinearAlgebra
 using ..Riemann35: chyqmom_nodes_3d
 export kfvs_wall_flux, halfline_gauss_moments, IJK35_KFVS
 
-const IJK35_KFVS = ((0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),
-                    (0,1,0),(1,1,0),(2,1,0),(3,1,0),(0,2,0),(1,2,0),(2,2,0),(0,3,0),(1,3,0),(0,4,0),
-                    (0,0,1),(1,0,1),(2,0,1),(3,0,1),(0,0,2),(1,0,2),(2,0,2),(0,0,3),(1,0,3),(0,0,4),
-                    (0,1,1),(1,1,1),(2,1,1),(0,2,1),(1,2,1),(0,3,1),(0,1,2),(1,1,2),(0,1,3),(0,2,2))
+using ..MomentIndices: IJK
+# Canonical table, imported not copied (issue #61). It was a local transcription; the
+# table has been mis-transcribed once before -- positions 31-33 permuted, three moments
+# mislabelled while every total and trace stayed correct, so nothing caught it.
+const IJK35_KFVS = IJK
 
 """
     halfline_gauss_moments(pmax, u, T, side) -> Vector{Float64}
