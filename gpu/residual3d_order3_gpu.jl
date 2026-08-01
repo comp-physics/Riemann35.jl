@@ -732,12 +732,12 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
             axr = (i == nx) && wxhi; axl = (i == 1) && wxlo
             ayr = (j == ny) && wyhi; ayl = (j == 1) && wylo
             azr = (k == nz) && wzhi; azl = (k == 1) && wzlo
-            Wxr = axr ? _kfvs_face(G, g+nx, g+j, g+k, 1, +1.0, wTwH, wU1,  wU2)  : FHxr
-            Wxl = axl ? _kfvs_face(G, g+1,  g+j, g+k, 1, -1.0, wTw,  uxl,  ux2l) : FHxl
-            Wyr = ayr ? _kfvs_face(G, g+i, g+ny, g+k, 2, +1.0, wTwH, wU1,  wU2)  : FHyr
-            Wyl = ayl ? _kfvs_face(G, g+i, g+1,  g+k, 2, -1.0, wTw,  uxl,  ux2l) : FHyl
-            Wzr = azr ? _kfvs_face(G, g+i, g+j, g+nz, 3, +1.0, wTwH, wU1,  wU2)  : FHzr
-            Wzl = azl ? _kfvs_face(G, g+i, g+j, g+1,  3, -1.0, wTw,  uxl,  ux2l) : FHzl
+            Wxr = axr ? _kfvs_face(G, g+nx, g+j, g+k, 1, +1.0, wTwH, wU1,  wU2,  nx) : FHxr
+            Wxl = axl ? _kfvs_face(G, g+1,  g+j, g+k, 1, -1.0, wTw,  uxl,  ux2l, nx) : FHxl
+            Wyr = ayr ? _kfvs_face(G, g+i, g+ny, g+k, 2, +1.0, wTwH, wU1,  wU2,  ny) : FHyr
+            Wyl = ayl ? _kfvs_face(G, g+i, g+1,  g+k, 2, -1.0, wTw,  uxl,  ux2l, ny) : FHyl
+            Wzr = azr ? _kfvs_face(G, g+i, g+j, g+nz, 3, +1.0, wTwH, wU1,  wU2,  nz) : FHzr
+            Wzl = azl ? _kfvs_face(G, g+i, g+j, g+1,  3, -1.0, wTw,  uxl,  ux2l, nz) : FHzl
 
             for m in 1:35
                 Fxr = axr ? Wxr[m] : FLxr[m] + θxr * (FHxr[m] - FLxr[m])
@@ -766,10 +766,54 @@ end
 # (-3.9e-4 against the DVM's 1e-15, issue #36). Here rho_w is set FROM zero net mass
 # flux, so conservation is exact by construction.
 # ---------------------------------------------------------------------------
+#
+# THE STATE IT IS GIVEN IS EXTRAPOLATED TO THE FACE, not read from the cell centre.
+# `kfvs_wall_flux_dev` reconstructs a Gaussian from whatever state it is handed and
+# integrates it over the half-space AT THE WALL, so handing it the first cell's CENTRE
+# value -- half a cell away -- makes the boundary flux first-order while the interior is
+# WENO order-3. Interior faces never see this because they are fed reconstructed values.
+#
+# It matters far more than an order count suggests, because the near-wall curvature is
+# exactly what the Knudsen layer is. Measured at Kn = 0.73 against DSMC, whole-profile
+# L2 with the cell-centre state:
+#
+#     ny = 96   17.24%      <- vs 3.69% for the ghost cell it was meant to replace
+#     ny = 192   7.34%
+#     ny = 384   3.09%      <- vs 3.41%, i.e. only converged does it come out ahead
+#
+# so it was a REGRESSION at any resolution a user would actually reach for. Cell centres
+# sit at dy/2, 3dy/2, 5dy/2 from the wall, so the one-sided quadratic to the face is
+# (15 M1 - 10 M2 + 3 M3)/8 -- third-order, matching the interior.
+#
+# GUARDED, because componentwise extrapolation of a moment vector is not closed on the
+# realizable set: an overshoot can hand back a state no distribution has. Only ten of the
+# 35 reach the flux (rho, the three velocities, the six second moments), so the guard is
+# exactly a positive density and a positive-definite covariance -- checked by leading
+# minors, falling back to the cell centre when it fails. Fewer than 3 cells on the axis
+# has no stencil, so it falls back there too.
+@inline function _pd_ok(M::NTuple{35,Float64})
+    rho = M[1]
+    rho > 0.0 || return false
+    ux = M[2]/rho; uy = M[6]/rho; uz = M[16]/rho
+    a = M[3]/rho - ux*ux; b = M[10]/rho - uy*uy; c = M[20]/rho - uz*uz
+    d = M[7]/rho - ux*uy; e = M[17]/rho - ux*uz; f = M[26]/rho - uy*uz
+    a > 0.0 || return false
+    (a*b - d*d) > 0.0 || return false
+    (a*(b*c - f*f) - d*(d*c - f*e) + e*(d*f - b*e)) > 0.0
+end
+
 @noinline function _kfvs_face(G, px::Int, py::Int, pk::Int, axis::Int, outward::Float64,
-                              Tw::Float64, uw1::Float64, uw2::Float64)
-    M = ntuple(m -> @inbounds(G[m, px, py, pk]), Val(35))
-    kfvs_wall_flux_dev(M, axis, outward, Tw, uw1, uw2)
+                              Tw::Float64, uw1::Float64, uw2::Float64, n::Int)
+    M1 = ntuple(m -> @inbounds(G[m, px, py, pk]), Val(35))
+    if n >= 3
+        s  = outward > 0 ? -1 : 1                       # step INWARD from the wall
+        dx = axis == 1 ? s : 0; dy = axis == 2 ? s : 0; dz = axis == 3 ? s : 0
+        M2 = ntuple(m -> @inbounds(G[m, px+dx,   py+dy,   pk+dz]),   Val(35))
+        M3 = ntuple(m -> @inbounds(G[m, px+2dx,  py+2dy,  pk+2dz]),  Val(35))
+        Mf = ntuple(m -> (15.0*M1[m] - 10.0*M2[m] + 3.0*M3[m])/8.0, Val(35))
+        _pd_ok(Mf) && return kfvs_wall_flux_dev(Mf, axis, outward, Tw, uw1, uw2)
+    end
+    kfvs_wall_flux_dev(M1, axis, outward, Tw, uw1, uw2)
 end
 
 # ===========================================================================
