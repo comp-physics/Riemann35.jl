@@ -171,3 +171,20 @@ HYQMOM_SKIP_PLOTTING=true CI=true mpiexec -n 1 julia --project=. -e 'using Pkg; 
 Run under `mpiexec -n 1` because some tests call `MPI.Init`. (The MATLAB-golden
 and MAT-dependent tests skip when MATLAB / the golden dir / MAT aren't present.)
 ```
+
+## Tests
+
+```
+julia --project=. test/runtests.jl                    # CPU suite -- this is what CI runs
+julia --project=gpu/gpuenv2 gpu/runtests_gpu.jl       # GPU suite -- CI does NOT run this
+```
+
+**GPU tests are not covered by CI.** `CUDA` is not a dependency of the main project (it
+lives in `gpu/gpuenv2`), and the CI runners have no device, so a GPU test included from
+`test/runtests.jl` would fail to load rather than skip. They pass or fail only when someone
+runs `gpu/runtests_gpu.jl` on a machine with a device. **Run it before merging anything that
+touches `gpu/` or a `*_dev.jl` device path.**
+
+Tests that need no device belong in `test/runtests.jl`, where CI will actually execute them.
+Note that `runtests.jl` uses an explicit include list rather than globbing, so a new test
+file is not picked up until it is added there.

@@ -12,7 +12,12 @@ using Test, CUDA
 using Riemann35          # weno5z comes from Riemann35.Weno5Dev
 include(joinpath(@__DIR__, "..", "gpu", "dvm_bgk_gpu.jl")); using .DVMBGKGPU
 
-CUDA.functional() || (@info "no CUDA device; skipping DVM WENO5 tests"; exit(0))
+# GUARD, and it must not be `exit(0)`. This file is INCLUDED from runtests.jl, where
+# exit(0) would terminate the ENTIRE suite on a GPU-less runner -- every test after this
+# point would be skipped while the run reported success. That is strictly worse than not
+# having the test at all. Skip the testset instead and say so.
+const HAS_CUDA_DVM = CUDA.functional()
+HAS_CUDA_DVM || @info "no CUDA device -- DVM WENO5 transport tests skipped (not failed)"
 
 const NV = 8                    # velocity resolution is irrelevant here: transport is
 const VMAX = 3.0                # elementwise in the velocity index
@@ -41,6 +46,7 @@ function advect_err(nx::Int, scheme::Symbol)
     sum(abs, A[node,1,1,:] .- prof)/nx       # exact solution is the initial profile
 end
 
+if HAS_CUDA_DVM
 @testset "DVM WENO5 transport" begin
     @testset "advection of a smooth periodic profile converges at high order" begin
         e128 = advect_err(128, :weno5)
@@ -87,3 +93,4 @@ end
         @test abs(sum(Array(f))/m0 - 1) < 1e-12
     end
 end
+end  # if HAS_CUDA_DVM
