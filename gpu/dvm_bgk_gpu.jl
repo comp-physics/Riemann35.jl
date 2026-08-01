@@ -29,6 +29,7 @@ module DVMBGKGPU
 # and validate_dvm_gpu.jl checks it against the CPU field to roundoff rather than trusting
 # that claim.
 using CUDA, LinearAlgebra
+using Riemann35.Weno5Dev: weno5z
 
 export VGridG, dvm_alloc, transport_upwind!, transport_weno5!, dvm_alloc_weno5,
        transport_walls!, collide!, moments35_field,
@@ -129,38 +130,31 @@ end
 #
 # `transport_upwind!` is KEPT and unchanged: every published number in the notes was produced
 # with it, and silently upgrading it would make those irreproducible.
-# NOTE ON THE NAMING, which is load-bearing. The centre value is `fc`, never `f0`, and every
-# coefficient is applied with an EXPLICIT `*`. Written the natural way -- centre value `f0`,
-# juxtaposition multiplication as elsewhere in this file -- the term `11f0` is not `11*f0` at
-# all: `11f0` is Julia's Float32 LITERAL syntax, the Float32 analogue of `11e0`, so it parses
-# as the number 11.0f0 and the centre value silently vanishes from the stencil. Likewise
-# `5f0`, `3f0` and `2f0`. It compiles, runs, and produces a smooth wrong answer: the operator
-# had a 78% error that did NOT converge under refinement (identical at nx = 32, 64, 128),
-# and hand-evaluating the misparse reproduced the returned 0.901952 exactly against the
-# correct 0.195400. Any rename back to `f0` reintroduces it silently.
-@inline function _w5(fm2, fm1, fc, fp1, fp2, e)
-    # reconstruction of the upwind-side interface value from a 5-point stencil
-    b0 = (13.0/12.0)*(fm2 - 2*fm1 + fc)^2 + 0.25*(fm2 - 4*fm1 + 3*fc)^2
-    b1 = (13.0/12.0)*(fm1 - 2*fc + fp1)^2 + 0.25*(fm1 - fp1)^2
-    b2 = (13.0/12.0)*(fc - 2*fp1 + fp2)^2 + 0.25*(3*fc - 4*fp1 + fp2)^2
-    # Jiang-Shu epsilon, the conventional value. It is NOT sensitive here and was measured
-    # not to be: on a resolved sine advected 200 steps, eps = 1e-40, 1e-6 and 1e10 (the last
-    # forcing the optimal linear weights) all return |mode| = 0.49999 against an exact 0.5.
-    # Recorded because an instability seen during development was first blamed on this
-    # constant; it was in fact the Float32-literal misparse described above, and changing
-    # eps did nothing to it.
-    a0 = 0.1/((e + b0)^2); a1 = 0.6/((e + b1)^2); a2 = 0.3/((e + b2)^2)
-    s  = a0 + a1 + a2
-    p0 = (2.0*fm2 - 7.0*fm1 + 11.0*fc)/6.0
-    p1 = (-fm1 + 5.0*fc + 2.0*fp1)/6.0
-    p2 = (2.0*fc + 5.0*fp1 - fp2)/6.0
-    (a0*p0 + a1*p1 + a2*p2)/s
-end
-
+# RECONSTRUCTION IS THE SHIPPED `weno5z`, NOT A LOCAL COPY. An earlier version of this
+# routine hand-rolled classic Jiang-Shu WENO5 here. That was wrong on two counts. It
+# duplicated math the package already provides device-safe (src/numerics/weno5_dev.jl), against
+# this file's own convention; and it used DIFFERENT nonlinear weights from the moment solver,
+# which runs WENO5-Z (Borges et al. 2008) -- so part of any closure-versus-DVM gap would have
+# been the two codes reconstructing differently rather than the closure being wrong. With
+# `weno5z` on both sides the spatial reconstruction and the SSP-RK3 time integration are
+# IDENTICAL, and what remains is the moment truncation and the moment solver's theta*-IDP
+# limiter (which has no DVM analogue: scalar advection has no realizable set to protect).
+#
+# The local copy also carried a trap worth recording. Its centre value was named `f0` with
+# juxtaposition multiplication, so `11f0` was not `11*f0` but Julia's Float32 LITERAL 11.0f0,
+# and the centre value silently dropped out of three of the four polynomials -- a 78%
+# spatial-operator error that did NOT converge under refinement. `weno5z` names its centre
+# value `v0`, and `v` is not an exponent marker, so it is immune. Any future local stencil
+# here must avoid `<digit>f<digit>` and `<digit>e<digit>` in the same way.
+#
+# NOTE ON THE USAGE. `weno5z`'s docstring describes reconstruction from CELL AVERAGES, which
+# is how the moment solver uses it. Here it is used in FINITE-DIFFERENCE mode, on point values
+# of the flux. The coefficients coincide -- that is the standard FD/FV WENO equivalence -- and
+# test_dvm_weno5.jl measures the resulting order rather than taking it on faith.
 @inline _idx(i, Nx, per::Bool) = per ? mod(i - 1, Nx) + 1 : clamp(i, 1, Nx)
 
 "One WENO5 spatial residual: du[a,b,c,i] = -(F_{i+1/2} - F_{i-1/2})/dx."
-function _weno5_rhs_kernel!(du, f, v, n, Nx, invdx, per::Int32, e)
+function _weno5_rhs_kernel!(du, f, v, n, Nx, invdx, per::Int32)
     t = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     N = n * n * n * Nx
     if t <= N
@@ -190,12 +184,12 @@ function _weno5_rhs_kernel!(du, f, v, n, Nx, invdx, per::Int32, e)
                 fp3 = f[a, b, c, _idx(i+3, Nx, p)]
                 if s > 0
                     # upwind-biased from the left for both interfaces
-                    fr = _w5(fm2, fm1, f00, fp1, fp2, e)     # at i+1/2
-                    fl = _w5(fm3, fm2, fm1, f00, fp1, e)     # at i-1/2
+                    fr = weno5z(fm2, fm1, f00, fp1, fp2)     # at i+1/2
+                    fl = weno5z(fm3, fm2, fm1, f00, fp1)     # at i-1/2
                 else
                     # mirror the stencil about the interface
-                    fr = _w5(fp3, fp2, fp1, f00, fm1, e)     # at i+1/2
-                    fl = _w5(fp2, fp1, f00, fm1, fm2, e)     # at i-1/2
+                    fr = weno5z(fp3, fp2, fp1, f00, fm1)     # at i+1/2
+                    fl = weno5z(fp2, fp1, f00, fm1, fm2)     # at i-1/2
                 end
                 du[a,b,c,i] = -s*(fr - fl)*invdx
             end
@@ -204,11 +198,11 @@ function _weno5_rhs_kernel!(du, f, v, n, Nx, invdx, per::Int32, e)
     return nothing
 end
 
-function _weno5_rhs!(du, f, dx, g::VGridG, per::Bool, e::Float64)
+function _weno5_rhs!(du, f, dx, g::VGridG, per::Bool)
     Nx = size(f, 4); N = g.n^3 * Nx
     thr = 256; blk = cld(N, thr)
     @cuda threads=thr blocks=blk _weno5_rhs_kernel!(du, f, g.v, g.n, Nx, 1.0/dx,
-                                                    per ? Int32(1) : Int32(0), e)
+                                                    per ? Int32(1) : Int32(0))
     du
 end
 
@@ -222,14 +216,13 @@ WENO5 + SSP-RK3 transport, the high-order counterpart of `transport_upwind!`. `u
 and is NOT a wall -- a diffuse wall needs the half-space treatment in `transport_walls!`,
 which remains first-order and is unaffected by this routine.
 """
-function transport_weno5!(f, u1, u2, du, dt, dx, g::VGridG; bc::Symbol = :periodic,
-                          eps::Float64 = 1.0e-6)
+function transport_weno5!(f, u1, u2, du, dt, dx, g::VGridG; bc::Symbol = :periodic)
     per = bc === :periodic
-    _weno5_rhs!(du, f, dx, g, per, eps)
+    _weno5_rhs!(du, f, dx, g, per)
     @. u1 = f + dt*du                                   # stage 1
-    _weno5_rhs!(du, u1, dx, g, per, eps)
+    _weno5_rhs!(du, u1, dx, g, per)
     @. u2 = 0.75*f + 0.25*(u1 + dt*du)                  # stage 2
-    _weno5_rhs!(du, u2, dx, g, per, eps)
+    _weno5_rhs!(du, u2, dx, g, per)
     @. f = (1.0/3.0)*f + (2.0/3.0)*(u2 + dt*du)         # stage 3
     f
 end
