@@ -10,7 +10,11 @@
 # profile. That gives an error with no reference solver in it at all.
 using Test, CUDA
 using Riemann35          # weno5z comes from Riemann35.Weno5Dev
-include(joinpath(@__DIR__, "..", "gpu", "dvm_bgk_gpu.jl")); using .DVMBGKGPU
+# Include the DVM module only once: gpu/runtests_gpu.jl runs several files that all need
+# it, and re-including replaces the module ("WARNING: replacing module DVMBGKGPU"),
+# which would let a stale definition survive silently. Works standalone too.
+isdefined(Main, :DVMBGKGPU) || include(joinpath(@__DIR__, "..", "gpu", "dvm_bgk_gpu.jl"))
+using .DVMBGKGPU
 
 # GUARD, and it must not be `exit(0)`. This file is INCLUDED from runtests.jl, where
 # exit(0) would terminate the ENTIRE suite on a GPU-less runner -- every test after this
