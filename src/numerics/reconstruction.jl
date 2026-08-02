@@ -117,7 +117,12 @@ function to_recon_vars(M::AbstractVector)::Vector{Float64}
     # Delegate to the single-source, allocation-free device kernel (shared verbatim
     # with the GPU path). `to_recon_vars_dev(M...)` returns the length-35 recon-var
     # NTuple in the same canonical order; collect into the Vector callers expect.
-    V = to_recon_vars_dev(M...)
+    # NOT `to_recon_vars_dev(M...)`. Splatting a 35-element container lowers to
+    # `_apply_iterate` and allocates 1136 B PER CALL -- measured, and reproduced from a
+    # minimal 35-argument function, so it is the splat and not the NTuple return, the
+    # @noinline boundary or @fastmath (all three measure 0 B when called explicitly).
+    # `to_recon_vars_tup` indexes explicitly, which is why the GPU path never paid this.
+    V = to_recon_vars_tup(ntuple(i -> Float64(M[i]), Val(35)))
     if HO_PRESSURE_RECON[]
         # opt-in pressure-tensor variant: slots 5-7 carry P_ii = rho*C2ii, so a
         # uniform-pressure contact has zero slope in every var except density.
@@ -133,9 +138,9 @@ function from_recon_vars(V::AbstractVector)::Vector{Float64}
     if HO_PRESSURE_RECON[]
         # P_ii -> C2ii (rho > 0 per recon_vars_ok); single-source with GPU.
         W = depressurize_recon_tup(ntuple(i -> Float64(V[i]), Val(35)))
-        return collect(from_recon_vars_dev(W...))
+        return collect(from_recon_vars_tup(W))          # explicit indexing, see above
     end
-    return collect(from_recon_vars_dev(V...))
+    return collect(from_recon_vars_tup(ntuple(i -> Float64(V[i]), Val(35))))
 end
 
 """
