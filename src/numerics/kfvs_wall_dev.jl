@@ -106,10 +106,32 @@ moments, so the tangential momentum flux -- which the shear stress carries and a
 reconstruction zeroes -- is represented. `rho_w` is set from zero net mass flux, so mass
 conservation stays exact by construction.
 """
-@inline function kfvs_wall_flux_dev(M::NTuple{35,Float64}, axis::Int, outward::Float64,
-                                    Tw::Float64, uw1::Float64, uw2::Float64)
+@inline kfvs_wall_flux_dev(M::NTuple{35,Float64}, axis::Int, outward::Float64,
+                           Tw::Float64, uw1::Float64, uw2::Float64) =
+    kfvs_wall_flux_full_dev(M, axis, outward, Tw, uw1, uw2)[1]
+
+"""
+    kfvs_wall_flux_full_dev(M, axis, outward, Tw, uw1, uw2) -> (F::NTuple{35,Float64}, rho_w)
+
+As `kfvs_wall_flux_dev`, but also returns the wall density `rho_w` that zero net mass flux
+fixes. THIS IS THE SINGLE SOURCE for the half-space wall flux: the host-side
+`KfvsWall.kfvs_wall_flux` is a thin wrapper around it.
+
+That wrapper used to be an independent implementation, and it had silently drifted into a
+DIFFERENT PHYSICAL MODEL -- it factorised the interior half as normal x t1 x t2 with a
+DIAGONAL covariance, dropping cxy/cxz/cyz entirely. Measured divergence from this function:
+5e-16 when the covariance happens to be diagonal, but up to 44% once any off-diagonal is
+nonzero. In Couette the off-diagonal IS the shear stress, so the two disagreed hardest on
+exactly the quantity the wall exists to transmit.
+
+Nothing in production called the host version -- only tests -- so the GPU always ran this
+(correct) path while the assertions guarding it exercised the stale one. Unifying costs no
+production number and puts the tests back on the code that runs.
+"""
+@inline function kfvs_wall_flux_full_dev(M::NTuple{35,Float64}, axis::Int, outward::Float64,
+                                         Tw::Float64, uw1::Float64, uw2::Float64)
     rho = M[1]
-    rho > 0.0 || return ntuple(_ -> 0.0, Val(35))
+    rho > 0.0 || return (ntuple(_ -> 0.0, Val(35)), 0.0)
     ux = M[2]/rho; uy = M[6]/rho; uz = M[16]/rho
     cxx = M[3]/rho  - ux*ux; cxx = cxx > 1e-14 ? cxx : 1e-14
     cyy = M[10]/rho - uy*uy; cyy = cyy > 1e-14 ? cyy : 1e-14
@@ -143,7 +165,7 @@ conservation stays exact by construction.
 
     rho_w = Ii[2] != 0.0 ? -rho*Io[2]/Ii[2] : 0.0
 
-    ntuple(Val(35)) do m
+    F = ntuple(Val(35)) do m
         e = IJK35_W[m]
         pn = e[axis]; q1 = e[t1]; q2 = e[t2]
         # E[v_n^pn v_t1^q1 v_t2^q2] over the half-space. Conditioned on v_n, each tangential
@@ -166,6 +188,7 @@ conservation stays exact by construction.
         end
         rho*acc + rho_w*_at6(Ii, pn+1)*_at5(Wt1, q1)*_at5(Wt2, q2)
     end
+    (F, rho_w)
 end
 
 end # module

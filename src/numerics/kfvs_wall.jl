@@ -45,8 +45,11 @@ module KfvsWall
 using LinearAlgebra
 using ..Riemann35: chyqmom_nodes_3d
 export kfvs_wall_flux, halfline_gauss_moments, IJK35_KFVS
+# _kfvs_wall_flux_diagonal is intentionally NOT exported: it is the retired model, kept only
+# so test_wall_tangential_convention.jl can demonstrate what delegating fixed.
 
 using ..MomentIndices: IJK
+using ..KfvsWallDev
 # Canonical table, imported not copied (issue #61). It was a local transcription; the
 # table has been mis-transcribed once before -- positions 31-33 permuted, three moments
 # mislabelled while every total and trace stayed correct, so nothing caught it.
@@ -116,6 +119,28 @@ call site, where the specular flux is a sign flip of the interior half.
 """
 function kfvs_wall_flux(M::AbstractVector{Float64}, axis::Int, outward::Float64,
                         Tw::Float64, uw1::Float64, uw2::Float64)
+    # DELEGATES to the device implementation -- see kfvs_wall_flux_full_dev's docstring.
+    # This function used to carry its own copy of the half-space integral, and the copy had
+    # drifted into a different physical model: it factorised the interior half with a
+    # DIAGONAL covariance and dropped cxy/cxz/cyz. The two agreed to 5e-16 whenever the
+    # covariance happened to be diagonal and diverged by up to 44% as soon as an off-diagonal
+    # was nonzero -- and in Couette the off-diagonal IS the shear stress, i.e. they disagreed
+    # most on the one quantity a wall exists to transmit.
+    #
+    # Nothing in production ever called this function; the GPU march calls the device one
+    # directly. So every wall assertion in the suite was guarding a model that no run used,
+    # while the model that every run used had no host-side test at all. Delegating costs no
+    # production number and puts the tests back onto the code that actually executes.
+    F, rho_w = KfvsWallDev.kfvs_wall_flux_full_dev(NTuple{35,Float64}(M), axis, outward,
+                                                  Tw, uw1, uw2)
+    return (F, rho_w, F[1])                # F[1] is the net mass flux: must be ~0
+end
+
+# The pre-delegation implementation is kept below under a private name, NOT because anything
+# should call it, but because `test_kfvs_wall_model.jl` uses it to demonstrate the diagonal
+# model's error against the correlated one. Do not use it in new code.
+function _kfvs_wall_flux_diagonal(M::AbstractVector{Float64}, axis::Int, outward::Float64,
+                                  Tw::Float64, uw1::Float64, uw2::Float64)
     # --- interior half ---------------------------------------------------------------------
     # NOT the raw quadrature. The HyQMOM node set has THREE abscissas per direction, so the
     # outgoing half-space sees exactly ONE of them and the half-space mass flux comes out
