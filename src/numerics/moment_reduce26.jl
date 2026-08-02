@@ -11,6 +11,31 @@ replaced by their closure values, keeping only the six EVEN fourth-order moments
 Applied per cell per step (operator-split), `REDUCE26[]` toggles it on. Default
 off => the solver evolves the full 35 moments (byte-identical). A diagnostic /
 comparison feature, not a production default. Reuses `M4toC4_3D`, `C4toM4_3D`.
+
+ACCURACY COST, MEASURED AGAINST KINETIC GROUND TRUTH. Decaying transverse shear wave,
+1D x 3V, periodic (no walls), DVM-BGK reference, Nx = 384, Ma ~ 0.1. Relative L2 error
+against the DVM on the nine dropped moments, and the error in the shear amplitude:
+
+    tau (Kn)                        0.05      0.20      1.00
+    error on the nine, full-35      0.067     0.244     0.522
+    error on the nine, reduced-26   0.086     0.454     0.977
+    u_y amplitude, full-35         -5.36%    -2.55%    -0.12%
+    u_y amplitude, reduced-26      -4.70%   +14.19%   +61.30%
+
+At Kn = 0.05 the reduction costs essentially nothing. By Kn ~ 1 it retains almost none
+of the dropped moments' content -- 0.977 is very nearly orthogonal to truth -- and
+over-predicts the shear amplitude by 61% where the full 35 gets it to 0.12%. Converged:
+the nine-moment error is stable to 1-3% across Nx = 192/384/768 and to 3-4 digits across
+nv = 16/20/28.
+
+THE GOVERNING AXIS IS DEPARTURE FROM EQUILIBRIUM, NOT MACH NUMBER, and that reconciles
+two results which look contradictory. An earlier DVM comparison at Ma = 25 found the
+reduction costs no accuracy; this one at Ma ~ 0.1 finds a large cost. Both are correct.
+What matters is how far the distribution sits from a Maxwellian -- confirmed
+independently by a homogeneous-relaxation sweep in which the a priori closure error fell
+from 18.2% to 0.49% as the departure amplitude was reduced. So `REDUCE26[] = true` is
+safe near equilibrium and safe where parity hides the dropped moments, and costs real
+accuracy in between; it is not a knob whose safety can be read off the Mach number.
 """
 const REDUCE26 = Ref(false)
 

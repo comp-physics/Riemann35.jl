@@ -1074,6 +1074,10 @@ function simulation_runner(params)
         # Opt-in 26-moment reduction (Rodney Fox): project the nine odd 4th-order
         # moments onto their closure each step, mimicking the reduced-moment
         # dynamics. Default off => full 35-moment evolution (byte-identical).
+        # REDUCE26 is a diagnostic, and its accuracy cost depends on DEPARTURE FROM
+        # EQUILIBRIUM, not on Mach number: measured against a DVM reference it is free at
+        # Kn = 0.05 and over-predicts a shear amplitude by 61% at Kn ~ 1, where the full 35
+        # gets it to 0.12%. See the table in numerics/moment_reduce26.jl before enabling it.
         if REDUCE26[]
             @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
                 ih = i + halo; jh = j + halo
