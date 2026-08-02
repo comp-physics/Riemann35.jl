@@ -124,8 +124,10 @@ include("moments/chyqmom_nodes_3d.jl")
 
 # Half-space (KFVS) wall flux, built on the quadrature above -- the "future kinetic flux"
 # chyqmom_nodes_3d was written to unblock. Fixes the wall mass leak (#36) exactly.
-include("numerics/kfvs_wall.jl")
+# DEVICE FIRST: KfvsWall.kfvs_wall_flux is a thin wrapper over
+# KfvsWallDev.kfvs_wall_flux_full_dev, so the device module must already exist.
 include("numerics/kfvs_wall_dev.jl")
+include("numerics/kfvs_wall.jl")
 using .KfvsWallDev: kfvs_wall_flux_dev
 export kfvs_wall_flux_dev
 using .KfvsWall: kfvs_wall_flux, halfline_gauss_moments

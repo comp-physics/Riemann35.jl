@@ -20,7 +20,7 @@
 # These tests fix the mapping BEHAVIOURALLY -- by which momentum flux actually moves -- not
 # by restating the `axis % 3 + 1` formula, which would pass just as happily if the formula
 # and the physics disagreed.
-using Test, Riemann35
+using Test, Riemann35, Random
 
 @testset "wall tangential convention (uw1 -> t1, uw2 -> t2)" begin
     # gas at rest, wall sliding: the ONLY momentum the wall can inject is tangential, so the
@@ -80,19 +80,49 @@ using Test, Riemann35
     @test Riemann35.momidx(0, 1, 0) == 6
 end
 
-@testset "host and device wall flux agree" begin
-    # `kfvs_wall_flux` (host) and `kfvs_wall_flux_dev` (device) are SEPARATE implementations
-    # of the same half-space integral -- the device one is written for GPU register pressure
-    # and does not share a line of code with the host one. Every existing wall test exercises
-    # the HOST path, while every production Couette/Poiseuille run goes through the DEVICE
-    # path, so agreement between them has been assumed rather than checked. If they drifted,
-    # the tests above would keep passing while the numbers we actually publish came from an
-    # untested function.
+@testset "wall flux agreement must be probed WITH cross-moments" begin
+    # THE GUARD THAT FAILED. Two separate agreement testsets -- this file's original one and
+    # the 90-assertion set in test_kfvs_wall.jl -- both passed while host and device
+    # implemented DIFFERENT PHYSICAL MODELS: the host factorised the interior half with a
+    # diagonal covariance and dropped cxy/cxz/cyz entirely. Both testsets missed it because
+    # both built states with InitializeM4_35(..., T,0,0, T,0, T) -- every off-diagonal
+    # exactly zero, which is precisely the subspace where the two models coincide.
     #
-    # Both resolve tangents with the same `t1 = axis % 3 + 1` rule (verified by reading, and
-    # now by this test), but the host integrates the interior half from `halfline_gauss_moments`
-    # and the device from an inlined series, so exact equality is not expected -- agreement to
-    # tight tolerance is.
+    # Measured: 5e-16 agreement with diagonal covariance, up to 44% with off-diagonals. A
+    # test that only probes the degenerate subspace is not a weak test, it is a test of a
+    # different function. So: states here carry NONZERO cxy/cxz/cyz, and the diagonal model
+    # is kept available under a private name so the difference is demonstrated, not asserted.
+    using Riemann35.KfvsWall: _kfvs_wall_flux_diagonal
+    Random.seed!(20260802)
+    worst_diag = 0.0
+    for _ in 1:400
+        r = 0.5 + rand(); T = 0.6 + 0.8rand()
+        M = collect(Float64, InitializeM4_35(r, 0.3randn(), 0.3randn(), 0.3randn(),
+                                             T, 0.05randn(), 0.05randn(), T, 0.05randn(), T))
+        axis = rand(1:3); ow = rand(Bool) ? 1.0 : -1.0
+        Tw = 0.6 + 0.8rand(); uw1 = 0.3randn(); uw2 = 0.3randn()
+
+        Fh, _, _ = kfvs_wall_flux(M, axis, ow, Tw, uw1, uw2)
+        Fd = Riemann35.kfvs_wall_flux_dev(NTuple{35,Float64}(M), axis, ow, Tw, uw1, uw2)
+        scale = maximum(abs, Fh) + 1e-30
+        # host now DELEGATES, so this is exact -- not "close"
+        @test maximum(abs, collect(Fh) .- collect(Fd)) == 0.0
+
+        Fdiag, _, _ = _kfvs_wall_flux_diagonal(M, axis, ow, Tw, uw1, uw2)
+        worst_diag = max(worst_diag, maximum(abs, collect(Fh) .- collect(Fdiag))/scale)
+    end
+    # The retired diagonal model must remain VISIBLY different on these states; if this ever
+    # drops to roundoff the states have lost their off-diagonals and the test is asleep again.
+    @test worst_diag > 1e-3
+    @info "diagonal-covariance wall model differs from the correlated one by" worst_diag
+end
+
+@testset "host and device wall flux agree" begin
+    # Retained after the host was made a delegating wrapper. It no longer proves two
+    # implementations agree -- there is only one now -- but it pins the WRAPPER: that
+    # kfvs_wall_flux still forwards axis/outward/Tw/uw1/uw2 in the right order and still
+    # returns (F, rho_w, mdot) with F matching the device tuple. A wrapper that silently
+    # transposed two arguments would produce finite, plausible output and break nothing else.
     for axis in 1:3, (T, Tw, uw1, uw2) in ((1.0, 1.0, 0.3, 0.0), (1.0, 1.0, 0.0, 0.3),
                                            (1.3, 1.0, 0.2, 0.4), (0.8, 1.2, -0.3, 0.1))
         M = collect(Float64, InitializeM4_35(1.0, 0.05, -0.02, 0.03, T,0,0, T,0, T))
