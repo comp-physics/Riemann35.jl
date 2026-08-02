@@ -32,7 +32,7 @@ using CUDA, LinearAlgebra
 using Riemann35.Weno5Dev: weno5z
 
 export VGridG, WALL_DV_MAX, wall_dv_ok, dvm_alloc, transport_upwind!, transport_weno5!, dvm_alloc_weno5,
-       transport_walls!, collide!, moments35_field,
+       transport_walls!, transport_walls_weno5!, collide!, moments35_field,
        discrete_maxwellian_host!, wall_pair_host, cellT_from_M,
        # added with the ES-BGK collision and the exact wall fluxes (#47, #48). These were
        # PRESENT but not exported, so `using .DVMBGKGPU` did not bring them into scope --
@@ -270,6 +270,105 @@ function transport_weno5!(f, u1, u2, du, dt, dx, g::VGridG; bc::Symbol = :period
     _weno5_rhs!(du, u2, dx, g, per)
     @. f = (1.0/3.0)*f + (2.0/3.0)*(u2 + dt*du)         # stage 3
     f
+end
+
+# ---------------------------------------------------------------------------------------
+# WALL TRANSPORT — WENO5 + SSP-RK3.  High-order counterpart of `transport_walls!` (#58).
+#
+# WHY. `transport_walls!` is first-order upwind, and it is the path every wall reference in
+# the notes was produced with. First-order smooths a Knudsen layer exactly the way a weak
+# collision model does, so the two are confounded: the DVM's layer deficit could not be
+# attributed to BGK versus to the scheme without a grid study standing in for a direct
+# measurement.
+#
+# WHY IT IS TRACTABLE, which is not obvious from the physics. `f` is discontinuous at
+# v_n = 0 -- but that is a discontinuity in VELOCITY space, and each velocity node advects
+# independently in PHYSICAL space. Per node this is ordinary scalar advection with a
+# Dirichlet inflow, so a standard one-sided/ghost WENO5 applies. The first-order kernel
+# already encodes exactly that BC: at i = 1 with v > 0 its upwind value is `rw[1]*ML`, the
+# wall Maxwellian scaled by rho_w.
+#
+# THE GHOST RULE IS SIGN-DEPENDENT, and getting it backwards silently injects wall
+# material into an outflow:
+#     v > 0 : ghosts to the LEFT  are the wall value rw[1]*ML   (inflow)
+#             ghosts to the RIGHT clamp                          (outflow, zero-gradient)
+#     v < 0 : ghosts to the RIGHT are the wall value rw[2]*MR   (inflow)
+#             ghosts to the LEFT  clamp                          (outflow)
+#
+# AND rho_w IS RESTAGED. `rw` is fixed by the discrete half-flux balance and therefore
+# depends on `f`, so each SSP-RK3 stage recomputes it from that stage's state. Reusing the
+# step-start rho_w would make the boundary condition lag the solution by a stage and quietly
+# cost the order this routine exists to provide.
+function _wall_weno5_rhs_kernel!(du, f, v, n, Nx, invdx, ML, MR, rw)
+    t = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = n * n * n * Nx
+    if t <= N
+        @inbounds begin
+            a = (t - 1) % n + 1;   r = (t - 1) ÷ n
+            b = r % n + 1;         r = r ÷ n
+            c = r % n + 1;         i = r ÷ n + 1
+            s = v[a]
+            if s == 0.0
+                du[a,b,c,i] = 0.0
+            else
+                wl = rw[1]*ML[a,b,c]        # what streams in at the LO wall  (v > 0)
+                wr = rw[2]*MR[a,b,c]        # what streams in at the HI wall  (v < 0)
+                # sample with the sign-dependent ghost rule above
+                g(k) = begin
+                    j = i + k
+                    j < 1  ? (s > 0 ? wl : f[a,b,c,1])  :
+                    j > Nx ? (s < 0 ? wr : f[a,b,c,Nx]) : f[a,b,c,j]
+                end
+                fm3 = g(-3); fm2 = g(-2); fm1 = g(-1); f00 = g(0)
+                fp1 = g(1);  fp2 = g(2);  fp3 = g(3)
+                if s > 0
+                    fr = weno5z(fm2, fm1, f00, fp1, fp2)
+                    fl = weno5z(fm3, fm2, fm1, f00, fp1)
+                else
+                    fr = weno5z(fp3, fp2, fp1, f00, fm1)
+                    fl = weno5z(fp2, fp1, f00, fm1, fm2)
+                end
+                du[a,b,c,i] = -s*(fr - fl)*invdx
+            end
+        end
+    end
+    return nothing
+end
+
+function _wall_weno5_rhs!(du, f, dx, g::VGridG, ML, MR, rw)
+    Nx = size(f, 4); N = g.n^3 * Nx
+    thr = 256; blk = cld(N, thr)
+    @cuda threads=thr blocks=blk _wall_weno5_rhs_kernel!(du, f, g.v, g.n, Nx, 1.0/dx, ML, MR, rw)
+    du
+end
+
+"Recompute rho_w at both walls from the CURRENT state's discrete half-fluxes."
+function _restage_rhow!(rw, inflx, f, g::VGridG, outL::Float64, outR::Float64)
+    Nx = size(f, 4)
+    fill!(inflx, 0.0)
+    @cuda threads=256 blocks=cld(g.n^3, 256) _influx_kernel!(inflx, f, g.v, g.n, Nx, g.dv^3)
+    h = Array(inflx)
+    copyto!(rw, [h[1]/outL, h[2]/outR])
+    (h[1]/outL, h[2]/outR)
+end
+
+"""
+    transport_walls_weno5!(f, u1, u2, du, dt, dx, g, ML, MR, outL, outR, inflx, rw)
+
+WENO5 + SSP-RK3 transport between two diffuse walls — the high-order counterpart of
+`transport_walls!`, which is kept byte-unchanged so published numbers stay reproducible.
+`u1`, `u2`, `du` are scratch shaped like `f` (`dvm_alloc_weno5`). Returns the final
+`(rho_wL, rho_wR)`.
+"""
+function transport_walls_weno5!(f, u1, u2, du, dt, dx, g::VGridG, ML, MR,
+                                outL::Float64, outR::Float64, inflx, rw)
+    _restage_rhow!(rw, inflx, f,  g, outL, outR)
+    _wall_weno5_rhs!(du, f,  dx, g, ML, MR, rw); @. u1 = f + dt*du
+    _restage_rhow!(rw, inflx, u1, g, outL, outR)
+    _wall_weno5_rhs!(du, u1, dx, g, ML, MR, rw); @. u2 = 0.75*f + 0.25*(u1 + dt*du)
+    r = _restage_rhow!(rw, inflx, u2, g, outL, outR)
+    _wall_weno5_rhs!(du, u2, dx, g, ML, MR, rw); @. f = (1.0/3.0)*f + (2.0/3.0)*(u2 + dt*du)
+    r
 end
 
 "Scratch for `transport_weno5!`: three arrays shaped like `f`."
