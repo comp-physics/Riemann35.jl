@@ -195,6 +195,11 @@ include("numerics/reconstruction.jl")
 include("realizability/realizability.jl")
 include("realizability/edge_corner_correction.jl")
 include("realizability/realizability_oracle.jl")
+# Diagnostic only: when the projection fires, which principal minor failed, how far it moved
+# the moments. Requested independently by R.O. Fox (2026-08-02) and JCP Reviewer #3.
+include("realizability/projection_diagnostics.jl")
+using .ProjectionDiagnostics: delta2star_matrix, leading_minors, projection_report
+export delta2star_matrix, leading_minors, projection_report
 
 # Numerics
 include("numerics/small_eig.jl")

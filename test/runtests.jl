@@ -73,6 +73,7 @@ const TOL = 1e-10
         include("test_kfvs_wall.jl")             # the wall must conserve mass exactly (#36)
         include("test_wall_tangential_convention.jl")  # uw1->t1, uw2->t2 (see header)
         include("test_correlated_states.jl")   # off-diagonal subspace must be excited
+        include("test_projection_diagnostics.jl")  # when the projection fires, and which minor failed
 
         # θ*-IDP limiter goldens — pins BOTH the bisection baseline (frozen,
         # bit-for-bit fallback guard via theta_closed=false) and the closed-form
