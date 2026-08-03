@@ -126,6 +126,15 @@ include("moments/chyqmom_nodes_3d.jl")
 # chyqmom_nodes_3d was written to unblock. Fixes the wall mass leak (#36) exactly.
 # DEVICE FIRST: KfvsWall.kfvs_wall_flux is a thin wrapper over
 # KfvsWallDev.kfvs_wall_flux_full_dev, so the device module must already exist.
+# Correlated ES-BGK equilibrium (#71). Device-safe scalar core, shared verbatim by the GPU
+# kernel (gpu/dvm_bgk_gpu.jl) and the CPU path (collide_es_cpu!) -- device is the source, the
+# host wraps it, never the reverse.
+include("numerics/es_gaussian.jl")
+using .ESGaussian: sym3_inv, es_kappa, es_lambda, es_seed, es_refine, es_logw
+export sym3_inv, es_kappa, es_lambda, es_seed, es_refine, es_logw
+include("numerics/es_collide.jl")
+using .ESCollide: collide_es_cpu!
+export collide_es_cpu!
 include("numerics/kfvs_wall_dev.jl")
 include("numerics/kfvs_wall.jl")
 using .KfvsWallDev: kfvs_wall_flux_dev
