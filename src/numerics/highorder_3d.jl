@@ -505,10 +505,38 @@ end
 # and the per-cell `if _PROJ_COUNT_ENABLED[]` costs one Ref dereference + a
 # predictably-false branch — zero allocation, no extra function calls.
 # ---------------------------------------------------------------------------
-const _PROJ_COUNT_ENABLED = Ref{Bool}(
-    get(ENV, "HYQMOM_PROJ_COUNT", "0") != "0"
-)
+const _PROJ_COUNT_ENABLED = Ref{Bool}(false)
 const _PROJ_CORRECTIONS   = Ref{Int}(0)
+
+"""
+    _init_proj_counter!()
+
+Read `HYQMOM_PROJ_COUNT` into `_PROJ_COUNT_ENABLED`. Called from the package `__init__`, which
+is the only place it CAN be called correctly.
+
+This initialiser previously ran at the `const` definition above, i.e. during PRECOMPILATION.
+The env var is not set then, so `false` was baked into the precompile cache and setting
+`HYQMOM_PROJ_COUNT=1` at runtime did nothing at all -- the documented way to turn the counter
+on was silently inert, and every diagnostic that used it reported zero firings. That reads
+identically to "the projection never fires", which is exactly the conclusion the counter exists
+to support or refute (JCP Reviewer #3's request, and R.O. Fox's of 2026-08-02).
+
+Caught by a positive control: a deliberately unrealizable state (S220 = 5 against a bound of 3)
+produced zero firings. A counter that only ever reads zero is indistinguishable from a broken
+one, which is why the control exists and why it runs before any zero is trusted.
+"""
+_init_proj_counter!() = (_PROJ_COUNT_ENABLED[] = get(ENV, "HYQMOM_PROJ_COUNT", "0") != "0"; nothing)
+
+"""
+    set_proj_counting!(on::Bool)
+
+Turn projection counting on or off at runtime, independent of the environment variable. Useful
+in drivers that want the counter for one phase of a run and not another.
+"""
+set_proj_counting!(on::Bool) = (_PROJ_COUNT_ENABLED[] = on; nothing)
+
+"proj_counting_enabled() -> Bool -- whether firings are actually being counted."
+proj_counting_enabled() = _PROJ_COUNT_ENABLED[]
 
 """
     reset_proj_counter!()
@@ -528,7 +556,31 @@ before `_project_interior!` corrected them).  Only meaningful when
 """
 proj_correction_count() = _PROJ_CORRECTIONS[]
 
+"""
+    _PROJ_ENABLED
+
+DIAGNOSTIC ONLY. Defaults to `true`; when false, `_project_interior!` becomes a no-op.
+
+This exists to answer one question: in the Fox-contact ladder the heat flux stops converging at
+Kn=0.8, and the projection fires 0 times at Kn=0.2 (where it converges cleanly) rising to
+1.13/step at Kn=0.8 (where it does not). So the Knudsen ceiling might be OUR realizability
+enforcement rather than fourth-order truncation -- a fixable engineering problem rather than a
+property of the closure. Those are different conclusions and the only way to separate them is to
+run with the projection off and see whether the plateau lifts.
+
+Turning it off is expected to be UNSAFE on hard states -- that is what it is for. A run that
+blows up is itself informative; a run that completes and still plateaus exonerates the
+projection.
+"""
+const _PROJ_ENABLED = Ref(true)
+
+"set_projection!(on) -- diagnostic switch for the realizability projection. See `_PROJ_ENABLED`."
+set_projection!(on::Bool) = (_PROJ_ENABLED[] = on; nothing)
+"projection_enabled() -> Bool"
+projection_enabled() = _PROJ_ENABLED[]
+
 function _project_interior!(M, nx,ny,nz,halo, Ma, s3max = 4.0 + abs(Ma) / 2.0)
+    _PROJ_ENABLED[] || return M     # diagnostic no-op; default path never takes this branch
     if _PROJ_COUNT_ENABLED[]
         for k in 1:nz, j in 1:ny, i in 1:nx
             ih=i+halo; jh=j+halo
