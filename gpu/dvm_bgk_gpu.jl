@@ -1,4 +1,5 @@
 module DVMBGKGPU
+using Riemann35: es_kappa, es_lambda, es_seed, es_refine, es_logw
 # dvm_bgk_gpu.jl — THE DVM GROUND TRUTH ON THE GPU.
 #
 # WHY. The DVM is the reference every wall result is measured against, and it had become the
@@ -769,103 +770,170 @@ moments are consistent with a Gaussian -- so this typically converges in 2-3 ite
 end
 
 function _collide_es_kernel!(f, v, n, Nx, dv3, dt, Kn, Pr, omega, iters::Int32, tol)
+    # CORRELATED ES equilibrium (issue #71). The previous version fitted three INDEPENDENT 1D
+    # Gaussians and multiplied them; a product of 1D Gaussians has a strictly DIAGONAL
+    # covariance, so the equilibrium carried sigma_xy = 0 and the update degenerated to
+    # sigma_xy*exp(-Pr*y). Shear stress then relaxed at Pr/tau while diagonal stress relaxed
+    # at 1/tau -- measured 0.666667 vs 1.000000 at Pr = 2/3, both fits R2 = 1.00000.
+    #
+    # Every line of arithmetic here is `ESGaussian`, called verbatim by the CPU path
+    # `ESCollide.collide_es_cpu!`. The ONLY unshared part is the moment reduction: block-wide
+    # in shared memory here, a serial loop there. That is the one thing that genuinely cannot
+    # be shared, and it is deliberately the only thing that is not -- per PR #72's rule, the
+    # device-safe core is the source and both callers wrap it.
+    #
+    # sa layout: 1-3 b | 4-9 C | 10-15 Lambda(target) | 16 rho or -1 | 17-19 u | 20 e
     i = blockIdx().x
     tid = threadIdx().x
     nt = blockDim().x
-    sh = CUDA.CuDynamicSharedArray(Float64, 7*nt)
-    sa = CUDA.CuDynamicSharedArray(Float64, 8, 7*nt*sizeof(Float64))
+    sh = CUDA.CuDynamicSharedArray(Float64, 10*nt)
+    sa = CUDA.CuDynamicSharedArray(Float64, 20, 10*nt*sizeof(Float64))
     npts = n*n*n
 
-    # ---- ONE reduction: rho, rho*u (3), and <v_i^2> (3) -- exactly the inputs needed ----
-    m0=0.0; m1=0.0; m2=0.0; m3=0.0; m4=0.0; m5=0.0; m6=0.0
+    # ---- reduction 1: rho, rho*u (3), and the FULL second-moment tensor (6) ---------------
+    m0=0.0; m1=0.0; m2=0.0; m3=0.0
+    m4=0.0; m5=0.0; m6=0.0; m7=0.0; m8=0.0; m9=0.0
     @inbounds for t in tid:nt:npts
         a = (t-1) % n + 1; r = (t-1) ÷ n
         b = r % n + 1;     c = r ÷ n + 1
         vx = v[a]; vy = v[b]; vz = v[c]
         w = f[a,b,c,i]*dv3
         m0 += w; m1 += w*vx; m2 += w*vy; m3 += w*vz
-        m4 += w*vx*vx; m5 += w*vy*vy; m6 += w*vz*vz
+        m4 += w*vx*vx; m5 += w*vx*vy; m6 += w*vx*vz
+        m7 += w*vy*vy; m8 += w*vy*vz; m9 += w*vz*vz
     end
     @inbounds begin
-        sh[tid]=m0; sh[nt+tid]=m1; sh[2nt+tid]=m2; sh[3nt+tid]=m3
-        sh[4nt+tid]=m4; sh[5nt+tid]=m5; sh[6nt+tid]=m6
+        sh[tid]=m0; sh[nt+tid]=m1; sh[2nt+tid]=m2; sh[3nt+tid]=m3; sh[4nt+tid]=m4
+        sh[5nt+tid]=m5; sh[6nt+tid]=m6; sh[7nt+tid]=m7; sh[8nt+tid]=m8; sh[9nt+tid]=m9
     end
     sync_threads()
     s = nt >> 1
     while s > 0
         if tid <= s
-            @inbounds for q in 0:6; sh[q*nt+tid] += sh[q*nt+tid+s]; end
+            @inbounds for q in 0:9; sh[q*nt+tid] += sh[q*nt+tid+s]; end
         end
         sync_threads(); s >>= 1
     end
 
-    # ---- thread 1: the anisotropic target, then three independent 2x2 fits -------------
     @inbounds if tid == 1
+        sa[16] = -1.0
         rho = sh[1]
         if rho > 0.0
             ux = sh[nt+1]/rho; uy = sh[2nt+1]/rho; uz = sh[3nt+1]/rho
-            cxx = sh[4nt+1]/rho - ux*ux
-            cyy = sh[5nt+1]/rho - uy*uy
-            czz = sh[6nt+1]/rho - uz*uz
+            cxx = sh[4nt+1]/rho - ux*ux; cxy = sh[5nt+1]/rho - ux*uy
+            cxz = sh[6nt+1]/rho - ux*uz; cyy = sh[7nt+1]/rho - uy*uy
+            cyz = sh[8nt+1]/rho - uy*uz; czz = sh[9nt+1]/rho - uz*uz
             Theta = (cxx + cyy + czz)/3
             Theta = Theta > 1e-14 ? Theta : 1e-14
             tau = (Kn/2)*Theta^(omega - 1.0)/rho
             y = dt/tau
             if y > 0.0
-                k = _kappa_es(Pr, y)
-                lxx = max((1-k)*Theta + k*cxx, 1e-14)
-                lyy = max((1-k)*Theta + k*cyy, 1e-14)
-                lzz = max((1-k)*Theta + k*czz, 1e-14)
-                bx, cx, _ = _fit_axis(v, n, ux, lxx + ux*ux, ux/lxx, -1/(2lxx), Int(iters), tol)
-                by, cy, _ = _fit_axis(v, n, uy, lyy + uy*uy, uy/lyy, -1/(2lyy), Int(iters), tol)
-                bz, cz, _ = _fit_axis(v, n, uz, lzz + uz*uz, uz/lzz, -1/(2lzz), Int(iters), tol)
-                # normalisation: A * Gx*Gy*Gz * dv^3 = rho
-                Gx = 0.0; Gy = 0.0; Gz = 0.0
-                for a in 1:n
-                    vv = v[a]
-                    Gx += exp(bx*vv + cx*vv*vv)
-                    Gy += exp(by*vv + cy*vv*vv)
-                    Gz += exp(bz*vv + cz*vv*vv)
+                k = es_kappa(Pr, y)
+                l11,l12,l13,l22,l23,l33 = es_lambda(k, Theta, cxx, cyy, czz, cxy, cxz, cyz)
+                b1,b2,b3,d11,d12,d13,d22,d23,d33,ok =
+                    es_seed(l11,l12,l13,l22,l23,l33, ux,uy,uz)
+                if ok
+                    sa[1]=b1; sa[2]=b2; sa[3]=b3
+                    sa[4]=d11; sa[5]=d12; sa[6]=d13; sa[7]=d22; sa[8]=d23; sa[9]=d33
+                    sa[10]=l11; sa[11]=l12; sa[12]=l13; sa[13]=l22; sa[14]=l23; sa[15]=l33
+                    sa[17]=ux; sa[18]=uy; sa[19]=uz; sa[20]=exp(-Pr*y)
+                    sa[16]=rho
                 end
-                sa[1] = rho/(Gx*Gy*Gz*dv3)
-                sa[2] = bx; sa[3] = cx; sa[4] = by
-                sa[5] = cy; sa[6] = bz; sa[7] = cz
-                sa[8] = exp(-Pr*y)          # NB Pr*y, not y -- the ES-BGK relaxation rate
-            else
-                sa[1] = -1.0
             end
-        else
-            sa[1] = -1.0
         end
     end
     sync_threads()
+    @inbounds (sa[16] >= 0.0) || return
 
-    @inbounds if sa[1] >= 0.0
-        A = sa[1]; bx = sa[2]; cx = sa[3]; by = sa[4]
-        cy = sa[5]; bz = sa[6]; cz = sa[7]; e = sa[8]
+    # ---- fixed-point refinement, block-parallel --------------------------------------------
+    # The seed is already the continuum answer, so this only removes the grid's own moment
+    # error -- a couple of passes where a cold-started Newton needed forty. Each pass is one
+    # block-wide reduction of the same ten moments, which is what makes the correlated form
+    # affordable: no third- or fourth-order sums, no 9x9 solve, just two 3x3 inverses.
+    @inbounds for _ in 1:iters
+        b1=sa[1]; b2=sa[2]; b3=sa[3]
+        d11=sa[4]; d12=sa[5]; d13=sa[6]; d22=sa[7]; d23=sa[8]; d33=sa[9]
+        t0=0.0; t1=0.0; t2=0.0; t3=0.0; t4=0.0; t5=0.0; t6=0.0; t7=0.0; t8=0.0; t9=0.0
         for t in tid:nt:npts
             a = (t-1) % n + 1; r = (t-1) ÷ n
             b = r % n + 1;     c = r ÷ n + 1
             vx = v[a]; vy = v[b]; vz = v[c]
-            feq = A*exp(bx*vx + cx*vx*vx)*exp(by*vy + cy*vy*vy)*exp(bz*vz + cz*vz*vz)
+            w = exp(es_logw(vx, vy, vz, b1, b2, b3, d11, d12, d13, d22, d23, d33))
+            t0 += w; t1 += w*vx; t2 += w*vy; t3 += w*vz
+            t4 += w*vx*vx; t5 += w*vx*vy; t6 += w*vx*vz
+            t7 += w*vy*vy; t8 += w*vy*vz; t9 += w*vz*vz
+        end
+        sh[tid]=t0; sh[nt+tid]=t1; sh[2nt+tid]=t2; sh[3nt+tid]=t3; sh[4nt+tid]=t4
+        sh[5nt+tid]=t5; sh[6nt+tid]=t6; sh[7nt+tid]=t7; sh[8nt+tid]=t8; sh[9nt+tid]=t9
+        sync_threads()
+        s2 = nt >> 1
+        while s2 > 0
+            if tid <= s2
+                for q in 0:9; sh[q*nt+tid] += sh[q*nt+tid+s2]; end
+            end
+            sync_threads(); s2 >>= 1
+        end
+        if tid == 1
+            s0 = sh[1]
+            if s0 > 0.0 && isfinite(s0)
+                e1 = sh[nt+1]/s0; e2 = sh[2nt+1]/s0; e3 = sh[3nt+1]/s0
+                a11 = sh[4nt+1]/s0 - e1*e1; a12 = sh[5nt+1]/s0 - e1*e2
+                a13 = sh[6nt+1]/s0 - e1*e3; a22 = sh[7nt+1]/s0 - e2*e2
+                a23 = sh[8nt+1]/s0 - e2*e3; a33 = sh[9nt+1]/s0 - e3*e3
+                l11=sa[10]; l12=sa[11]; l13=sa[12]; l22=sa[13]; l23=sa[14]; l33=sa[15]
+                err = abs(e1-sa[17])+abs(e2-sa[18])+abs(e3-sa[19])+
+                      abs(a11-l11)+abs(a12-l12)+abs(a13-l13)+
+                      abs(a22-l22)+abs(a23-l23)+abs(a33-l33)
+                if err >= tol
+                    nb1,nb2,nb3,n11,n12,n13,n22,n23,n33,ok2 =
+                        es_refine(sa[1],sa[2],sa[3], sa[4],sa[5],sa[6],sa[7],sa[8],sa[9],
+                                  e1,e2,e3, a11,a12,a13,a22,a23,a33,
+                                  sa[17],sa[18],sa[19], l11,l12,l13,l22,l23,l33)
+                    if ok2
+                        sa[1]=nb1; sa[2]=nb2; sa[3]=nb3
+                        sa[4]=n11; sa[5]=n12; sa[6]=n13; sa[7]=n22; sa[8]=n23; sa[9]=n33
+                    end
+                end
+            end
+        end
+        sync_threads()
+    end
+
+    # ---- normalise, then apply  f <- feq + (f - feq) e --------------------------------------
+    @inbounds begin
+        b1=sa[1]; b2=sa[2]; b3=sa[3]
+        d11=sa[4]; d12=sa[5]; d13=sa[6]; d22=sa[7]; d23=sa[8]; d33=sa[9]
+        z = 0.0
+        for t in tid:nt:npts
+            a = (t-1) % n + 1; r = (t-1) ÷ n
+            b = r % n + 1;     c = r ÷ n + 1
+            z += exp(es_logw(v[a], v[b], v[c], b1, b2, b3, d11, d12, d13, d22, d23, d33))
+        end
+        sh[tid] = z
+        sync_threads()
+        s3 = nt >> 1
+        while s3 > 0
+            (tid <= s3) && (sh[tid] += sh[tid+s3])
+            sync_threads(); s3 >>= 1
+        end
+        Z = sh[1]
+        ((Z > 0.0) & isfinite(Z)) || return
+        A = sa[16]/(Z*dv3)
+        e = sa[20]
+        for t in tid:nt:npts
+            a = (t-1) % n + 1; r = (t-1) ÷ n
+            b = r % n + 1;     c = r ÷ n + 1
+            feq = A*exp(es_logw(v[a], v[b], v[c], b1, b2, b3, d11, d12, d13, d22, d23, d33))
             f[a,b,c,i] = feq + (f[a,b,c,i] - feq)*e
         end
     end
-    return nothing
+    return
 end
 
-"""
-    collide_es!(f, g, dt, Kn, Pr, omega; ...)
-
-ES-BGK collision on every cell. `Pr = 1` reduces to BGK exactly (kappa == 0 makes the target
-isotropic), which `validate_dvm_esbgk_gpu.jl` uses as its first gate. `tau` is computed per
-cell from the local Theta and rho with the VHS exponent `omega`, matching the moment solver's
-convention rather than taking a fixed tau -- so a closure comparison differs only in the flux.
-"""
 function collide_es!(f, g::VGridG, dt, Kn, Pr, omega;
                      iters::Int = 40, tol = 1e-14, threads::Int = 128)
     Nx = size(f, 4)
-    shmem = (7*threads + 8)*sizeof(Float64)
+    shmem = (10*threads + 20)*sizeof(Float64)
     @cuda threads=threads blocks=Nx shmem=shmem _collide_es_kernel!(
         f, g.v, g.n, Nx, g.dv^3, Float64(dt), Float64(Kn), Float64(Pr), Float64(omega),
         Int32(iters), Float64(tol))

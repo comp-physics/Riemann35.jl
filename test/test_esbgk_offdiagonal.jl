@@ -115,5 +115,22 @@ else
     @test isapprox(m1, m0; rtol = 1e-12)
     @test isapprox(e1, e0; rtol = 1e-10)
     @test all(F .>= 0.0)                      # positivity: the fit must not manufacture f < 0
+
+    # ---- GPU and CPU run the SAME core, so they must agree -------------------------------
+    # ESGaussian is called verbatim by both; only the moment reduction differs (block-wide
+    # shared memory vs a serial loop). Exact equality is not expected -- a tree reduction and
+    # a serial sum add in different orders -- but anything beyond round-off means the two
+    # have drifted, which is the failure this whole day has been about.
+    for Pr in (1.0, 2/3)
+        fg = CuArray(reshape(copy(h), nv, nv, nv, 1))
+        fc = reshape(copy(h), nv, nv, nv, 1)
+        for _ in 1:10
+            DVMBGKGPU.collide_es!(fg, g, dt, 2*tau, Pr, 1.0)
+            collide_es_cpu!(fc, collect(vh), g.dv, dt, 2*tau, Pr, 1.0)
+        end
+        G = Array(fg)
+        scale = maximum(abs, G) + 1e-300
+        @test maximum(abs, G .- fc)/scale < 1e-9
+    end
 end
 end
