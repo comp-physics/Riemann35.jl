@@ -44,7 +44,7 @@ include(joinpath(@__DIR__, "residual3d_order3_gpu.jl"))
 using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
 # the package's single instances, not nested copies
 using Riemann35.RealizeDev: realizable_3D_M4_dev
-using Riemann35.ReconDev: bgk_relax_tup, _recon_centrals, _c4tom4_35, _EPSF
+using Riemann35.ReconDev: bgk_relax_tup, granular_drain_tup, _recon_centrals, _c4tom4_35, _EPSF
 using Riemann35.WallGhostDev: wall_ghost_tup
 using Riemann35: body_force_shift_dev
 
@@ -459,6 +459,38 @@ function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::F
     return nothing
 end
 
+# GRANULAR: inelastic energy drain (Brey-Moreno-Dufty granular BGK), operator-split once per
+# step. `granular_drain_tup` is shared verbatim with `test/probe_granular_haff.jl`, so the
+# marched solver and the 0D probe cannot disagree about the model.
+#
+# zeta = (1-e^2)/(3 tau_c) with tau_c ~ tau_ref*sqrt(T0/T): the hard-sphere collision frequency
+# grows as sqrt(T), which is what makes Haff's law algebraic (T ~ t^-2) instead of exponential.
+# A fitted exponent near -1 means that T-dependence has been lost.
+function _granular_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64, erest::Float64)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nx * ny * nz
+        @inbounds begin
+            i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
+            j = r % ny + 1;         k = r ÷ ny + 1
+            ga = g + i; gb = g + j; gc = g + k
+            rho = G[1, ga, gb, gc]
+            if rho > 0.0
+                ux = G[2, ga, gb, gc]/rho; uy = G[6, ga, gb, gc]/rho; uz = G[16, ga, gb, gc]/rho
+                T = (G[3, ga, gb, gc]/rho - ux*ux + G[10, ga, gb, gc]/rho - uy*uy +
+                     G[20, ga, gb, gc]/rho - uz*uz)/3
+                if T > 0.0
+                    tau_c = (kn/2)*sqrt(1.0/T)
+                    zeta = (1.0 - erest*erest)/(3.0*tau_c)
+                    C = ntuple(m -> G[m, ga, gb, gc], Val(35))
+                    out = granular_drain_tup(C, exp(-zeta*dt/2))
+                    for m in 1:35; G[m, ga, gb, gc] = out[m]; end
+                end
+            end
+        end
+    end
+    return nothing
+end
+
 # per-interior-cell CFL speed (mirrors the order-2 `_speed_box_kernel!`).
 function _speed_interior!(svec, G, nx::Int, ny::Int, nz::Int, g::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -600,7 +632,7 @@ in place and left with its outflow halos refilled.
 """
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                             stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
+                             stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false, restitution::Real = 1.0,
                              reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
                              wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
@@ -623,7 +655,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     @assert min(nx, ny, nz) >= 1 "interior extents nx,ny,nz = nf-2g must be ≥ 1 (got $nx,$ny,$nz)"
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
-    prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
+    prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact); eres = Float64(restitution)
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     # nothing => hi face matches lo, i.e. the isothermal wall, bit-for-bit as before
     wTwH = wall_Tw_hi === nothing ? wTw : Float64(wall_Tw_hi)
@@ -736,6 +768,18 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                 @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe)
             end
         end
+        # GRANULAR inelastic cooling, ONCE PER STEP after the RK stages -- the same
+        # operator-split placement as the body force below, and for the same reason: it is an
+        # exact velocity-space rescaling, not a flux contribution.
+        #
+        # It was FIRST placed inside the RK stage loop next to `_bgk_interior!`, which applied
+        # it three times per step with the full dt. The Haff gate caught that immediately:
+        # fitted exponent -2.88 instead of -2, temperature 44-68% low. Mass and momentum were
+        # still exact, so only a test that checks the RATE rather than the invariants would
+        # have found it.
+        if eres < 1.0
+            @cuda threads=threads blocks=bint _granular_interior!(G, nx, ny, nz, g, dt, knf, eres)
+        end
         # Uniform body force, once per step after the RK stages -- the same
         # operator-split placement `apply_body_force!` has in the CPU channel probes.
         # Exact (velocity-space translation), and a no-op when g == 0.
@@ -825,7 +869,7 @@ unless `dts` is supplied. Returns the dt vector used. `Mi` is updated in place.
 """
 function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer, comm;
                                   dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
-                                  stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false,
+                                  stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false, restitution::Real = 1.0,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0, threads::Int = 128,
                                   theta_closed::Bool = true)
     rank = MPI.Comm_rank(comm); nranks = MPI.Comm_size(comm)
@@ -843,7 +887,7 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
             zlo = rank > 0, zhi = rank < nranks - 1)
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
-    prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact)
+    prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact); eres = Float64(restitution)
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     dts_host = dts === nothing ? nothing : Float64.(collect(dts))
 
