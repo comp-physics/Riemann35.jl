@@ -196,18 +196,39 @@ C101 = M[17]/rho - u*w
 C011 = M[26]/rho - v*w
 ```
 
-### Trap: do not use `InitializeM4_35`
+### ~~Trap: do not use `InitializeM4_35`~~ — RETRACTED (2026-08-03)
 
-`InitializeM4_35` hardcodes the *independent*-Gaussian standardized moments
-(`S220=1`, `S310=0`, ...) while accepting a full covariance including
-off-diagonals. It is therefore a true Gaussian **only when the covariance is
-diagonal**. This is harmless today — every IC passes `r110=r101=r011=0` (see
-`src/initial_conditions.jl:59,105,154`) — but routing an anisotropic ES target
-through it would silently produce a non-Gaussian target with the wrong
-fourth-order moments. Build the target via `from_recon_vars_dev` with the
-Isserlis values above.
+> **This subsection was wrong.** It claimed `InitializeM4_35` hardcodes the
+> *independent*-Gaussian standardized moments (`S220=1`, `S310=0`, ...) while
+> accepting a full covariance, and is therefore a true Gaussian "only when the
+> covariance is diagonal". Rodney Fox pointed out the missing step: those literals
+> are not applied by rescaling. `InitializeM4_35` routes them through
+> `S4toC4_3D_r`, which forms `A = sqrtm(C2)` and applies the change of variables
+> `v = A*xi`. Handing it the isotropic standardized set is handing it
+> `xi ~ N(0,I)`, so the output is `v ~ N(0,C2)` exactly — correlated fourth-order
+> moments included.
+>
+> Measured, not argued: every central moment against Isserlis applied straight to
+> the covariance matrix, over five covariances spanning diagonal to strongly
+> correlated (`r` up to 0.85), agrees to `~1e-14`. Pinned in
+> `test/test_correlated_states.jl`.
+>
+> The suffix is the whole distinction. `S4toC4_3D` **without** the `_r` does only
+> rescale by the marginal standard deviations, and is the function the retracted
+> claim actually describes.
 
-Add a comment to `InitializeM4_35` recording this limitation.
+**What survives.** The Isserlis table above is still correct, and the ES-BGK
+operator still builds its target through `from_recon_vars_dev` rather than calling
+`InitializeM4_35`. But the reason is now performance, not correctness: the closed
+forms need no matrix square root, which matters inside a device kernel, and they
+collapse to the hardcoded literals at `r1=r2=r3=0` so the `Pr=1` path stays bitwise
+identical. Both routes produce the same Gaussian.
+
+**What this cost.** The retracted claim is a mirror image of issues #71/#72: those
+were code that silently assumed a diagonal covariance, this was documentation that
+falsely accused correct code of the same thing. Both survived because nothing
+compared a correlated construction against an independent reference. The test added
+alongside this retraction is that comparison.
 
 ---
 

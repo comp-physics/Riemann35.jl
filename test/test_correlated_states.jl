@@ -31,6 +31,101 @@ function _corr_state(f::Float64; rho = 1.0, T = 1.0)
     collect(Float64, InitializeM4_35(rho, 0.15, -0.1, 0.08, T, c110, c101, T, c011, T))
 end
 
+"""
+Central moments of a zero-mean Gaussian with covariance `S`, straight from Isserlis
+(`E[xi xj xk xl] = sij*skl + sik*sjl + sil*sjk`), packed in the 35-vector ordering.
+Shares no code path with `S4toC4_3D_r`, which is what makes the comparison meaningful.
+"""
+function _isserlis_central(S)
+    s(i, j) = S[i, j]
+    C = zeros(35)
+    C[1] = 1.0
+    C[3] = s(1,1); C[7]  = s(1,2); C[17] = s(1,3)
+    C[10] = s(2,2); C[26] = s(2,3); C[20] = s(3,3)
+    # 3rd order is identically zero for a Gaussian; leave it.
+    C[5]  = 3*s(1,1)^2                       # C400
+    C[9]  = 3*s(1,1)*s(1,2)                  # C310
+    C[19] = 3*s(1,1)*s(1,3)                  # C301
+    C[12] = s(1,1)*s(2,2) + 2*s(1,2)^2       # C220
+    C[28] = s(1,1)*s(2,3) + 2*s(1,2)*s(1,3)  # C211
+    C[22] = s(1,1)*s(3,3) + 2*s(1,3)^2       # C202
+    C[14] = 3*s(2,2)*s(1,2)                  # C130
+    C[30] = s(2,2)*s(1,3) + 2*s(1,2)*s(2,3)  # C121
+    C[33] = s(3,3)*s(1,2) + 2*s(1,3)*s(2,3)  # C112
+    C[24] = 3*s(3,3)*s(1,3)                  # C103
+    C[15] = 3*s(2,2)^2                       # C040
+    C[31] = 3*s(2,2)*s(2,3)                  # C031
+    C[35] = s(2,2)*s(3,3) + 2*s(2,3)^2       # C022
+    C[34] = 3*s(3,3)*s(2,3)                  # C013
+    C[25] = 3*s(3,3)^2                       # C004
+    C
+end
+
+# ---------------------------------------------------------------------------------------
+# InitializeM4_35 IS a correlated Gaussian -- the counterpart to the bugs above.
+#
+# The file header lists three places where correlation was silently dropped. This testset
+# records the mirror-image error: documentation that accused CORRECT code of the same
+# thing. `InitializeM4_35` passes the isotropic standardized moments (S400=3, S220=1, rest
+# 0) to `S4toC4_3D_r`, which looks like an independent-Gaussian construction and was
+# written up as one. It is not: `S4toC4_3D_r` forms `A = sqrtm(C2)` and applies the change
+# of variables `v = A*xi`, so the isotropic set means `xi ~ N(0,I)` and the output is
+# exactly `v ~ N(0,C2)`. (`S4toC4_3D`, no `_r`, is the pure rescale the old warning
+# described -- but nothing calls it here.) Rodney Fox caught the error on 2026-08-03.
+#
+# Both failure directions cost the same thing, so both get the same fix: compare a
+# correlated construction against an INDEPENDENT reference. Isserlis is that reference.
+# ---------------------------------------------------------------------------------------
+@testset "InitializeM4_35 is Gaussian for correlated covariance too" begin
+    cases = (
+        ("diagonal", [1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0]),
+        ("weak",     [1.0 0.10 0.05; 0.10 1.0 -0.08; 0.05 -0.08 1.0]),
+        ("strong",   [1.0 0.30 0.22; 0.30 1.0 -0.26; 0.22 -0.26 1.0]),
+        ("aniso",    [2.0 0.55 -0.40; 0.55 0.8 0.19; -0.40 0.19 1.7]),
+        ("stiff",    [1.0 0.85 0.10; 0.85 1.0 0.10; 0.10 0.10 0.5]),
+    )
+    for (name, S) in cases
+        @test minimum(eigvals(S)) > 0            # a non-PD case would test nothing
+        M = InitializeM4_35(1.0, 0.15, -0.1, 0.08,
+                            S[1,1], S[1,2], S[1,3], S[2,2], S[2,3], S[3,3])
+        Cnum, _ = M2CS4_35(collect(Float64, M))
+        Cref = _isserlis_central(S)
+        # absolute floor on the scale: most 3rd-order entries are exact zeros
+        worst = maximum(abs(Cnum[i] - Cref[i]) / max(abs(Cref[i]), 1e-3) for i in 2:35)
+        @test worst < 1e-12
+    end
+
+    # ---- the tolerance above must be able to SEE the defect it rules out ---------------
+    # Otherwise this testset is the same kind of vacuous pass the file header is about.
+    # `_plain_rescale_central` is the MATLAB `S4toC4_3D` semantics -- the routine the
+    # retracted warning actually described: standardized moments scaled by the marginal
+    # standard deviations, with no change of variables. Feeding it the isotropic set
+    # leaves every 4th-order cross moment at its independent-Gaussian value, so it
+    # disagrees with Isserlis by exactly the correlation terms (C220 short by 2*C110^2,
+    # C310 short by 3*C200*C110, ...). Asserting that gap is large is what proves the
+    # `< 1e-12` gate above is discriminating rather than merely satisfiable.
+    function _plain_rescale_central(S)
+        sx = sqrt(S[1,1]); sy = sqrt(S[2,2]); sz = sqrt(S[3,3])
+        C = zeros(35)
+        C[1] = 1.0
+        C[3] = S[1,1]; C[7]  = S[1,2]; C[17] = S[1,3]
+        C[10] = S[2,2]; C[26] = S[2,3]; C[20] = S[3,3]
+        # isotropic standardized 4th order: S400=S040=S004=3, S220=S202=S022=1, rest 0
+        C[5]  = 3*sx^4; C[15] = 3*sy^4; C[25] = 3*sz^4
+        C[12] = sx^2*sy^2; C[22] = sx^2*sz^2; C[35] = sy^2*sz^2
+        C   # every other entry stays 0 -- that is the whole defect
+    end
+
+    for (name, S) in cases
+        gap = maximum(abs(_isserlis_central(S)[i] - _plain_rescale_central(S)[i]) for i in 2:35)
+        if name == "diagonal"
+            @test gap < 1e-14        # the two routines agree exactly when C is diagonal
+        else
+            @test gap > 1e-2         # ...and diverge grossly the moment it is not
+        end
+    end
+end
+
 @testset "correlated states: tensor-consuming paths" begin
     M0 = _corr_state(0.0)     # diagonal, i.e. what the rest of the suite uses
     Mc = _corr_state(1.0)     # correlated
