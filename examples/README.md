@@ -342,3 +342,33 @@ Snapshots land in `output/runs/`, with a browser-viewable bundle auto-exported t
 `output/viz/` (see `output/viz/README.md`). Outer boundaries are copy/extrapolation;
 keep `tmax` small enough that disturbances stay interior. The automated
 exact-solution gate lives in `test/test_rodney_cases.jl`.
+
+
+## Granular flow and correlated ES-BGK (`granular_and_esbgk.jl`)
+
+```bash
+julia --project=. examples/granular_and_esbgk.jl        # CPU only, ~1 minute
+```
+
+Demonstrates the two capabilities added 2026-08-03, both checked against a closed form
+rather than against another run of the same code:
+
+1. **`collide_es_cpu!`** — ES-BGK with a **correlated** equilibrium (#73). The equilibrium
+   used to be a product of three 1D Gaussians, which has a strictly diagonal covariance and
+   so could not carry `Lambda`'s off-diagonal entries; shear stress relaxed at `Pr/tau` while
+   diagonal stress relaxed at `1/tau`. The example measures both rates and asserts they
+   match — a **rate**, deliberately, because mass, momentum, energy and the `Pr=1` limit were
+   all satisfied by the broken version.
+
+   This path is also why ES-BGK is now testable without a GPU. It was GPU-only, so CI could
+   never exercise it, which is part of how the bug survived.
+
+2. **`granular_drain_tup`** — inelastic energy drain (#75), gated by Haff's law
+   `T(t) = T0/(1 + t/t0)^2`. The fitted exponent must approach `-2`; `e=1` must hold `T`
+   exactly constant; mass and momentum must not move for any `e`, since only energy may
+   leave an inelastic collision.
+
+   On the GPU the same physics is a kwarg: `march3d_order3_gpu!(...; restitution = 0.9)`.
+   The drain is operator-split **once per step**, not per RK stage — see the example's
+   closing note for what putting it in the stage loop costs, and why no invariant-style
+   check catches it.
