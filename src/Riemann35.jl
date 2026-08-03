@@ -79,6 +79,7 @@ export delta2star3D, delta2star3D_permutation, jacobian6, M4toC4_3D, C4toM4_3D, 
 export reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 export IJK, IJK_INDEX, momidx
 export body_force_shift, body_force_shift_dev, apply_body_force!
+export granular_drain_tup
 export axis_moment_slice
 export to_recon_vars, from_recon_vars, standardized_to_M4
 export minmod, muscl_slopes, muscl_faces
@@ -164,7 +165,7 @@ include("numerics/riemann_flux_dev.jl")
 using .RiemannFluxDev: riemann_flux_dev, rs_code
 # Reconstruction variables (must precede realizability, which calls standardized_to_M4)
 include("numerics/recon_dev.jl")
-using .ReconDev: to_recon_vars_dev, from_recon_vars_dev,
+using .ReconDev: granular_drain_tup, to_recon_vars_dev, from_recon_vars_dev,
                  to_recon_vars_tup, from_recon_vars_tup,
                  pressurize_recon_tup, depressurize_recon_tup, bgk_relax_tup
 # The CPU realizable_3D_M4 (realizability.jl -> realize_M4_projection.jl) delegates to

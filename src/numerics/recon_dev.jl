@@ -48,7 +48,7 @@ CPU validator and the GPU kernel module.
 """
 module ReconDev
 
-export to_recon_vars_dev, from_recon_vars_dev, minmod,
+export granular_drain_tup, to_recon_vars_dev, from_recon_vars_dev, minmod,
        to_recon_vars_tup, from_recon_vars_tup, recon_vars_ok_tup,
        pressurize_recon_tup, depressurize_recon_tup, bgk_relax_tup,
        muscl_right_face_tup, muscl_left_face_tup
@@ -412,6 +412,35 @@ end
 @inline bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
                       Pr::Float64, omega::Float64) =
     bgk_relax_tup(M, dt, Kn, Pr, omega, false)
+
+"""
+    granular_drain_tup(M::NTuple{35,Float64}, s::Float64) -> NTuple{35,Float64}
+
+Inelastic energy drain for a granular gas: scale every CENTRAL moment of order `n` by `s^n`,
+leaving `rho` and the mean velocity untouched. `s = exp(-zeta*dt/2)` integrates
+`dT/dt = -zeta*T` exactly over a step at fixed `zeta` (Brey-Moreno-Dufty granular BGK).
+
+CHEAP BY CONSTRUCTION, and the reason is worth stating. In recon variables an isotropic
+rescaling of the peculiar velocity moves ONLY the three variances: the standardized moments
+`S_ijk = C_ijk/(sigma_x^i sigma_y^j sigma_z^k)` are invariant, since numerator and denominator
+both carry `s^(i+j+k)`. Verified empirically rather than assumed -- applying a full
+central-moment rescale through `M2CS4_35`/`C4toM4_3D` moves exactly slots 5,6,7 by `s^2` and
+leaves slots 8..35 bit-unchanged.
+
+So this is three multiplications wrapped around the round trip, it allocates nothing, it
+GPU-compiles, and it PRESERVES REALIZABILITY for `s <= 1` without a check: realizability is a
+condition on the standardized moments, which this does not touch.
+
+Mass and momentum are untouched BY CONSTRUCTION rather than by cancellation -- only energy is
+allowed to leave an inelastic collision, and that is a gate in `probe_granular_haff.jl`.
+"""
+@inline function granular_drain_tup(M::NTuple{35,Float64}, s::Float64)
+    s == 1.0 && return M
+    V = to_recon_vars_tup(M)
+    s2 = s*s
+    W = ntuple(i -> (i == 5 || i == 6 || i == 7) ? V[i]*s2 : V[i], Val(35))
+    from_recon_vars_tup(W)
+end
 
 @inline function bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
                                Pr::Float64, omega::Float64,
