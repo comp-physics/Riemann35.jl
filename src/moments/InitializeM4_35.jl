@@ -11,19 +11,32 @@ Compute 3D fourth-order joint Gaussian moments from physical parameters.
 # Returns
 - `M`: 35-element vector of raw moments up to 4th order
 
-!!! warning "Only a true Gaussian for DIAGONAL covariance"
-    This sets the *independent*-Gaussian standardized moments (`S400=3`, `S220=1`,
-    all cross terms 0) while accepting a full covariance. For a **correlated**
-    Gaussian, Isserlis gives `S310 = 3r`, `S220 = 1 + 2r^2`,
-    `S211 = r_yz + 2 r_xy r_xz`, etc., so passing nonzero `C110/C101/C011` here
-    produces a state whose fourth-order moments are NOT those of the Gaussian with
-    that covariance.
+!!! note "A true Gaussian for ANY positive-definite covariance, correlations included"
+    The literals set below are the *independent*-Gaussian standardized moments
+    (`S400=3`, `S220=1`, all cross terms 0), which looks like it could only describe a
+    diagonal covariance. It does not, because they are not applied by rescaling: they
+    go through [`S4toC4_3D_r`](@ref), which first forms `A = sqrtm(C2)` and pushes the
+    moments through the change of variables `v = A*xi`. Feeding it the isotropic set is
+    feeding it `xi ~ N(0,I)`, so the output is exactly `v ~ N(0,C2)` — including the
+    correlated fourth-order moments Isserlis predicts (`S310 = 3r`, `S220 = 1 + 2r^2`,
+    `S211 = r_yz + 2 r_xy r_xz`, ...).
 
-    Harmless for every current caller — the ICs all pass `r110=r101=r011=0` — but do
-    not use this to build an anisotropic Gaussian target. The ES-BGK operator
-    (`ReconDev.bgk_relax_tup`) builds its correlated target through
-    `from_recon_vars_dev` with the full Isserlis table instead; see
-    `docs/design/esbgk-vhs-transport.md` section 5.
+    The distinction is the trailing `_r`. `S4toC4_3D` (no suffix) really does only
+    rescale standardized moments by the marginal standard deviations, and *would* give
+    the wrong fourth-order moments off the diagonal. This function does not call it.
+
+    Verified rather than asserted: `test_correlated_states.jl` compares every central
+    moment against Isserlis applied directly to the covariance matrix, over covariances
+    from diagonal to strongly correlated, and agrees to ~1e-14.
+
+    (This block previously carried the opposite warning. Rodney Fox pointed out the
+    error on 2026-08-03; the change of variables in `S4toC4_3D_r` was the step it
+    missed. Recorded here because the retracted claim is load-bearing in the other
+    direction — it was the stated reason the ES-BGK operator builds its target through
+    `from_recon_vars_dev` with an explicit Isserlis table rather than calling this
+    function. That construction is still correct, and still preferable on device since
+    it needs no matrix square root, but it is a performance choice, not a correctness
+    one. See `docs/design/esbgk-vhs-transport.md` section 5.)
 """
 function InitializeM4_35(M000, umean, vmean, wmean, C200, C110, C101, C020, C011, C002)
     # Standardized moments for Maxwellian (Gaussian)
