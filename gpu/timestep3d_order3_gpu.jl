@@ -643,6 +643,21 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              idp::Bool = true,   # diagnostic: false => theta==1, no IDP blend
                              split::Symbol = :lie,   # :lie (shipped) or :strang
+                             # ACTIVE AXES. A quasi-1D case (Couette, Poiseuille, Fourier) is
+                             # uniform along two axes, and on a uniform axis the two face fluxes
+                             # of every cell are EQUAL, so their difference -- the only way that
+                             # axis enters the residual -- is identically zero. Marking it
+                             # inactive skips its Ppt/Vavg/flux kernel group entirely; the flux
+                             # arrays are CUDA.zeros and stay zero, so the residual contribution
+                             # is zero by the same arithmetic.
+                             #
+                             # This is NOT a smaller grid. Shrinking nx,nz from 8 to 1 buys 1.75x,
+                             # because the g=8 halo does not shrink with the interior and cost
+                             # tracks HALOED volume (measured flat at 76-98 ns/haloed-cell-step,
+                             # roe-writeup-scripts/gpu/padding_cost.jl). This skips the WORK
+                             # instead, and it is the caller's assertion that the axis is
+                             # uniform -- verified numerically, never assumed.
+                             active::NTuple{3,Bool} = (true, true, true),
                              first_order::Bool = false, bc = :copy, inlet = nothing,
                              obst_state = nothing, obst_cx::Real = 0.0, obst_cy::Real = 0.0,
                              obst_r2::Real = 0.0,
@@ -778,6 +793,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         for (a, b, c) in stages
             refill!()
             residual3d_order3_box_gpu!(R, G, nx, ny, nz, g, dxf, dxf, dxf, Maf, dt;
+                                       active=active,
                                        s3max=s3f, threads=threads, theta_closed=theta_closed, idp=idp,
                                        use_logjacobi_recon=use_logjacobi_recon,
                                        first_order=first_order,

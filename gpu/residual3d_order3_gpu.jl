@@ -845,7 +845,8 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     # theta == 1 there is no realizability guarantee at all.
                                     idp::Bool = true,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
-                                                zlo=false, zhi=false))
+                                                zlo=false, zhi=false),
+                                     active::NTuple{3,Bool} = (true, true, true))
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
     @assert g >= 4 "order-3 residual requires halo g ≥ 4; got g=$g"
     @assert size(G) == (35, nfx, nfy, nfz) "G must be (35,nx+2g,ny+2g,nz+2g)"
@@ -877,45 +878,51 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
         # --- First-order HLL (order=1): no reconstruction, no θ*. Each flux kernel sets
         # FHO=FLO=HLL(cell,cell) (shares _hll_states), and _blend_residual! with Th≡0
         # (already zeroed) yields F=FLO. DRY: reuses the same flux + residual machinery. ---
-        @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, true)
-        @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, true)
-        @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, true)
+        active[1] && @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, true)
+        active[2] && @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, true)
+        active[3] && @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, true)
     else
     # --- Pass 1: per axis Ppt → Vavg → faces (raw); log-Jacobi marginal override opt-in ---
-    @cuda threads=threads blocks=bcube _ppt_x!(P, G, nfx, nfy, nfz)
-    @cuda threads=threads blocks=bcube _vavg_x!(V, P, nfx, nfy, nfz)
-    if use_logjacobi_recon
-        OKLx = CUDA.zeros(Float64, nfy, nfz)
-        @cuda threads=threads blocks=bcube _ppt_marg_x!(PJ, OKc, G, _MARG_IDX[1], nfx, nfy, nfz)
-        @cuda threads=threads blocks=bcube _vavg_marg_x!(VJ, PJ, nfx, nfy, nfz)
-        @cuda threads=threads blocks=cld(nfy*nfz, threads) _okline_x!(OKLx, OKc, nfx, nfy, nfz)
-        @cuda threads=threads blocks=cld(fx, threads) _weno_flux_lj_x!(FHOx, FLOx, G, V, VJ, OKLx, _MARG_IDX[1], nx, ny, nz, g, nfx, Maf, s3f)
-    else
-        @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, false)
+    if active[1]
+        @cuda threads=threads blocks=bcube _ppt_x!(P, G, nfx, nfy, nfz)
+        @cuda threads=threads blocks=bcube _vavg_x!(V, P, nfx, nfy, nfz)
+        if use_logjacobi_recon
+            OKLx = CUDA.zeros(Float64, nfy, nfz)
+            @cuda threads=threads blocks=bcube _ppt_marg_x!(PJ, OKc, G, _MARG_IDX[1], nfx, nfy, nfz)
+            @cuda threads=threads blocks=bcube _vavg_marg_x!(VJ, PJ, nfx, nfy, nfz)
+            @cuda threads=threads blocks=cld(nfy*nfz, threads) _okline_x!(OKLx, OKc, nfx, nfy, nfz)
+            @cuda threads=threads blocks=cld(fx, threads) _weno_flux_lj_x!(FHOx, FLOx, G, V, VJ, OKLx, _MARG_IDX[1], nx, ny, nz, g, nfx, Maf, s3f)
+        else
+            @cuda threads=threads blocks=cld(fx, threads) _weno_flux_x!(FHOx, FLOx, G, V, nx, ny, nz, g, nfx, Maf, s3f, false)
+        end
     end
 
-    @cuda threads=threads blocks=bcube _ppt_y!(P, G, nfx, nfy, nfz)
-    @cuda threads=threads blocks=bcube _vavg_y!(V, P, nfx, nfy, nfz)
-    if use_logjacobi_recon
-        OKLy = CUDA.zeros(Float64, nfx, nfz)
-        @cuda threads=threads blocks=bcube _ppt_marg_y!(PJ, OKc, G, _MARG_IDX[2], nfx, nfy, nfz)
-        @cuda threads=threads blocks=bcube _vavg_marg_y!(VJ, PJ, nfx, nfy, nfz)
-        @cuda threads=threads blocks=cld(nfx*nfz, threads) _okline_y!(OKLy, OKc, nfx, nfy, nfz)
-        @cuda threads=threads blocks=cld(fy, threads) _weno_flux_lj_y!(FHOy, FLOy, G, V, VJ, OKLy, _MARG_IDX[2], nx, ny, nz, g, nfy, Maf, s3f)
-    else
-        @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, false)
+    if active[2]
+        @cuda threads=threads blocks=bcube _ppt_y!(P, G, nfx, nfy, nfz)
+        @cuda threads=threads blocks=bcube _vavg_y!(V, P, nfx, nfy, nfz)
+        if use_logjacobi_recon
+            OKLy = CUDA.zeros(Float64, nfx, nfz)
+            @cuda threads=threads blocks=bcube _ppt_marg_y!(PJ, OKc, G, _MARG_IDX[2], nfx, nfy, nfz)
+            @cuda threads=threads blocks=bcube _vavg_marg_y!(VJ, PJ, nfx, nfy, nfz)
+            @cuda threads=threads blocks=cld(nfx*nfz, threads) _okline_y!(OKLy, OKc, nfx, nfy, nfz)
+            @cuda threads=threads blocks=cld(fy, threads) _weno_flux_lj_y!(FHOy, FLOy, G, V, VJ, OKLy, _MARG_IDX[2], nx, ny, nz, g, nfy, Maf, s3f)
+        else
+            @cuda threads=threads blocks=cld(fy, threads) _weno_flux_y!(FHOy, FLOy, G, V, nx, ny, nz, g, nfy, Maf, s3f, false)
+        end
     end
 
-    @cuda threads=threads blocks=bcube _ppt_z!(P, G, nfx, nfy, nfz)
-    @cuda threads=threads blocks=bcube _vavg_z!(V, P, nfx, nfy, nfz)
-    if use_logjacobi_recon
-        OKLz = CUDA.zeros(Float64, nfx, nfy)
-        @cuda threads=threads blocks=bcube _ppt_marg_z!(PJ, OKc, G, _MARG_IDX[3], nfx, nfy, nfz)
-        @cuda threads=threads blocks=bcube _vavg_marg_z!(VJ, PJ, nfx, nfy, nfz)
-        @cuda threads=threads blocks=cld(nfx*nfy, threads) _okline_z!(OKLz, OKc, nfx, nfy, nfz)
-        @cuda threads=threads blocks=cld(fz, threads) _weno_flux_lj_z!(FHOz, FLOz, G, V, VJ, OKLz, _MARG_IDX[3], nx, ny, nz, g, nfz, Maf, s3f)
-    else
-        @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, false)
+    if active[3]
+        @cuda threads=threads blocks=bcube _ppt_z!(P, G, nfx, nfy, nfz)
+        @cuda threads=threads blocks=bcube _vavg_z!(V, P, nfx, nfy, nfz)
+        if use_logjacobi_recon
+            OKLz = CUDA.zeros(Float64, nfx, nfy)
+            @cuda threads=threads blocks=bcube _ppt_marg_z!(PJ, OKc, G, _MARG_IDX[3], nfx, nfy, nfz)
+            @cuda threads=threads blocks=bcube _vavg_marg_z!(VJ, PJ, nfx, nfy, nfz)
+            @cuda threads=threads blocks=cld(nfx*nfy, threads) _okline_z!(OKLz, OKc, nfx, nfy, nfz)
+            @cuda threads=threads blocks=cld(fz, threads) _weno_flux_lj_z!(FHOz, FLOz, G, V, VJ, OKLz, _MARG_IDX[3], nx, ny, nz, g, nfz, Maf, s3f)
+        else
+            @cuda threads=threads blocks=cld(fz, threads) _weno_flux_z!(FHOz, FLOz, G, V, nx, ny, nz, g, nfz, Maf, s3f, false)
+        end
     end
     end  # if first_order
 
