@@ -142,12 +142,12 @@ end
 # Step 1: recon-var POINT value from the 5-cell RAW stencil along the axis.
 # Boundary fallback (within 2 of the array end along that axis) = cell average,
 # matching residual_line3 (`k >= 3 && k <= n2g-2 ? recon_point : to_recon_vars`).
-function _ppt_x!(P, G, nfx::Int, nfy::Int, nfz::Int)
+function _ppt_x!(P, G, nfx::Int, nfy::Int, nfz::Int, b0::Int, nb::Int, c0::Int, nc::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    if idx <= nfx * nb * nc
         @inbounds begin
-            a = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            b = r % nfy + 1;         c = r ÷ nfy + 1
+            a = (idx - 1) % nfx + 1;  r = (idx - 1) ÷ nfx
+            b = b0 + r % nb;          c = c0 + r ÷ nb
             Pv = (a >= 3 && a <= nfx - 2) ?
                 recon_point_dev(_cellG(G, a-2, b, c), _cellG(G, a-1, b, c),
                                 _cellG(G, a, b, c), _cellG(G, a+1, b, c), _cellG(G, a+2, b, c)) :
@@ -158,12 +158,17 @@ function _ppt_x!(P, G, nfx::Int, nfy::Int, nfz::Int)
     return nothing
 end
 
-function _ppt_y!(P, G, nfx::Int, nfy::Int, nfz::Int)
+# SUB-BOX. `_weno_flux_y!` indexes i in [1,nx], k in [1,nz] and reads V only at a = g+i,
+# c = g+k -- interior extent in x and z, full halo in y. Computing the y pass over the whole
+# haloed cube therefore produces (nfx*nfz)/(nx*nz) times more than is ever read: 9x at
+# nx=nz=8, g=8. Profiling put _ppt_y + _vavg_y at 26.9% of the step, so this is not marginal.
+# The restriction is EXACT: it computes what is read and nothing else.
+function _ppt_y!(P, G, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, c0::Int, nc::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    if idx <= na * nfy * nc
         @inbounds begin
-            a = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            b = r % nfy + 1;         c = r ÷ nfy + 1
+            a = a0 + (idx - 1) % na;  r = (idx - 1) ÷ na
+            b = r % nfy + 1;          c = c0 + r ÷ nfy
             Pv = (b >= 3 && b <= nfy - 2) ?
                 recon_point_dev(_cellG(G, a, b-2, c), _cellG(G, a, b-1, c),
                                 _cellG(G, a, b, c), _cellG(G, a, b+1, c), _cellG(G, a, b+2, c)) :
@@ -174,12 +179,12 @@ function _ppt_y!(P, G, nfx::Int, nfy::Int, nfz::Int)
     return nothing
 end
 
-function _ppt_z!(P, G, nfx::Int, nfy::Int, nfz::Int)
+function _ppt_z!(P, G, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, b0::Int, nb::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    if idx <= na * nb * nfz
         @inbounds begin
-            a = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            b = r % nfy + 1;         c = r ÷ nfy + 1
+            a = a0 + (idx - 1) % na;  r = (idx - 1) ÷ na
+            b = b0 + r % nb;          c = r ÷ nb + 1
             Pv = (c >= 3 && c <= nfz - 2) ?
                 recon_point_dev(_cellG(G, a, b, c-2), _cellG(G, a, b, c-1),
                                 _cellG(G, a, b, c), _cellG(G, a, b, c+1), _cellG(G, a, b, c+2)) :
@@ -192,12 +197,12 @@ end
 
 # Step 2: conv5 of the 5-cell recon-var POINT stencil → recon-var cell AVERAGE.
 # Stencil index clamped to [1,nf] along the axis (residual_line3 `_pp`).
-function _vavg_x!(V, P, nfx::Int, nfy::Int, nfz::Int)
+function _vavg_x!(V, P, nfx::Int, nfy::Int, nfz::Int, b0::Int, nb::Int, c0::Int, nc::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    if idx <= nfx * nb * nc
         @inbounds begin
-            a = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            b = r % nfy + 1;         c = r ÷ nfy + 1
+            a = (idx - 1) % nfx + 1;  r = (idx - 1) ÷ nfx
+            b = b0 + r % nb;          c = c0 + r ÷ nb
             Vv = recon_avg_dev(_cellG(P, _clamp(a-2, nfx), b, c), _cellG(P, _clamp(a-1, nfx), b, c),
                                _cellG(P, a, b, c),
                                _cellG(P, _clamp(a+1, nfx), b, c), _cellG(P, _clamp(a+2, nfx), b, c))
@@ -207,12 +212,12 @@ function _vavg_x!(V, P, nfx::Int, nfy::Int, nfz::Int)
     return nothing
 end
 
-function _vavg_y!(V, P, nfx::Int, nfy::Int, nfz::Int)
+function _vavg_y!(V, P, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, c0::Int, nc::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    if idx <= na * nfy * nc
         @inbounds begin
-            a = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            b = r % nfy + 1;         c = r ÷ nfy + 1
+            a = a0 + (idx - 1) % na;  r = (idx - 1) ÷ na
+            b = r % nfy + 1;          c = c0 + r ÷ nfy
             Vv = recon_avg_dev(_cellG(P, a, _clamp(b-2, nfy), c), _cellG(P, a, _clamp(b-1, nfy), c),
                                _cellG(P, a, b, c),
                                _cellG(P, a, _clamp(b+1, nfy), c), _cellG(P, a, _clamp(b+2, nfy), c))
@@ -222,12 +227,12 @@ function _vavg_y!(V, P, nfx::Int, nfy::Int, nfz::Int)
     return nothing
 end
 
-function _vavg_z!(V, P, nfx::Int, nfy::Int, nfz::Int)
+function _vavg_z!(V, P, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, b0::Int, nb::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= nfx * nfy * nfz
+    if idx <= na * nb * nfz
         @inbounds begin
-            a = (idx - 1) % nfx + 1; r = (idx - 1) ÷ nfx
-            b = r % nfy + 1;         c = r ÷ nfy + 1
+            a = a0 + (idx - 1) % na;  r = (idx - 1) ÷ na
+            b = b0 + r % nb;          c = r ÷ nb + 1
             Vv = recon_avg_dev(_cellG(P, a, b, _clamp(c-2, nfz)), _cellG(P, a, b, _clamp(c-1, nfz)),
                                _cellG(P, a, b, c),
                                _cellG(P, a, b, _clamp(c+1, nfz)), _cellG(P, a, b, _clamp(c+2, nfz)))
@@ -884,8 +889,10 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     else
     # --- Pass 1: per axis Ppt → Vavg → faces (raw); log-Jacobi marginal override opt-in ---
     if active[1]
-        @cuda threads=threads blocks=bcube _ppt_x!(P, G, nfx, nfy, nfz)
-        @cuda threads=threads blocks=bcube _vavg_x!(V, P, nfx, nfy, nfz)
+        # only the interior extent in y and z is ever read by _weno_flux_x!
+        nxb = cld(nfx*ny*nz, threads)
+        @cuda threads=threads blocks=nxb _ppt_x!(P, G, nfx, nfy, nfz, g+1, ny, g+1, nz)
+        @cuda threads=threads blocks=nxb _vavg_x!(V, P, nfx, nfy, nfz, g+1, ny, g+1, nz)
         if use_logjacobi_recon
             OKLx = CUDA.zeros(Float64, nfy, nfz)
             @cuda threads=threads blocks=bcube _ppt_marg_x!(PJ, OKc, G, _MARG_IDX[1], nfx, nfy, nfz)
@@ -898,8 +905,10 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     end
 
     if active[2]
-        @cuda threads=threads blocks=bcube _ppt_y!(P, G, nfx, nfy, nfz)
-        @cuda threads=threads blocks=bcube _vavg_y!(V, P, nfx, nfy, nfz)
+        # only the interior extent in x and z is ever read by _weno_flux_y!
+        nyb = cld(nx*nfy*nz, threads)
+        @cuda threads=threads blocks=nyb _ppt_y!(P, G, nfx, nfy, nfz, g+1, nx, g+1, nz)
+        @cuda threads=threads blocks=nyb _vavg_y!(V, P, nfx, nfy, nfz, g+1, nx, g+1, nz)
         if use_logjacobi_recon
             OKLy = CUDA.zeros(Float64, nfx, nfz)
             @cuda threads=threads blocks=bcube _ppt_marg_y!(PJ, OKc, G, _MARG_IDX[2], nfx, nfy, nfz)
@@ -912,8 +921,10 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     end
 
     if active[3]
-        @cuda threads=threads blocks=bcube _ppt_z!(P, G, nfx, nfy, nfz)
-        @cuda threads=threads blocks=bcube _vavg_z!(V, P, nfx, nfy, nfz)
+        # only the interior extent in x and y is ever read by _weno_flux_z!
+        nzb = cld(nx*ny*nfz, threads)
+        @cuda threads=threads blocks=nzb _ppt_z!(P, G, nfx, nfy, nfz, g+1, nx, g+1, ny)
+        @cuda threads=threads blocks=nzb _vavg_z!(V, P, nfx, nfy, nfz, g+1, nx, g+1, ny)
         if use_logjacobi_recon
             OKLz = CUDA.zeros(Float64, nfx, nfy)
             @cuda threads=threads blocks=bcube _ppt_marg_z!(PJ, OKc, G, _MARG_IDX[3], nfx, nfy, nfz)
