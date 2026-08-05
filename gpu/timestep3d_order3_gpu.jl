@@ -642,6 +642,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              idp::Bool = true,   # diagnostic: false => theta==1, no IDP blend
+                             split::Symbol = :lie,   # :lie (shipped) or :strang
                              first_order::Bool = false, bc = :copy, inlet = nothing,
                              obst_state = nothing, obst_cx::Real = 0.0, obst_cy::Real = 0.0,
                              obst_r2::Real = 0.0,
@@ -656,6 +657,20 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
 
     dxf = Float64(dx); Maf = Float64(Ma); s3f = Float64(s3max); knf = Float64(Kn)
     prf = Float64(Pr); omf = Float64(omega); sbe = Bool(stage_bgk_exact); eres = Float64(restitution)
+    # OPERATOR SPLITTING of the BGK source. `_rk3_stage_factor` already makes the three per-stage
+    # relaxations compose to exactly exp(-dt/tau), which removes an O(1) error in the transport
+    # COEFFICIENTS -- but not the O(dt) SPLITTING error, because collision and transport remain
+    # interleaved first-order. That error is measurable: on the linear transverse mode the
+    # effective viscosity is reduced by exactly
+    #     nu_eff/nu = (1 - exp(-dt/tau)) * tau/dt
+    # (predicted 0.916 at dt/tau = 0.177, measured 0.917; see sec:tgv-dtvisc in the notes).
+    # :strang applies half a collision step, the full RK3 transport with no in-stage collision,
+    # then the other half -- second order, driving that deficit to O(dt^2).
+    #
+    # :lie stays the DEFAULT so every existing result remains byte-identical. Changing the
+    # default would silently move every transport coefficient in the notes.
+    split in (:lie, :strang) || error("march3d_order3_gpu!: split must be :lie or :strang (got :$split)")
+    strang = (split === :strang) && stage_bgk
     wTw = Float64(wall_Tw); wU1 = Float64(wall_uw1); wU2 = Float64(wall_uw2); wAl = Float64(wall_alpha)
     # nothing => hi face matches lo, i.e. the isothermal wall, bit-for-bit as before
     wTwH = wall_Tw_hi === nothing ? wTw : Float64(wall_Tw_hi)
@@ -753,6 +768,12 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         end
         used[s] = dt
 
+        # Strang: leading half-collision. rk3=false because this is ONE application over dt/2,
+        # not a per-stage fraction -- passing sbe would apply the stage-factor correction on top
+        # and under-relax by construction.
+        if strang
+            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false)
+        end
         @cuda threads=threads blocks=bint _copy_interior!(G0, G, nx, ny, nz, g)
         for (a, b, c) in stages
             refill!()
@@ -764,9 +785,14 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                                        wall_uw1=wU1, wall_uw2=wU2, wall_antisym=wAnti)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f)
-            if stage_bgk
+            if stage_bgk && !strang
                 @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe)
             end
+        end
+        # Strang: trailing half-collision, after the RK stages and before the granular drain and
+        # body force, which are themselves once-per-step splits.
+        if strang
+            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false)
         end
         # GRANULAR inelastic cooling, ONCE PER STEP after the RK stages -- the same
         # operator-split placement as the body force below, and for the same reason: it is an
