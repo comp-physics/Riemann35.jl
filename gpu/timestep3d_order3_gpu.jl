@@ -444,7 +444,7 @@ function _body_force_interior!(G, nx::Int, ny::Int, nz::Int, g::Int,
 end
 
 # optional exact-exponential stage-BGK relaxation on the interior (CPU `bgk!`).
-function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64, pr::Float64, om::Float64, rk3::Bool)
+function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64, pr::Float64, om::Float64, rk3::Bool, er::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -452,7 +452,7 @@ function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::F
             j = r % ny + 1;         k = r ÷ ny + 1
             ga = g + i; gb = g + j; gc = g + k
             C = ntuple(m -> G[m, ga, gb, gc], Val(35))
-            out = bgk_relax_tup(C, dt, kn, pr, om, rk3)
+            out = bgk_relax_tup(C, dt, kn, pr, om, rk3, er)
             for m in 1:35; G[m, ga, gb, gc] = out[m]; end
         end
     end
@@ -787,7 +787,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         # not a per-stage fraction -- passing sbe would apply the stage-factor correction on top
         # and under-relax by construction.
         if strang
-            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false)
+            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false, eres)
         end
         @cuda threads=threads blocks=bint _copy_interior!(G0, G, nx, ny, nz, g)
         for (a, b, c) in stages
@@ -802,13 +802,13 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f)
             if stage_bgk && !strang
-                @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe)
+                @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe, eres)
             end
         end
         # Strang: trailing half-collision, after the RK stages and before the granular drain and
         # body force, which are themselves once-per-step splits.
         if strang
-            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false)
+            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false, eres)
         end
         # GRANULAR inelastic cooling, ONCE PER STEP after the RK stages -- the same
         # operator-split placement as the body force below, and for the same reason: it is an
@@ -819,9 +819,11 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         # fitted exponent -2.88 instead of -2, temperature 44-68% low. Mass and momentum were
         # still exact, so only a test that checks the RATE rather than the invariants would
         # have found it.
-        if eres < 1.0
-            @cuda threads=threads blocks=bint _granular_interior!(G, nx, ny, nz, g, dt, knf, eres)
-        end
+        # NO SEPARATE DRAIN. Restitution now enters through the collision operator's target
+        # covariance (Fox eq. 6.135, see ReconDev._esbgk_relax_tup), so there is nothing left
+        # to operator-split. `_granular_interior!` is retained below, unused by this path, for
+        # the 0D probe that compares the two models.
+
         # Uniform body force, once per step after the RK stages -- the same
         # operator-split placement `apply_body_force!` has in the CPU channel probes.
         # Exact (velocity-space translation), and a no-op when g == 0.
@@ -1001,7 +1003,7 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, nzloc, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, n, n, nzloc, g, Maf, s3f)
             if stage_bgk
-                @cuda threads=threads blocks=bint _bgk_interior!(G, n, n, nzloc, g, dt, knf, prf, omf, sbe)
+                @cuda threads=threads blocks=bint _bgk_interior!(G, n, n, nzloc, g, dt, knf, prf, omf, sbe, eres)
             end
         end
     end

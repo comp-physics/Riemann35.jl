@@ -442,9 +442,13 @@ allowed to leave an inelastic collision, and that is a gate in `probe_granular_h
     from_recon_vars_tup(W)
 end
 
+@inline bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
+                      Pr::Float64, omega::Float64, rk3::Bool) =
+    bgk_relax_tup(M, dt, Kn, Pr, omega, rk3, 1.0)
+
 @inline function bgk_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
                                Pr::Float64, omega::Float64,
-                               rk3::Bool)::NTuple{35,Float64}
+                               rk3::Bool, erest::Float64)::NTuple{35,Float64}
     rho = M[1]
     rho > 0.0 || return M
     u = M[2]/rho; v = M[6]/rho; w = M[16]/rho
@@ -457,7 +461,11 @@ end
     # algebra collapsing: at kappa=0 the ES branch would evaluate 0.0*C200
     # (= NaN if C200 is Inf, reachable in deep vacuum) and Theta^(-0.5), which
     # is NOT bitwise 1/sqrt(Theta). See docs/design/esbgk-vhs-transport.md §7.
-    if Pr == 1.0 && omega == 0.5
+    # erest == 1.0 is required here, not merely expected: with restitution the target
+    # covariance is no longer isotropic-with-trace-3*Theta, so this path would silently
+    # run the gas ELASTIC. Fox (6.135) reduces to the ES branch's target at omega_r = 1,
+    # so routing e < 1 there costs nothing and keeps one implementation of the model.
+    if Pr == 1.0 && omega == 0.5 && erest == 1.0
         tc = Kn / (rho * sqrt(Theta) * 2)
         # SINGLE assignment. Reassigning `e` here boxes it (it is captured by the
         # ntuple closure below), which makes the type Any and the _rk3_stage_factor call
@@ -476,7 +484,7 @@ end
     # to compile with dynamic getindex/convert/jl_f_tuple calls, and it failed even
     # when the ES branch was unreachable, because dead code is still inferred.
     # Splitting the method fixes it and leaves the default path above untouched.
-    return _esbgk_relax_tup(M, dt, Kn, Pr, omega, rho, u, v, w, C200, C020, C002, Theta, rk3)
+    return _esbgk_relax_tup(M, dt, Kn, Pr, omega, rho, u, v, w, C200, C020, C002, Theta, rk3, erest)
 end
 
 # ---------------------------------------------------------------------------
@@ -487,7 +495,8 @@ end
                                     Pr::Float64, omega::Float64,
                                     rho::Float64, u::Float64, v::Float64, w::Float64,
                                     C200::Float64, C020::Float64, C002::Float64,
-                                    Theta::Float64, rk3::Bool)::NTuple{35,Float64}
+                                    Theta::Float64, rk3::Bool,
+                                    erest::Float64 = 1.0)::NTuple{35,Float64}
 
     # tau_ref fixes mu = p*tau_ref INDEPENDENT of Pr, so changing the Prandtl
     # number does not silently change the viscosity.
@@ -513,13 +522,32 @@ end
     C101 = M[17]/rho - u*w
     C011 = M[26]/rho - v*w
 
-    # ES target covariance Lambda = (1-kappa)*Theta*I + kappa*C.  tr(Lambda)=3*Theta
-    # exactly, so energy is conserved.
-    omk = 1.0 - kappa
-    L11 = omk*Theta + kappa*C200
-    L22 = omk*Theta + kappa*C020
-    L33 = omk*Theta + kappa*C002
-    L12 = kappa*C110; L13 = kappa*C101; L23 = kappa*C011
+    # TARGET COVARIANCE -- Fox, Kinetic Theory book, eq. (6.135):
+    #
+    #     lambda = varpi wr^2 Theta I + (varpi wr^2 - 2 varpi wr + 1) C,   wr = (1+e)/2
+    #
+    # with varpi the ES model constant (0 < varpi <= 3/2, Pr = 1/varpi in the elastic
+    # limit). This scheme's kappa is the DISCRETE form of 1 - 1/Pr -- kappa -> 1-1/Pr as
+    # dt -> 0 -- so varpi = 1 - kappa, and at wr = 1 the expression collapses to
+    #
+    #     lambda = (1-kappa) Theta I + ((1-kappa) - 2(1-kappa) + 1) C = (1-kappa) Theta I + kappa C
+    #
+    # which is EXACTLY the elastic target this line used to hard-code. The elastic path is
+    # therefore recovered term for term, not merely to rounding.
+    #
+    # tr(lambda) = 3 Theta [1 - 2 varpi wr (1 - wr)], so restitution enters as a deficit in
+    # the target TRACE rather than as a separate energy sink. That is the substantive change:
+    # the old drain rescaled the three variances by a common factor and so could not touch
+    # the anisotropy, while this relaxes the deviatoric part toward (varpi wr^2 - 2 varpi wr
+    # + 1) C, a different coefficient from the isotropic part whenever wr != 1.
+    wr = 0.5 * (1.0 + erest)
+    vpi = 1.0 - kappa
+    cI = vpi * wr * wr                      # coefficient on Theta*I
+    cC = cI - 2.0 * vpi * wr + 1.0          # coefficient on C
+    L11 = cI*Theta + cC*C200
+    L22 = cI*Theta + cC*C020
+    L33 = cI*Theta + cC*C002
+    L12 = cC*C110; L13 = cC*C101; L23 = cC*C011
 
     # Sylvester PD guard. Unreachable for genuinely PSD C (see spec §6); it fires only
     # on numerically corrupt states, so retreat all the way to the isotropic Maxwellian
@@ -528,8 +556,14 @@ end
     m2 = L11*L22 - L12*L12
     m3 = L11*(L22*L33 - L23*L23) - L12*(L12*L33 - L23*L13) + L13*(L12*L23 - L22*L13)
     if !(m1 > 0.0 && m2 > 0.0 && m3 > 0.0)
-        L11 = Theta; L22 = Theta; L33 = Theta
-        L12 = 0.0;   L13 = 0.0;   L23 = 0.0
+        # Retreat to the ISOTROPIC PART OF THE SAME TARGET, (cI + cC)*Theta, not to Theta.
+        # Falling back to Theta would restore tr(lambda) = 3*Theta and so silently run that
+        # cell ELASTIC -- a guard that turns the physics off is worse than one that fires.
+        # At wr = 1, cI + cC = (1-kappa) + kappa = 1, so this is still exactly Theta and the
+        # elastic behaviour is unchanged.
+        Liso = (cI + cC) * Theta
+        L11 = Liso; L22 = Liso; L33 = Liso
+        L12 = 0.0;  L13 = 0.0;  L23 = 0.0
     end
 
     s1 = sqrt(L11); s2 = sqrt(L22); s3 = sqrt(L33)
