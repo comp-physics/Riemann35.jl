@@ -37,10 +37,28 @@ end
 
 fails = String[]
 
-# ---- NEGATIVE CONTROL: a uniform Maxwellian is realizable and must not fire -------------------
+# ---- NEGATIVE CONTROL 1: a uniform Maxwellian at rest -----------------------------------------
 M = maxwellian_cube()
 n_eq = count_for(M)
 n_eq == 0 || push!(fails, "equilibrium fired $n_eq times; a uniform Maxwellian is realizable")
+
+# ---- NEGATIVE CONTROL 2: a NON-TRIVIAL realizable state, and this is the one that matters -----
+# A Maxwellian at rest is the degenerate case where the projection's round-trip through central
+# and standardised moments happens to be exact in floating point, so it passes even under a
+# broken exact-equality criterion -- which is how the first version of this counter shipped
+# reporting 1.000 firings per (cell,stage) on Taylor-Green. A sheared, moving, anisotropic but
+# still realizable field exercises the round-trip properly and must also give zero.
+Msm = maxwellian_cube()
+for k in 1:N, j in 1:N, i in 1:N
+    x, y, z = (i-0.5)/N, (j-0.5)/N, (k-0.5)/N
+    Msm[:, i, j, k] .= Riemann35.InitializeM4_35(
+        1.0 + 0.03*sin(2pi*x), 0.30*sin(2pi*x)*cos(2pi*y), -0.30*cos(2pi*x)*sin(2pi*y), 0.0,
+        1.0 + 0.02*cos(2pi*y), 0.01*sin(2pi*z), -0.02*sin(2pi*x),
+        1.0 - 0.02*cos(2pi*y), 0.008*cos(2pi*z), 1.0 + 0.01*sin(2pi*z))
+end
+n_sm = count_for(Msm)
+n_sm == 0 || push!(fails, "smooth realizable field fired $n_sm times; round-trip noise is " *
+                          "being counted as a firing")
 
 # ---- POSITIVE CONTROL: a deliberately unrealizable state MUST fire ---------------------------
 # S220 driven far above its bound, the same construction the CPU-side control uses. If the
@@ -65,8 +83,10 @@ Array(G1) == Array(G2) || push!(fails, "counting changed the solution; the diagn
 println("="^80)
 println("GPU REALIZABILITY-PROJECTION COUNTER -- CONTROLS")
 println("="^80)
-@printf("  negative control (uniform Maxwellian)      : %d firings   %s\n", n_eq,
+@printf("  negative control 1 (Maxwellian at rest)    : %d firings   %s\n", n_eq,
         n_eq == 0 ? "OK" : "FAIL")
+@printf("  negative control 2 (smooth anisotropic)     : %d firings   %s\n", n_sm,
+        n_sm == 0 ? "OK" : "FAIL -- round-trip noise counted as firing")
 @printf("  positive control (S220 x5, half the cells) : %d firings   %s\n", n_bad,
         n_bad > 0 ? "OK" : "FAIL -- COUNTER NOT WIRED TO THE DEVICE")
 @printf("  counted march is bit-identical to uncounted: %s\n",

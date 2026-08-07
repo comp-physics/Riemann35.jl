@@ -438,12 +438,22 @@ function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3ma
             else
                 fired = false
                 for m in 1:35
-                    fired |= (G[m, ga, gb, gc] != P[m])
+                    o = G[m, ga, gb, gc]
+                    # TOLERANCE, NOT EXACT INEQUALITY, and the tolerance is the whole
+                    # correctness of this diagnostic. realizable_3D_M4_dev does NOT return its
+                    # input bit-for-bit on a realizable state: it round-trips through central
+                    # and standardised moments, and that is exact only in degenerate cases.
+                    # Measured on the CPU twin: a Maxwellian AT REST round-trips exactly, but a
+                    # MOVING Maxwellian perturbs 3 of 35 components at 2e-16 and a general
+                    # anisotropic realizable state perturbs 18 of 35 at 1e-14. An exact test
+                    # therefore reports EVERY cell as firing -- measured as exactly 1.000 of all
+                    # (cell,stage) opportunities on Taylor-Green -- which is indistinguishable
+                    # from a real result and much worse than the zero it replaced.
+                    # 1e-10 sits four orders above that noise floor and far below any genuine
+                    # correction, which moves moments by O(1) relative.
+                    fired |= (abs(P[m] - o) > 1e-10 * max(abs(o), abs(P[m])) + 1e-13)
                     G[m, ga, gb, gc] = P[m]
                 end
-                # exact inequality, not a tolerance: realizable_3D_M4_dev returns its input
-                # bit-for-bit when it does nothing, so any difference at all is a real correction
-                # and a tolerance would only hide the smallest ones.
                 if fired
                     CUDA.@atomic ctr[1] += Int32(1)
                 end
