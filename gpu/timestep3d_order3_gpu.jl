@@ -49,6 +49,36 @@ using Riemann35.WallGhostDev: wall_ghost_tup
 using Riemann35: body_force_shift_dev
 
 export march3d_order3_gpu!, march3d_slab_order3_gpu!, build_haloed_cube, interior_from_cube!
+export gpu_proj_counter, gpu_proj_count
+
+"""
+    gpu_proj_counter() -> CuArray{Int32,1}
+
+Allocate a zeroed device counter for the realizability projection, to be passed to
+`march3d_order3_gpu!(...; proj_counter=c)` and read with [`gpu_proj_count`](@ref).
+
+WHY THIS EXISTS. The counter in `src/numerics/highorder_3d.jl` is incremented inside the CPU
+`_project_interior!` only. The GPU marcher runs its own device kernel, so on any GPU run that
+counter reports zero whether the projection fires on every cell or on none -- and every 3D
+production run in this project is a GPU run. A zero from it was not evidence of anything.
+
+WHAT IT COUNTS: (cell, RK stage) pairs whose moments the projection MODIFIED. Not cells, and not
+steps: with three RK stages a single persistently-unrealizable cell contributes 3 per step. Divide
+by `3*nstep*ncells` for a per-cell-per-stage rate.
+
+A ZERO FROM THIS COUNTER IS ONLY MEANINGFUL ALONGSIDE A POSITIVE CONTROL -- a state known to be
+unrealizable must produce a nonzero count on the same code path. `test/gpu_proj_counter.jl` is
+that control, and it exists because a counter that only ever reads zero is indistinguishable from
+one that is not wired up, which is precisely the bug this replaces.
+"""
+gpu_proj_counter() = CUDA.zeros(Int32, 1)
+
+"""
+    gpu_proj_count(c) -> Int
+
+Read back a counter allocated by [`gpu_proj_counter`](@ref).
+"""
+gpu_proj_count(c::CuArray{Int32,1}) = Int(Array(c)[1])
 
 # opt-in 26-moment reduction device kernel (Rodney Fox); reduce26_relax_tup + _reduce26_interior!
 include(joinpath(@__DIR__, "reduce26_gpu.jl"))
@@ -377,7 +407,17 @@ function _rk_combine!(G, G0, R, nx::Int, ny::Int, nz::Int, g::Int, a::Float64, b
 end
 
 # per-cell realizability projection on the interior (CPU `_project_interior!`).
-function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3max::Float64)
+# COUNTING. `ctr` is either `nothing` (the shipped path) or a length-1 device array. Julia
+# specialises the kernel on its type, so the `nothing` branch is compiled out entirely and a
+# march without counting is byte-identical to one that never had the capability.
+#
+# WHAT IS COUNTED: cells the projection actually MODIFIED. The CPU counter instead tests
+# `realizability_margin(M) < 0` before projecting, but that oracle is an eigenvalue computation
+# on a 35-vector and is not device-callable. "The projection changed this cell" is the more
+# direct question anyway -- it is what "the projection fired" means operationally -- and the two
+# agree except on cells that are unrealizable by less than the projection's own tolerance.
+function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3max::Float64,
+                         ctr = nothing)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -393,7 +433,21 @@ function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3ma
                 G[26,ga,gb,gc], G[27,ga,gb,gc], G[28,ga,gb,gc], G[29,ga,gb,gc], G[30,ga,gb,gc],
                 G[31,ga,gb,gc], G[32,ga,gb,gc], G[33,ga,gb,gc], G[34,ga,gb,gc], G[35,ga,gb,gc],
                 Ma, s3max)
-            for m in 1:35; G[m, ga, gb, gc] = P[m]; end
+            if ctr === nothing
+                for m in 1:35; G[m, ga, gb, gc] = P[m]; end
+            else
+                fired = false
+                for m in 1:35
+                    fired |= (G[m, ga, gb, gc] != P[m])
+                    G[m, ga, gb, gc] = P[m]
+                end
+                # exact inequality, not a tolerance: realizable_3D_M4_dev returns its input
+                # bit-for-bit when it does nothing, so any difference at all is a real correction
+                # and a tolerance would only hide the smallest ones.
+                if fired
+                    CUDA.@atomic ctr[1] += Int32(1)
+                end
+            end
         end
     end
     return nothing
@@ -642,6 +696,12 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              gx::Real = 0.0, gy::Real = 0.0, gz::Real = 0.0, threads::Int = 128,
                              theta_closed::Bool = true, use_logjacobi_recon::Bool = false,
                              idp::Bool = true,   # diagnostic: false => theta==1, no IDP blend
+                             # DIAGNOSTIC: length-1 CuArray{Int32} that accumulates the number of
+                             # (cell, RK stage) pairs the realizability projection modified. Left
+                             # `nothing` the kernel is specialised without any counting code, so
+                             # the shipped path is unchanged. The caller owns the array and its
+                             # zeroing, which is what lets a driver accumulate over many marches.
+                             proj_counter = nothing,
                              split::Symbol = :lie,   # :lie (shipped) or :strang
                              # ACTIVE AXES. A quasi-1D case (Couette, Poiseuille, Fourier) is
                              # uniform along two axes, and on a uniform axis the two face fluxes
@@ -800,7 +860,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                                        kfvs_walls=kfvsw, wall_Tw=wTw, wall_Tw_hi=wTwH,
                                        wall_uw1=wU1, wall_uw2=wU2, wall_antisym=wAnti)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
-            @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f)
+            @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f, proj_counter)
             if stage_bgk && !strang
                 @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe, eres)
             end
