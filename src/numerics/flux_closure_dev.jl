@@ -81,6 +81,56 @@ const _EPSF = 2.220446049250313e-16   # eps(Float64)
 end
 
 # ---------------------------------------------------------------------------
+# Wick/Grad degree-5 closure, as an OPTIONAL blend against the HyQMOM fifth moments.
+#
+# For a distribution that is Gaussian times a cubic, the odd degree-5 central moments factorise
+#     C_{ijklm} = sum over the 10 unordered pairs {ab} of  C_{ab} * C_{(remaining three)}
+# which is a function of the degree-2 and degree-3 central moments the 35-moment set already
+# carries. Screened a-priori against DVM ground truth on the granular shear mode, this beats the
+# shipped HyQMOM fifth moments at both Prandtl numbers -- 2.738% against 4.787% at Pr=1 and 5.365%
+# against 9.250% at Pr=2/3, as a fraction of the spread of the degree-5 moments -- once scaled by a
+# single fitted gain of ~0.958. The gain is Pr-INDEPENDENT (0.962 at Pr=1, 0.953 at Pr=2/3), so
+# this is a Pr-blind improvement; the Pr-dependence lives in the deviatoric channel and is NOT
+# expressible as a local function of these moments (see the reparameterisation result in the notes).
+#
+# WRITTEN IN CENTRAL MOMENTS DELIBERATELY. The a-priori work standardised by the isotropic
+# temperature trace/3, while HyQMOM standardises per axis by so200/so020/so002. Applying the
+# formula in either standardisation would require matching that convention exactly; in raw central
+# moments the identity carries no temperature factors at all and the ambiguity disappears.
+#
+# DEFAULT OFF. WICK5_ALPHA=0 must reproduce the shipped closure BIT FOR BIT -- the constant-folded
+# branch below is skipped entirely -- because this file is the single source for both the CPU and
+# GPU flux and a silent change to the default would move every pinned number in the project.
+include("wick5_config.jl")   # WICK5_ALPHA, WICK5_GAIN -- a FILE, not ENV; see its header
+
+@inline function _wick5_central(C200,C110,C101,C020,C011,C002,
+                                C300,C210,C201,C120,C111,C102,C030,C021,C012,C003)
+    W500 = 10.0*C200*C300
+    W410 = 4.0*C110*C300 + 6.0*C200*C210
+    W401 = 4.0*C101*C300 + 6.0*C200*C201
+    W320 = C020*C300 + 6.0*C110*C210 + 3.0*C200*C120
+    W311 = C011*C300 + 3.0*C101*C210 + 3.0*C110*C201 + 3.0*C200*C111
+    W302 = C002*C300 + 6.0*C101*C201 + 3.0*C200*C102
+    W230 = 3.0*C020*C210 + 6.0*C110*C120 + C200*C030
+    W221 = 2.0*C011*C210 + C020*C201 + 2.0*C101*C120 + 4.0*C110*C111 + C200*C021
+    W212 = C002*C210 + 2.0*C011*C201 + 4.0*C101*C111 + 2.0*C110*C102 + C200*C012
+    W203 = 3.0*C002*C201 + 6.0*C101*C102 + C200*C003
+    W140 = 6.0*C020*C120 + 4.0*C110*C030
+    W131 = 3.0*C011*C120 + 3.0*C020*C111 + C101*C030 + 3.0*C110*C021
+    W122 = C002*C120 + 4.0*C011*C111 + C020*C102 + 2.0*C101*C021 + 2.0*C110*C012
+    W113 = 3.0*C002*C111 + 3.0*C011*C102 + 3.0*C101*C012 + C110*C003
+    W104 = 6.0*C002*C102 + 4.0*C101*C003
+    W050 = 10.0*C020*C030
+    W041 = 4.0*C011*C030 + 6.0*C020*C021
+    W032 = C002*C030 + 6.0*C011*C021 + 3.0*C020*C012
+    W023 = 3.0*C002*C021 + 6.0*C011*C012 + C020*C003
+    W014 = 6.0*C002*C012 + 4.0*C011*C003
+    W005 = 10.0*C002*C003
+    (W500,W410,W401,W320,W311,W302,W230,W221,W212,W203,
+     W140,W131,W122,W113,W104,W050,W041,W032,W023,W014,W005)
+end
+
+# ---------------------------------------------------------------------------
 # Block B: raw moments from central (subset of autogen C5toM5_3D, @fastmath).
 # Returns the 55 raw moments consumed by Fx/Fy/Fz (M000 omitted — trivial).
 # ---------------------------------------------------------------------------
@@ -321,6 +371,22 @@ end
     C023 = S023 * so020^2 * so002^3
     C014 = S014 * so020 * so002^4
     C005 = S005 * so002^5
+
+    # Optional Wick/Grad blend on the fifth moments. Constant-folded away when alpha == 0.
+    if WICK5_ALPHA != 0.0
+        (W500,W410,W401,W320,W311,W302,W230,W221,W212,W203,
+         W140,W131,W122,W113,W104,W050,W041,W032,W023,W014,W005) =
+            _wick5_central(C200,C110,C101,C020,C011,C002,
+                           C300,C210,C201,C120,C111,C102,C030,C021,C012,C003)
+        a = WICK5_ALPHA; g = WICK5_GAIN
+        C500 += a*(g*W500 - C500); C410 += a*(g*W410 - C410); C401 += a*(g*W401 - C401)
+        C320 += a*(g*W320 - C320); C311 += a*(g*W311 - C311); C302 += a*(g*W302 - C302)
+        C230 += a*(g*W230 - C230); C221 += a*(g*W221 - C221); C212 += a*(g*W212 - C212)
+        C203 += a*(g*W203 - C203); C140 += a*(g*W140 - C140); C131 += a*(g*W131 - C131)
+        C122 += a*(g*W122 - C122); C113 += a*(g*W113 - C113); C104 += a*(g*W104 - C104)
+        C050 += a*(g*W050 - C050); C041 += a*(g*W041 - C041); C032 += a*(g*W032 - C032)
+        C023 += a*(g*W023 - C023); C014 += a*(g*W014 - C014); C005 += a*(g*W005 - C005)
+    end
 
     # --- central -> raw (subset of C5toM5_3D) ---
     (rM100,rM200,rM300,rM400,rM500,rM010,rM110,rM210,rM310,rM410,rM020,rM120,rM220,rM320,
