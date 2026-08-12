@@ -131,7 +131,7 @@ function kfvs_wall_flux(M::AbstractVector{Float64}, axis::Int, outward::Float64,
     # directly. So every wall assertion in the suite was guarding a model that no run used,
     # while the model that every run used had no host-side test at all. Delegating costs no
     # production number and puts the tests back onto the code that actually executes.
-    F, rho_w = KfvsWallDev.kfvs_wall_flux_full_dev(NTuple{35,Float64}(M), axis, outward,
+    F, rho_w = KfvsWallDev.kfvs_wall_flux_full_dev(nt35(M), axis, outward,
                                                   Tw, uw1, uw2)
     return (F, rho_w, F[1])                # F[1] is the net mass flux: must be ~0
 end

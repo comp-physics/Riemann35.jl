@@ -69,8 +69,8 @@ function face_flux_1d(M_L::AbstractVector, M_R::AbstractVector, axis::Int, Ma::R
     # single-source flux + selector (src/numerics/riemann_flux_dev.jl; shared
     # verbatim with the GPU _face_flux_core — byte-identical op order)
     F = riemann_flux_dev(rs_code(RIEMANN_SOLVER[]), axis,
-                         NTuple{35,Float64}(MLr), NTuple{35,Float64}(MRr),
-                         NTuple{35,Float64}(FL), NTuple{35,Float64}(FR),
+                         nt35(MLr), nt35(MRr),
+                         nt35(FL), nt35(FR),
                          Float64(sL), Float64(sR))
     return collect(F)
 end

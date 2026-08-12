@@ -204,6 +204,7 @@ using .ProjectionDiagnostics: delta2star_matrix, leading_minors, projection_repo
 export delta2star_matrix, leading_minors, projection_report
 
 # Numerics
+include("numerics/nt35.jl")                        # nt35(): the fast Vector -> NTuple{35} path
 include("numerics/small_eig.jl")
 include("numerics/closure_and_eigenvalues.jl")
 include("numerics/moment_correction_minnorm.jl")   # opt-in minimal-norm hyperbolicity correction (byte-identical off)

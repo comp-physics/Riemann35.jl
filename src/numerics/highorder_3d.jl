@@ -30,8 +30,8 @@ function _face_flux_tup(mL::NTuple{35,Float64}, mR::NTuple{35,Float64},
     FL  = _phys_flux(MLr, axis);  FR  = _phys_flux(MRr, axis)
     sL  = Float64(min(lminL, lminR));  sR  = Float64(max(lmaxL, lmaxR))
     riemann_flux_dev(0, axis,                         # rs=0 → HLL
-                     NTuple{35,Float64}(MLr), NTuple{35,Float64}(MRr),
-                     NTuple{35,Float64}(FL),  NTuple{35,Float64}(FR),
+                     nt35(MLr), nt35(MRr),
+                     nt35(FL),  nt35(FR),
                      sL, sR)
 end
 

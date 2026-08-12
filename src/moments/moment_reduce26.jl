@@ -87,7 +87,7 @@ function reduce26_S(S::AbstractVector{Float64})
         k3   = _scale(_e(a),3)
         out[S_INDEX[k211]] = _S(S,k11) + _S(S,k3)*S111
     end
-    NTuple{35,Float64}(out)
+    nt35(out)
 end
 
 """

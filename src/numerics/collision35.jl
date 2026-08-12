@@ -25,7 +25,7 @@ function collision35(M, dt, Kn; Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exa
     # duplicate the Isserlis target here. The default path below stays verbatim so the
     # golden (test/test_golden_files.jl) is bit-for-bit unaffected.
     if !(Pr == 1.0 && omega == 0.5 && !stage_bgk_exact)
-        return collect(bgk_relax_tup(NTuple{35,Float64}(Float64.(M)),
+        return collect(bgk_relax_tup(nt35(Float64.(M)),
                                      Float64(dt), Float64(Kn),
                                      Float64(Pr), Float64(omega), stage_bgk_exact))
     end
