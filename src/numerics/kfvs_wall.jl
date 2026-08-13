@@ -49,6 +49,7 @@ export kfvs_wall_flux, halfline_gauss_moments, IJK35_KFVS
 # so test_wall_tangential_convention.jl can demonstrate what delegating fixed.
 
 using ..MomentIndices: IJK
+using ..Riemann35: nt35
 using ..KfvsWallDev
 # Canonical table, imported not copied (issue #61). It was a local transcription; the
 # table has been mis-transcribed once before -- positions 31-33 permuted, three moments
