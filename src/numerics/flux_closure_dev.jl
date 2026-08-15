@@ -97,7 +97,7 @@ end
     M200 = M000*t2+C200*M000
     M300 = M000*t3+C300*M000+C200*M000*umean*3.0
     M400 = M000*t4+C400*M000+C200*M000*t2*6.0+C300*M000*umean*4.0
-    M500 = M000*umean^5+C500*M000+C200*M000*t3*1.0e+1+C300*M000*t2*1.0e+1+C400*M000*umean*5.0
+    M500 = M000*(umean*umean)^2*umean+C500*M000+C200*M000*t3*1.0e+1+C300*M000*t2*1.0e+1+C400*M000*umean*5.0
     M010 = M000*vmean
     M110 = C110*M000+M000*umean*vmean
     M210 = C210*M000+C110*M000*umean*2.0+C200*M000*vmean+M000*t2*vmean
@@ -112,7 +112,7 @@ end
     M230 = C230*M000+C030*M000*t2+C200*M000*t6+C210*M000*t5*3.0+C130*M000*umean*2.0+C220*M000*vmean*3.0+M000*t2*t6+C110*M000*t5*umean*6.0+C020*M000*t2*vmean*3.0+C120*M000*umean*vmean*6.0
     M040 = M000*t7+C040*M000+C020*M000*t5*6.0+C030*M000*vmean*4.0
     M140 = C140*M000+C110*M000*t6*4.0+C120*M000*t5*6.0+C040*M000*umean+C130*M000*vmean*4.0+M000*t7*umean+C020*M000*t5*umean*6.0+C030*M000*umean*vmean*4.0
-    M050 = M000*vmean^5+C050*M000+C020*M000*t6*1.0e+1+C030*M000*t5*1.0e+1+C040*M000*vmean*5.0
+    M050 = M000*(vmean*vmean)^2*vmean+C050*M000+C020*M000*t6*1.0e+1+C030*M000*t5*1.0e+1+C040*M000*vmean*5.0
     M001 = M000*wmean
     M101 = C101*M000+M000*umean*wmean
     M201 = C201*M000+C101*M000*umean*2.0+C200*M000*wmean+M000*t2*wmean
@@ -147,7 +147,7 @@ end
     M004 = M000*t10+C004*M000+C002*M000*t8*6.0+C003*M000*wmean*4.0
     M104 = C104*M000+C101*M000*t9*4.0+C102*M000*t8*6.0+C004*M000*umean+C103*M000*wmean*4.0+M000*t10*umean+C002*M000*t8*umean*6.0+C003*M000*umean*wmean*4.0
     M014 = C014*M000+C011*M000*t9*4.0+C012*M000*t8*6.0+C004*M000*vmean+C013*M000*wmean*4.0+M000*t10*vmean+C002*M000*t8*vmean*6.0+C003*M000*vmean*wmean*4.0
-    M005 = M000*wmean^5+C005*M000+C002*M000*t9*1.0e+1+C003*M000*t8*1.0e+1+C004*M000*wmean*5.0
+    M005 = M000*(wmean*wmean)^2*wmean+C005*M000+C002*M000*t9*1.0e+1+C003*M000*t8*1.0e+1+C004*M000*wmean*5.0
 
     return (M100,M200,M300,M400,M500,M010,M110,M210,M310,M410,M020,M120,M220,M320,
             M030,M130,M230,M040,M140,M050,M001,M101,M201,M301,M401,M011,M111,M211,M311,
@@ -168,12 +168,12 @@ end
         C050,C041,C032,C023,C014,C005)
     t2 = umean^2; t3 = umean^3; t5 = vmean^2; t6 = vmean^3; t8 = wmean^2; t9 = wmean^3
     t4 = t2^2; t7 = t5^2; t10 = t8^2
-    M500 = M000*umean^5+C500*M000+C200*M000*t3*1.0e+1+C300*M000*t2*1.0e+1+C400*M000*umean*5.0
+    M500 = M000*(umean*umean)^2*umean+C500*M000+C200*M000*t3*1.0e+1+C300*M000*t2*1.0e+1+C400*M000*umean*5.0
     M410 = C410*M000+C110*M000*t3*4.0+C210*M000*t2*6.0+C310*M000*umean*4.0+C400*M000*vmean+M000*t4*vmean+C200*M000*t2*vmean*6.0+C300*M000*umean*vmean*4.0
     M320 = C320*M000+C020*M000*t3+C120*M000*t2*3.0+C300*M000*t5+C220*M000*umean*3.0+C310*M000*vmean*2.0+M000*t3*t5+C200*M000*t5*umean*3.0+C110*M000*t2*vmean*6.0+C210*M000*umean*vmean*6.0
     M230 = C230*M000+C030*M000*t2+C200*M000*t6+C210*M000*t5*3.0+C130*M000*umean*2.0+C220*M000*vmean*3.0+M000*t2*t6+C110*M000*t5*umean*6.0+C020*M000*t2*vmean*3.0+C120*M000*umean*vmean*6.0
     M140 = C140*M000+C110*M000*t6*4.0+C120*M000*t5*6.0+C040*M000*umean+C130*M000*vmean*4.0+M000*t7*umean+C020*M000*t5*umean*6.0+C030*M000*umean*vmean*4.0
-    M050 = M000*vmean^5+C050*M000+C020*M000*t6*1.0e+1+C030*M000*t5*1.0e+1+C040*M000*vmean*5.0
+    M050 = M000*(vmean*vmean)^2*vmean+C050*M000+C020*M000*t6*1.0e+1+C030*M000*t5*1.0e+1+C040*M000*vmean*5.0
     M401 = C401*M000+C101*M000*t3*4.0+C201*M000*t2*6.0+C301*M000*umean*4.0+C400*M000*wmean+M000*t4*wmean+C200*M000*t2*wmean*6.0+C300*M000*umean*wmean*4.0
     M311 = C311*M000+C011*M000*t3+C111*M000*t2*3.0+C211*M000*umean*3.0+C301*M000*vmean+C310*M000*wmean+M000*t3*vmean*wmean+C101*M000*t2*vmean*3.0+C110*M000*t2*wmean*3.0+C201*M000*umean*vmean*3.0+C210*M000*umean*wmean*3.0+C300*M000*vmean*wmean+C200*M000*umean*vmean*wmean*3.0
     M221 = C221*M000+C021*M000*t2+C201*M000*t5+C121*M000*umean*2.0+C211*M000*vmean*2.0+C220*M000*wmean+M000*t2*t5*wmean+C101*M000*t5*umean*2.0+C011*M000*t2*vmean*2.0+C020*M000*t2*wmean+C200*M000*t5*wmean+C111*M000*umean*vmean*4.0+C120*M000*umean*wmean*2.0+C210*M000*vmean*wmean*2.0+C110*M000*umean*vmean*wmean*4.0
@@ -188,7 +188,7 @@ end
     M023 = C023*M000+C003*M000*t5+C020*M000*t9+C021*M000*t8*3.0+C013*M000*vmean*2.0+C022*M000*wmean*3.0+M000*t5*t9+C011*M000*t8*vmean*6.0+C002*M000*t5*wmean*3.0+C012*M000*vmean*wmean*6.0
     M104 = C104*M000+C101*M000*t9*4.0+C102*M000*t8*6.0+C004*M000*umean+C103*M000*wmean*4.0+M000*t10*umean+C002*M000*t8*umean*6.0+C003*M000*umean*wmean*4.0
     M014 = C014*M000+C011*M000*t9*4.0+C012*M000*t8*6.0+C004*M000*vmean+C013*M000*wmean*4.0+M000*t10*vmean+C002*M000*t8*vmean*6.0+C003*M000*vmean*wmean*4.0
-    M005 = M000*wmean^5+C005*M000+C002*M000*t9*1.0e+1+C003*M000*t8*1.0e+1+C004*M000*wmean*5.0
+    M005 = M000*(wmean*wmean)^2*wmean+C005*M000+C002*M000*t9*1.0e+1+C003*M000*t8*1.0e+1+C004*M000*wmean*5.0
     return (M500,M410,M320,M230,M140,M050,M401,M311,M221,M131,M041,M302,M212,M122,M032,
             M203,M113,M023,M104,M014,M005)
 end
@@ -229,7 +229,7 @@ end
     S021 = cC021/(si020^2*si002)
     S012 = cC012/(si020*si002^2)
     S003 = cC003/si002^3
-    S400 = cC400/si200^4
+    S400 = cC400/(si200*si200)^2
     S310 = cC310/(si200^3*si020)
     S301 = cC301/(si200^3*si002)
     S220 = cC220/(si200^2*si020^2)
@@ -239,11 +239,11 @@ end
     S121 = cC121/(si200*si020^2*si002)
     S112 = cC112/(si200*si020*si002^2)
     S103 = cC103/(si200*si002^3)
-    S040 = cC040/si020^4
+    S040 = cC040/(si020*si020)^2
     S031 = cC031/(si020^3*si002)
     S022 = cC022/(si020^2*si002^2)
     S013 = cC013/(si020*si002^3)
-    S004 = cC004/si002^4
+    S004 = cC004/(si002*si002)^2
 
     # --- 5th-order HyQMOM closures (verbatim hyqmom_3D, NOT @fastmath) ---
     S500 = 0.5*S300*(5*S400 - 3*S300^2 - 1)
@@ -285,7 +285,7 @@ end
     C021 = S021 * so020^2 * so002
     C012 = S012 * so020 * so002^2
     C003 = S003 * so002^3
-    C400 = S400 * so200^4
+    C400 = S400 * (so200*so200)^2
     C310 = S310 * so200^3 * so020
     C301 = S301 * so200^3 * so002
     C220 = S220 * so200^2 * so020^2
@@ -295,14 +295,14 @@ end
     C121 = S121 * so200 * so020^2 * so002
     C112 = S112 * so200 * so020 * so002^2
     C103 = S103 * so200 * so002^3
-    C040 = S040 * so020^4
+    C040 = S040 * (so020*so020)^2
     C031 = S031 * so020^3 * so002
     C022 = S022 * so020^2 * so002^2
     C013 = S013 * so020 * so002^3
-    C004 = S004 * so002^4
-    C500 = S500 * so200^5
-    C410 = S410 * so200^4 * so020
-    C401 = S401 * so200^4 * so002
+    C004 = S004 * (so002*so002)^2
+    C500 = S500 * (so200*so200)^2*so200
+    C410 = S410 * (so200*so200)^2 * so020
+    C401 = S401 * (so200*so200)^2 * so002
     C320 = S320 * so200^3 * so020^2
     C311 = S311 * so200^3 * so020 * so002
     C302 = S302 * so200^3 * so002^2
@@ -310,17 +310,17 @@ end
     C221 = S221 * so200^2 * so020^2 * so002
     C212 = S212 * so200^2 * so020 * so002^2
     C203 = S203 * so200^2 * so002^3
-    C140 = S140 * so200 * so020^4
+    C140 = S140 * so200 * (so020*so020)^2
     C131 = S131 * so200 * so020^3 * so002
     C122 = S122 * so200 * so020^2 * so002^2
     C113 = S113 * so200 * so020 * so002^3
-    C104 = S104 * so200 * so002^4
-    C050 = S050 * so020^5
-    C041 = S041 * so020^4 * so002
+    C104 = S104 * so200 * (so002*so002)^2
+    C050 = S050 * (so020*so020)^2*so020
+    C041 = S041 * (so020*so020)^2 * so002
     C032 = S032 * so020^3 * so002^2
     C023 = S023 * so020^2 * so002^3
-    C014 = S014 * so020 * so002^4
-    C005 = S005 * so002^5
+    C014 = S014 * so020 * (so002*so002)^2
+    C005 = S005 * (so002*so002)^2*so002
 
     # --- central -> raw (subset of C5toM5_3D) ---
     (rM100,rM200,rM300,rM400,rM500,rM010,rM110,rM210,rM310,rM410,rM020,rM120,rM220,rM320,

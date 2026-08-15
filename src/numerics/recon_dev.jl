@@ -38,7 +38,7 @@ FP parity notes (byte-for-byte with the CPU chain):
     moment formulas, and the chosen reassociation depends on the *surrounding* expression
     context. Inlined into `to_recon_vars_dev`/`from_recon_vars_dev`, the centrals get
     reassociated differently than the standalone autogen `M4toC4_3D`/`C4toM4_3D`, drifting
-    ~1 ULP — invisible normally but amplified to ~2e-7 by the `1/sC200^4` divisor on deep-
+    ~1 ULP — invisible normally but amplified to ~2e-7 by the `1/(sC200*sC200)^2` divisor on deep-
     vacuum states (rho~1e-5). `@noinline` pins each helper to the same standalone
     compilation the autogen uses, restoring exact agreement. Do NOT change to `@inline`.
     (GPU-safe: CUDA.jl emits these as device function calls.)
@@ -167,7 +167,7 @@ end
     S021 = cC021/(sC020^2*sC002)
     S012 = cC012/(sC020*sC002^2)
     S003 = cC003/sC002^3
-    S400 = cC400/sC200^4
+    S400 = cC400/(sC200*sC200)^2
     S310 = cC310/(sC200^3*sC020)
     S301 = cC301/(sC200^3*sC002)
     S220 = cC220/(sC200^2*sC020^2)
@@ -177,11 +177,11 @@ end
     S121 = cC121/(sC200*sC020^2*sC002)
     S112 = cC112/(sC200*sC020*sC002^2)
     S103 = cC103/(sC200*sC002^3)
-    S040 = cC040/sC020^4
+    S040 = cC040/(sC020*sC020)^2
     S031 = cC031/(sC020^3*sC002)
     S022 = cC022/(sC020^2*sC002^2)
     S013 = cC013/(sC020*sC002^3)
-    S004 = cC004/sC002^4
+    S004 = cC004/(sC002*sC002)^2
 
     # variance floor (to_recon_vars c2min), matches realizable_3D_M4
     C200 = max(1.0e-12, cC200)

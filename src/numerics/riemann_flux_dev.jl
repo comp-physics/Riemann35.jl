@@ -25,7 +25,7 @@ using ..MomentIndices: MARG_IDX
     c2 = w3 / w1 - u * u
     c2 > 0.0 || return false, 0.0, 0.0
     m3c = w4 / w1 - 3u * (w3 / w1) + 2u^3
-    m4c = w5 / w1 - 4u * (w4 / w1) + 6u^2 * (w3 / w1) - 3u^4
+    m4c = w5 / w1 - 4u * (w4 / w1) + 6u^2 * (w3 / w1) - 3(u*u)^2
     s3 = c2 * sqrt(c2)
     return true, m3c / s3, m4c / (c2 * c2)
 end
