@@ -43,7 +43,36 @@ using CUDA
 # device-kernel block in src/Riemann35.jl and misc/04-gotchas.md.
 using Riemann35.RiemannFluxDev: riemann_flux_dev
 using Riemann35.WavespeedDev: realize_and_speed_Mr_dev
-using Riemann35.FluxClosureDev: flux_closure35_dev
+using Riemann35.FluxClosureDev: flux_closure35_dev, flux_closure35_central_dev
+
+# Flux-closure path for the order-3 face flux, selected by dispatch on a singleton -- the same
+# mechanism residual3d_gpu.jl already uses for order-2, mirrored here so the two paths agree.
+#
+#   StdClosure()     standardize -> 21 closures -> destandardize.
+#   CentralClosure() central-direct. The standardization sigma factors cancel identically (a
+#                    parity property of the HyQMOM closure), so the fifth-order central moments
+#                    are rational in the lower ones: 2 sqrt and ~56 intermediates leave the
+#                    per-face live set.
+#
+# MEASURED, order-3, A100, 48^3 (dsmc/reference/gpu_spill_attempt3.csv, companion repo):
+#   residual 16.2452 -> 15.4123 ms on top of the unrolling above, 6.5% against the pre-pass
+#   baseline of 16.4818 ms. Deviation from StdClosure over 3,870,720 residual entries:
+#   8.6e-14 absolute, 7.4e-11 relative -- consistent with the 7e-14 this closure was validated to.
+#
+# DEFAULT IS Std, DELIBERATELY. The gain is real but it is NOT bit-identical, and every accuracy
+# number this project has published came off the standardized path. Flipping this is a one-line
+# opt-in for whoever is prepared to re-baseline; it must not change silently.
+struct StdClosure end
+struct CentralClosure end
+const FLUX_CLOSURE = StdClosure()
+@inline _flux35(::StdClosure, m::NTuple{35,Float64}) = flux_closure35_dev(
+    m[1],  m[2],  m[3],  m[4],  m[5],  m[6],  m[7],  m[8],  m[9],  m[10], m[11], m[12],
+    m[13], m[14], m[15], m[16], m[17], m[18], m[19], m[20], m[21], m[22], m[23], m[24],
+    m[25], m[26], m[27], m[28], m[29], m[30], m[31], m[32], m[33], m[34], m[35])
+@inline _flux35(::CentralClosure, m::NTuple{35,Float64}) = flux_closure35_central_dev(
+    m[1],  m[2],  m[3],  m[4],  m[5],  m[6],  m[7],  m[8],  m[9],  m[10], m[11], m[12],
+    m[13], m[14], m[15], m[16], m[17], m[18], m[19], m[20], m[21], m[22], m[23], m[24],
+    m[25], m[26], m[27], m[28], m[29], m[30], m[31], m[32], m[33], m[34], m[35])
 using Riemann35.RealizeDev: realizable_3D_M4_dev
 using Riemann35.ReconDev: to_recon_vars_tup
 using Riemann35.IdpLimiterDev: theta_star_update_dev, theta_star_update_closed
@@ -77,6 +106,27 @@ export residual3d_order3_box_gpu!, residual3d_order3_gpu
 
 @inline _cellG(M, i::Int, j::Int, k::Int) =
     ntuple(m -> @inbounds(M[m, i, j, k]), Val(35))
+
+# ---------------------------------------------------------------------------
+# WHY THESE STORES ARE UNROLLED, AND WHY IT IS NOT COSMETIC.
+#
+# `for m in 1:35; F[m,p,q,r] = t[m]; end` indexes an NTuple{35} with a LOOP VARIABLE. A tuple is
+# an SSA value, so a dynamic index forces LLVM to give it an address: it emits
+# `alloca [35 x double]` plus a getelementptr with a runtime index, and SROA can never promote
+# that alloca back into registers. The tuple then lives in local memory BY CONSTRUCTION -- and
+# local memory is exactly what the profiler reports as spill traffic.
+#
+# MEASURED, not assumed. The IR for _weno_flux_x carried 16 x [35 x double] allocas and 24
+# getelementptrs into them with a runtime index; the ones reached by a loop induction variable
+# traced to these store loops. Regenerate with gpu/bench/probe_hll_ir.jl.
+#
+# @nexprs substitutes a literal 1..35, so every index is compile-time and the value stays in
+# registers. Identical arithmetic in identical order: bit-identical, and verified so across
+# builds with gpu/bench/probe_residual_ref.jl.
+@inline function _store35!(F, t::NTuple{35,Float64}, p::Int, q::Int, r::Int)
+    Base.Cartesian.@nexprs 35 m -> @inbounds F[m, p, q, r] = t[m]
+    return nothing
+end
 
 @inline _clamp(a::Int, n::Int) = a < 1 ? 1 : (a > n ? n : a)
 
@@ -115,18 +165,8 @@ export residual3d_order3_box_gpu!, residual3d_order3_gpu
         MRf[22], MRf[23], MRf[24], MRf[25], MRf[26], MRf[27], MRf[28],
         MRf[29], MRf[30], MRf[31], MRf[32], MRf[33], MRf[34], MRf[35], axis, Ma)
 
-    FLall = flux_closure35_dev(
-        MLr[1],  MLr[2],  MLr[3],  MLr[4],  MLr[5],  MLr[6],  MLr[7],
-        MLr[8],  MLr[9],  MLr[10], MLr[11], MLr[12], MLr[13], MLr[14],
-        MLr[15], MLr[16], MLr[17], MLr[18], MLr[19], MLr[20], MLr[21],
-        MLr[22], MLr[23], MLr[24], MLr[25], MLr[26], MLr[27], MLr[28],
-        MLr[29], MLr[30], MLr[31], MLr[32], MLr[33], MLr[34], MLr[35])
-    FRall = flux_closure35_dev(
-        MRr[1],  MRr[2],  MRr[3],  MRr[4],  MRr[5],  MRr[6],  MRr[7],
-        MRr[8],  MRr[9],  MRr[10], MRr[11], MRr[12], MRr[13], MRr[14],
-        MRr[15], MRr[16], MRr[17], MRr[18], MRr[19], MRr[20], MRr[21],
-        MRr[22], MRr[23], MRr[24], MRr[25], MRr[26], MRr[27], MRr[28],
-        MRr[29], MRr[30], MRr[31], MRr[32], MRr[33], MRr[34], MRr[35])
+    FLall = _flux35(FLUX_CLOSURE, MLr)
+    FRall = _flux35(FLUX_CLOSURE, MRr)
 
     off = (axis - 1) * 35
     sL = min(lminL, lminR)
@@ -152,7 +192,7 @@ function _ppt_x!(P, G, nfx::Int, nfy::Int, nfz::Int, b0::Int, nb::Int, c0::Int, 
                 recon_point_dev(_cellG(G, a-2, b, c), _cellG(G, a-1, b, c),
                                 _cellG(G, a, b, c), _cellG(G, a+1, b, c), _cellG(G, a+2, b, c)) :
                 to_recon_vars_tup(_cellG(G, a, b, c))
-            for m in 1:35; P[m, a, b, c] = Pv[m]; end
+            _store35!(P, Pv, a, b, c)
         end
     end
     return nothing
@@ -173,7 +213,7 @@ function _ppt_y!(P, G, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, c0::Int, 
                 recon_point_dev(_cellG(G, a, b-2, c), _cellG(G, a, b-1, c),
                                 _cellG(G, a, b, c), _cellG(G, a, b+1, c), _cellG(G, a, b+2, c)) :
                 to_recon_vars_tup(_cellG(G, a, b, c))
-            for m in 1:35; P[m, a, b, c] = Pv[m]; end
+            _store35!(P, Pv, a, b, c)
         end
     end
     return nothing
@@ -189,7 +229,7 @@ function _ppt_z!(P, G, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, b0::Int, 
                 recon_point_dev(_cellG(G, a, b, c-2), _cellG(G, a, b, c-1),
                                 _cellG(G, a, b, c), _cellG(G, a, b, c+1), _cellG(G, a, b, c+2)) :
                 to_recon_vars_tup(_cellG(G, a, b, c))
-            for m in 1:35; P[m, a, b, c] = Pv[m]; end
+            _store35!(P, Pv, a, b, c)
         end
     end
     return nothing
@@ -206,7 +246,7 @@ function _vavg_x!(V, P, nfx::Int, nfy::Int, nfz::Int, b0::Int, nb::Int, c0::Int,
             Vv = recon_avg_dev(_cellG(P, _clamp(a-2, nfx), b, c), _cellG(P, _clamp(a-1, nfx), b, c),
                                _cellG(P, a, b, c),
                                _cellG(P, _clamp(a+1, nfx), b, c), _cellG(P, _clamp(a+2, nfx), b, c))
-            for m in 1:35; V[m, a, b, c] = Vv[m]; end
+            _store35!(V, Vv, a, b, c)
         end
     end
     return nothing
@@ -221,7 +261,7 @@ function _vavg_y!(V, P, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, c0::Int,
             Vv = recon_avg_dev(_cellG(P, a, _clamp(b-2, nfy), c), _cellG(P, a, _clamp(b-1, nfy), c),
                                _cellG(P, a, b, c),
                                _cellG(P, a, _clamp(b+1, nfy), c), _cellG(P, a, _clamp(b+2, nfy), c))
-            for m in 1:35; V[m, a, b, c] = Vv[m]; end
+            _store35!(V, Vv, a, b, c)
         end
     end
     return nothing
@@ -236,7 +276,7 @@ function _vavg_z!(V, P, nfx::Int, nfy::Int, nfz::Int, a0::Int, na::Int, b0::Int,
             Vv = recon_avg_dev(_cellG(P, a, b, _clamp(c-2, nfz)), _cellG(P, a, b, _clamp(c-1, nfz)),
                                _cellG(P, a, b, c),
                                _cellG(P, a, b, _clamp(c+1, nfz)), _cellG(P, a, b, _clamp(c+2, nfz)))
-            for m in 1:35; V[m, a, b, c] = Vv[m]; end
+            _store35!(V, Vv, a, b, c)
         end
     end
     return nothing
@@ -264,7 +304,7 @@ function _weno_flux_x!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfx::I
                 mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
                 _hll_states(mL, mR, 1, Ma, s3f)
             end
-            for m in 1:35; FHO[m, f, j, k] = FH[m]; FLO[m, f, j, k] = FL[m]; end
+            _store35!(FHO, FH, f, j, k); _store35!(FLO, FL, f, j, k)
         end
     end
     return nothing
@@ -290,7 +330,7 @@ function _weno_flux_y!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfy::I
                 mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
                 _hll_states(mL, mR, 2, Ma, s3f)
             end
-            for m in 1:35; FHO[m, i, f, k] = FH[m]; FLO[m, i, f, k] = FL[m]; end
+            _store35!(FHO, FH, i, f, k); _store35!(FLO, FL, i, f, k)
         end
     end
     return nothing
@@ -316,7 +356,7 @@ function _weno_flux_z!(FHO, FLO, G, V, nx::Int, ny::Int, nz::Int, g::Int, nfz::I
                 mL, mR = weno_faces_dev(W1, W2, W3, W4, W5, W6, cL, cR)
                 _hll_states(mL, mR, 3, Ma, s3f)
             end
-            for m in 1:35; FHO[m, i, j, f] = FH[m]; FLO[m, i, j, f] = FL[m]; end
+            _store35!(FHO, FH, i, j, f); _store35!(FLO, FL, i, j, f)
         end
     end
     return nothing
@@ -466,7 +506,7 @@ function _weno_flux_lj_x!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int
                 mR=_lj_remap_dev(mR,Val(1),marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
             end
             FH=_hll_states(mL,mR,1,Ma,s3f); FL=_hll_states(cL,cR,1,Ma,s3f)
-            for m in 1:35; FHO[m,f,j,k]=FH[m]; FLO[m,f,j,k]=FL[m]; end
+            _store35!(FHO, FH, f, j, k); _store35!(FLO, FL, f, j, k)
         end
     end
     return nothing
@@ -488,7 +528,7 @@ function _weno_flux_lj_y!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int
                 mR=_lj_remap_dev(mR,Val(2),marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
             end
             FH=_hll_states(mL,mR,2,Ma,s3f); FL=_hll_states(cL,cR,2,Ma,s3f)
-            for m in 1:35; FHO[m,i,f,k]=FH[m]; FLO[m,i,f,k]=FL[m]; end
+            _store35!(FHO, FH, i, f, k); _store35!(FLO, FL, i, f, k)
         end
     end
     return nothing
@@ -510,7 +550,7 @@ function _weno_flux_lj_z!(FHO, FLO, G, V, VJ, OKL, midx, nx::Int,ny::Int,nz::Int
                 mR=_lj_remap_dev(mR,Val(3),marg_J_to_m(_wenoJ5(J6,J5,J4,J3,J2)))
             end
             FH=_hll_states(mL,mR,3,Ma,s3f); FL=_hll_states(cL,cR,3,Ma,s3f)
-            for m in 1:35; FHO[m,i,j,f]=FH[m]; FLO[m,i,j,f]=FL[m]; end
+            _store35!(FHO, FH, i, j, f); _store35!(FLO, FL, i, j, f)
         end
     end
     return nothing
@@ -744,7 +784,17 @@ function _blend_residual!(R, Th, FHOx, FLOx, FHOy, FLOy, FHOz, FLOz,
             Wzr = azr ? _kfvs_face(G, g+i, g+j, g+nz, 3, +1.0, wTwH, wU1,  wU2,  nz) : FHzr
             Wzl = azl ? _kfvs_face(G, g+i, g+j, g+1,  3, -1.0, wTw,  uxl,  ux2l, nz) : FHzl
 
-            for m in 1:35
+            # UNROLLED for the same reason as _store35!, and this is the worst case in the file:
+            # written as `for m in 1:35`, this body indexes EIGHTEEN NTuple{35} values with a loop
+            # variable (six faces x FH/FL/W), so all eighteen are forced into `alloca
+            # [35 x double]` -- 630 doubles pinned to local memory in a kernel whose register
+            # budget is 127 doubles. That matched this kernel's measured profile exactly: 255
+            # registers, 12.05% occupancy, 67% DRAM-bound with most of that traffic being spill.
+            #
+            # Unrolling took its local traffic from 123.5M to 38.9M sectors, -68%, the largest
+            # single win of this pass (dsmc/reference/gpu_spill_attempt3.csv in the companion
+            # repo). Identical arithmetic in identical order; bit-identical.
+            Base.Cartesian.@nexprs 35 m -> begin
                 Fxr = axr ? Wxr[m] : FLxr[m] + θxr * (FHxr[m] - FLxr[m])
                 Fxl = axl ? Wxl[m] : FLxl[m] + θxl * (FHxl[m] - FLxl[m])
                 Fyr = ayr ? Wyr[m] : FLyr[m] + θyr * (FHyr[m] - FLyr[m])
