@@ -173,15 +173,35 @@ end
 # adjacent interior cell, not a constant vector.
 #
 # Returns (src_index, is_inlet, wall_side) with wall_side = 0 none, -1 lo face, +1 hi face.
+# PERIODIC WRAP, valid for ANY interior extent n -- including n < g.
+#
+# The old form was `i + n` on the lo side and `i - n` on the hi side, whose comment claimed
+# "lo ghost <- hi INTERIOR". That claim silently requires n >= g. When the interior extent
+# along an axis is SHORTER than the halo, `i + n` lands on another GHOST cell, which a
+# different thread in the SAME launch is concurrently writing -- a read-write race across
+# blocks on global memory. The value read then depends on block scheduling, so the march
+# stops being a function of its inputs and successive identical runs disagree.
+#
+# It is invisible to the usual tools: compute-sanitizer's memcheck and initcheck are clean
+# (the address is in bounds and the memory was written), and racecheck only inspects SHARED
+# memory, not global. It was found by bisecting a reproducibility failure -- the residual is
+# pure on fixed input, but one full step is not, which isolates the halo refill.
+#
+# The modular form below always lands in [g+1, g+n], i.e. always on an interior cell, so no
+# thread ever reads a cell another thread writes. For n >= g it reduces ALGEBRAICALLY to the
+# old expressions (lo: i-g-1 in [-g,-1], so mod(i-g-1,n) = i-g-1+n, giving i+n), so every
+# configuration that was already valid is byte-identical and no existing result moves.
+@inline _wrap(i::Int, n::Int, g::Int) = g + 1 + mod(i - g - 1, n)
+
 @inline function _axis_src(i::Int, n::Int, g::Int, clo::Int, chi::Int)
     if i <= g
         clo == 1 && return (i, true, 0)           # inlet
-        clo == 2 && return (i + n, false, 0)      # periodic wrap (lo ghost <- hi interior)
+        clo == 2 && return (_wrap(i, n, g), false, 0)  # periodic wrap (see _wrap)
         clo == 3 && return (2*g + 1 - i, false, -1)   # wall: mirror about the lo face
         return (g + 1, false, 0)                  # outflow clamp
     elseif i >= g + n + 1
         chi == 1 && return (i, true, 0)
-        chi == 2 && return (i - n, false, 0)
+        chi == 2 && return (_wrap(i, n, g), false, 0)
         chi == 3 && return (2*(g + n) + 1 - i, false, 1)  # wall: mirror about the hi face
         return (g + n, false, 0)
     else
@@ -771,6 +791,21 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     # Direction-agnostic per-face BC: expand to face codes + sponge flags.
     (codes, spg) = _gpu_bc_codes(bc)
     cxlo, cxhi, cylo, cyhi, czlo, czhi = codes
+
+    # WALL AXES REQUIRE n >= g. The wall ghost is a SINGLE mirror reflection (2g+1-i), which
+    # lands inside [g+1, g+n] only when n >= g. With a shorter interior the mirror lands on
+    # another ghost cell, which is both physically undefined (it would take repeated
+    # reflections, with the velocity sign flipping at each one -- not implemented) and a
+    # read-write race against the thread writing that ghost. Periodic no longer needs this
+    # guard: `_wrap` is modular and correct for every n. Outflow and inlet never needed it,
+    # since both resolve to a clamped interior index. Fail loudly rather than race silently.
+    for (ax, nax, clo, chi) in (("x", nx, cxlo, cxhi), ("y", ny, cylo, cyhi), ("z", nz, czlo, czhi))
+        if (clo == 3 || chi == 3) && nax < g
+            error("wall BC on axis $ax needs interior extent >= halo g=$g; got n$ax=$nax. " *
+                  "The wall ghost is one mirror reflection and cannot reach the interior " *
+                  "from a shorter domain. Widen the axis to at least $g cells.")
+        end
+    end
 
     # Which global faces are walls (face code 3) AND opted into the KFVS flux. Default off,
     # so every existing run is byte-identical; kfvs_wall=true switches the wall faces from the
