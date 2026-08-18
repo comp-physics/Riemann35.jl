@@ -44,6 +44,7 @@ module MultiRate35
 
 using LinearAlgebra
 using ..MomentIndices: IJK, IJK_INDEX
+using ..ReconDev: _rk3_stage_factor
 
 export MR_RATES_EXACT, MR_RATES_BGK, MR_RATES_ESBGK, MR_RATES_QONLY,
        multirate_matrices, multirate_relax_tup
@@ -197,7 +198,7 @@ Maxwellian sits at exactly zero on all 34 non-constant basis coefficients, so re
 is a plain per-mode rescale with no target to build.
 """
 @inline function multirate_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
-                                     B, Binv, rates, nd)::NTuple{35,Float64}
+                                     B, Binv, rates, nd, rk3::Bool = false)::NTuple{35,Float64}
     rho = M[1]
     rho > 0.0 || return M
     ux = M[2] / rho; uy = M[6] / rho; uz = M[16] / rho
@@ -217,7 +218,18 @@ is a plain per-mode rescale with no target to build.
     S = ntuple(n -> C[n] / (rho * sp[n]), Val(35))
     a = _matvec35(B, S)
     x = dt / tc
-    ar = ntuple(n -> a[n] * exp(-rates[n] * x), Val(35))
+    # SSP-RK3 composite correction, PER GROUP. `stage_bgk` applies the collision once per stage
+    # with the full dt, and three convex applications with per-stage factor s compose to
+    # F(s) = s(s+1)(s+2)/6, so an uncorrected factor over-relaxes by F'(1) = 11/6. Each group
+    # relaxes independently here, so the same inversion applies groupwise. Omitting it would make
+    # the MR_RATES_BGK control disagree with the existing BGK runs and invalidate every
+    # comparison against them. Single assignment to `e`: reassigning it boxes the closure-captured
+    # local to Any and makes the call dynamic, which fails GPU compilation (see recon_dev.jl).
+    ar = ntuple(n -> begin
+        e0 = exp(-rates[n] * x)
+        e = rk3 ? _rk3_stage_factor(e0) : e0
+        a[n] * e
+    end, Val(35))
     S2 = _matvec35(Binv, ar)
     C2 = ntuple(n -> S2[n] * rho * sp[n], Val(35))
     _shift35(C2, ux, uy, uz, Val(+1))

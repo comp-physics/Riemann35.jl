@@ -45,6 +45,7 @@ using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
 # the package's single instances, not nested copies
 using Riemann35.RealizeDev: realizable_3D_M4_dev
 using Riemann35.ReconDev: bgk_relax_tup, granular_drain_tup, _recon_centrals, _c4tom4_35, _EPSF
+using Riemann35.MultiRate35: multirate_relax_tup, multirate_matrices
 using Riemann35.WallGhostDev: wall_ghost_tup
 using Riemann35: body_force_shift_dev
 
@@ -543,6 +544,28 @@ function _bgk_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::F
     return nothing
 end
 
+# MULTI-RATE stage collision: one relaxation rate per irreducible moment group, so the operator
+# can carry the exact Maxwell-molecule spectrum {sigma 1, q 2/3, m 3/2, Delta 2/3, R 7/6, phi 1}
+# instead of the one rate BGK can express or the two ES-BGK can. Same signature role as
+# `_bgk_interior!`; `Bd`/`Bid` are the 35x35 basis and its Gaussian inverse, `rd` the per-basis-row
+# rate, `ndd` the per-moment total degree. Every thread reads the SAME matrix entries, so they
+# broadcast from cache rather than costing 1225 distinct loads per thread.
+function _multirate_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64,
+                              Bd, Bid, rd, ndd, rk3::Bool)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= nx * ny * nz
+        @inbounds begin
+            i = (idx - 1) % nx + 1; r = (idx - 1) ÷ nx
+            j = r % ny + 1;         k = r ÷ ny + 1
+            ga = g + i; gb = g + j; gc = g + k
+            C = ntuple(m -> G[m, ga, gb, gc], Val(35))
+            out = multirate_relax_tup(C, dt, kn, Bd, Bid, rd, ndd, rk3)
+            for m in 1:35; G[m, ga, gb, gc] = out[m]; end
+        end
+    end
+    return nothing
+end
+
 # GRANULAR: inelastic energy drain (Brey-Moreno-Dufty granular BGK), operator-split once per
 # step. `granular_drain_tup` is shared verbatim with `test/probe_granular_haff.jl`, so the
 # marched solver and the 0D probe cannot disagree about the model.
@@ -717,6 +740,12 @@ in place and left with its outflow halos refilled.
 function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::Integer;
                              dts=nothing, s3max::Real = max(40.0, 4.0 + abs(Ma)/2.0),
                              stage_bgk::Bool = false, Kn::Real = Inf, Pr::Real = 1.0, omega::Real = 0.5, stage_bgk_exact::Bool = false, restitution::Real = 1.0,
+                             # MULTI-RATE stage collision (opt-in). A 35-vector of per-basis-row
+                             # rates from Riemann35.MultiRate35 -- MR_RATES_EXACT / _BGK / _ESBGK /
+                             # _QONLY. Left `nothing`, the shipped BGK/ES-BGK path runs untouched
+                             # and this file is byte-identical in behaviour. `Pr` and `omega` are
+                             # IGNORED when it is set, because the rate vector supersedes both.
+                             mrates = nothing,
                              reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
                              wall_uw_antisym::Bool = false, wall_Tw_prof = nothing,
@@ -874,6 +903,21 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         G, nfx, nfy, nfz, g, nx, ny, nz, wTw, wTwH, wU1, wU2, wAl, wAnti, wTwP,
         inlet_d, cxlo, cxhi, cylo, cyhi, czlo, czhi))
 
+    # MULTI-RATE upload, once per march. Passing MR_RATES_BGK reproduces bgk_relax_tup(Pr=1) to
+    # 3.4e-15 on Maxwellian/anisotropic/bimodal/tilted states, so a comparison ACROSS rate sets
+    # runs through one code path and carries no operator-switch confound.
+    mr_d = if mrates === nothing
+        nothing
+    else
+        restitution == 1.0 || error("march3d_order3_gpu!: mrates does not implement restitution < 1")
+        Bh, Bih, rh, ndh = multirate_matrices(collect(Float64, mrates))
+        (CuArray(Bh), CuArray(Bih), CuArray(rh), CuArray(ndh))
+    end
+    collide!(dtv, rk3f) = (mr_d === nothing ?
+        (@cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dtv, knf, prf, omf, rk3f, eres)) :
+        (@cuda threads=threads blocks=bint _multirate_interior!(G, nx, ny, nz, g, dtv, knf,
+                                                                mr_d[1], mr_d[2], mr_d[3], mr_d[4], rk3f)); nothing)
+
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
     stages = ((1.0, 0.0, 1.0), (0.75, 0.25, 0.25), (1.0/3.0, 2.0/3.0, 2.0/3.0))
 
@@ -892,7 +936,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         # not a per-stage fraction -- passing sbe would apply the stage-factor correction on top
         # and under-relax by construction.
         if strang
-            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false, eres)
+            collide!(0.5*dt, false)
         end
         @cuda threads=threads blocks=bint _copy_interior!(G0, G, nx, ny, nz, g)
         for (a, b, c) in stages
@@ -907,13 +951,13 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
             @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f, proj_counter)
             if stage_bgk && !strang
-                @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dt, knf, prf, omf, sbe, eres)
+                collide!(dt, sbe)
             end
         end
         # Strang: trailing half-collision, after the RK stages and before the granular drain and
         # body force, which are themselves once-per-step splits.
         if strang
-            @cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, 0.5*dt, knf, prf, omf, false, eres)
+            collide!(0.5*dt, false)
         end
         # GRANULAR inelastic cooling, ONCE PER STEP after the RK stages -- the same
         # operator-split placement as the body force below, and for the same reason: it is an
