@@ -7,13 +7,15 @@
 # two rates. Monatomic Maxwell molecules need five, and the exact values are known in closed form
 # because the Boltzmann moment hierarchy closes for that interaction:
 #
-#     sigma_ij 1     q_i 2/3     m_ijk 3/2     Delta 2/3     R_ij 7/6     phi_ijkl 1
+#     sigma_ij 1     q_i 2/3     m_ijk 3/2     Delta 2/3     R_ij 7/6     phi_ijkl 7/4
+#
+# (phi_ijkl is MEASURED here, not cited -- see MR_RATES_EXACT.)
 #
 # (arXiv:1903.00966 sec. 3.4 for d=3, e=1, cross-referencing Struchtrup 2005 and Gu & Emerson
 # 2009.) MEASURED delivery, by diagonalising a finite-difference Jacobian of one relaxation step:
 # BGK gives 30 modes at rate 1; ES-BGK(Pr=2/3) gives 5 at 1 and 25 at 2/3. So ES-BGK is exact at
 # the two orders that set mu and k, and wrong at EVERY order above -- m_ijk by 9/4, R_ij by 7/4,
-# phi_ijkl by 3/2, all too slow. Those are precisely the moments a 35-moment method exists to
+# phi_ijkl by 21/8, all too slow. Those are precisely the moments a 35-moment method exists to
 # carry. See roe-hyqmom-research/dsmc/reference/relax_spectrum.csv.
 #
 # WHY A DIAGONAL OPERATOR SUFFICES. The same source gives nu*_Rsigma = nu*_phiq = 0 at e = 1, so
@@ -130,9 +132,23 @@ const _BINV = _G * _B'                    # B is Gaussian-orthonormal, so B*G*B'
 
 # ---- named rate sets, per GROUP (conserved groups are pinned at 0) ----------------------------
 _rates(d) = [get(d, _LABELS[a], 0.0) for a in 1:35]
-"Exact monatomic Maxwell-molecule spectrum."
+"""
+Exact monatomic Maxwell-molecule spectrum.
+
+phi_ijkl = 7/4 IS MEASURED, NOT CITED, and the value first used here was wrong. arXiv:1903.00966
+lists `nu*_phi = 1`, but its G29 system is G26 plus THREE moments, so its phi is a VECTOR (l=1,
+r=2) -- confirmed by its stated zero coupling `nu*_phi_q = 0` being with q, another vector, exactly
+as `nu*_R_sigma = 0` pairs the two rank-2 moments. The rank-4 deviator a 35-moment system carries
+is not in G29 at all, so that source never gave its rate, and reading 1.0 off it was an error.
+
+Measured instead, as a collision matrix element at equilibrium (dsmc/collision_matrix.py):
+7/4 to 0.48 sigma over 1.28e8 pairs, with every other simple rational at 7 sigma or worse and the
+1.0 originally used 347 sigma away. The same measurement independently reproduces the four values
+that ARE citable -- q 0.6690, m 1.5006, Delta 0.6668, R 1.1690 against 2/3, 3/2, 2/3, 7/6 -- which
+is what licenses believing it on the fifth.
+"""
 const MR_RATES_EXACT = _rates(Dict("sigma_ij" => 1.0, "q_i" => 2/3, "m_ijk" => 3/2,
-                                   "Delta" => 2/3, "R_ij" => 7/6, "phi_ijkl" => 1.0))
+                                   "Delta" => 2/3, "R_ij" => 7/6, "phi_ijkl" => 7/4))
 "What plain BGK delivers: one rate for everything."
 const MR_RATES_BGK   = _rates(Dict(g[1] => 1.0 for g in MR_GROUPS[4:end]))
 "What ES-BGK(Pr=2/3) delivers: stress at 1, everything else at 2/3."
@@ -187,7 +203,7 @@ end
 
 One exact-exponential relaxation step with a separate rate per irreducible group.
 
-`tc = Kn/(2*rho*sqrt(Theta))` matches `bgk_relax_tup` exactly, so `rates == MR_RATES_BGK`
+`tc = (Kn/2)*Theta^(omega-1)/rho` matches `bgk_relax_tup` exactly, so `rates == MR_RATES_BGK`
 reproduces plain BGK and is the natural regression check. rho, u and the ISOTROPIC Theta are
 recomputed from the state and re-applied unchanged, so mass, momentum and energy are conserved by
 CONSTRUCTION rather than by cancellation.
@@ -198,13 +214,17 @@ Maxwellian sits at exactly zero on all 34 non-constant basis coefficients, so re
 is a plain per-mode rescale with no target to build.
 """
 @inline function multirate_relax_tup(M::NTuple{35,Float64}, dt::Float64, Kn::Float64,
-                                     B, Binv, rates, nd, rk3::Bool = false)::NTuple{35,Float64}
+                                     B, Binv, rates, nd, rk3::Bool = false,
+                                     omega::Float64 = 0.5)::NTuple{35,Float64}
     rho = M[1]
     rho > 0.0 || return M
     ux = M[2] / rho; uy = M[6] / rho; uz = M[16] / rho
     Th = ((M[3] / rho - ux * ux) + (M[10] / rho - uy * uy) + (M[20] / rho - uz * uz)) / 3
     Th = Th > 1e-14 ? Th : 1e-14
-    tc = Kn / (rho * sqrt(Th) * 2)
+    # tau_ref = (Kn/2) * Theta^(omega-1) / rho, matching `_esbgk_relax_tup`. The omega == 0.5
+    # branch is kept separate rather than left to the algebra: Theta^(-0.5) is NOT bitwise
+    # 1/sqrt(Theta), and the default path must stay byte-identical to bgk_relax_tup.
+    tc = omega == 0.5 ? Kn / (rho * sqrt(Th) * 2) : (Kn / 2) * Th^(omega - 1.0) / rho
     isfinite(tc) && tc > 0.0 || return M
 
     C = _shift35(M, ux, uy, uz, Val(-1))
