@@ -551,7 +551,7 @@ end
 # rate, `ndd` the per-moment total degree. Every thread reads the SAME matrix entries, so they
 # broadcast from cache rather than costing 1225 distinct loads per thread.
 function _multirate_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64, kn::Float64,
-                              Bd, Bid, rd, ndd, rk3::Bool)
+                              Bd, Bid, rd, ndd, rk3::Bool, om::Float64)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -559,7 +559,7 @@ function _multirate_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, dt::Float64,
             j = r % ny + 1;         k = r ÷ ny + 1
             ga = g + i; gb = g + j; gc = g + k
             C = ntuple(m -> G[m, ga, gb, gc], Val(35))
-            out = multirate_relax_tup(C, dt, kn, Bd, Bid, rd, ndd, rk3)
+            out = multirate_relax_tup(C, dt, kn, Bd, Bid, rd, ndd, rk3, om)
             for m in 1:35; G[m, ga, gb, gc] = out[m]; end
         end
     end
@@ -743,8 +743,9 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              # MULTI-RATE stage collision (opt-in). A 35-vector of per-basis-row
                              # rates from Riemann35.MultiRate35 -- MR_RATES_EXACT / _BGK / _ESBGK /
                              # _QONLY. Left `nothing`, the shipped BGK/ES-BGK path runs untouched
-                             # and this file is byte-identical in behaviour. `Pr` and `omega` are
-                             # IGNORED when it is set, because the rate vector supersedes both.
+                             # and this file is byte-identical in behaviour. `Pr` is IGNORED when
+                             # it is set (the rate vector supersedes it); `omega` still applies,
+                             # since it sets the relaxation TIME rather than the rate ratios.
                              mrates = nothing,
                              reduce26::Bool = false,
                              wall_Tw::Real = 1.0, wall_uw1::Real = 0.0, wall_uw2::Real = 0.0, wall_alpha::Real = 1.0,
@@ -916,7 +917,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
     collide!(dtv, rk3f) = (mr_d === nothing ?
         (@cuda threads=threads blocks=bint _bgk_interior!(G, nx, ny, nz, g, dtv, knf, prf, omf, rk3f, eres)) :
         (@cuda threads=threads blocks=bint _multirate_interior!(G, nx, ny, nz, g, dtv, knf,
-                                                                mr_d[1], mr_d[2], mr_d[3], mr_d[4], rk3f)); nothing)
+                                                                mr_d[1], mr_d[2], mr_d[3], mr_d[4], rk3f, omf)); nothing)
 
     # (a, b, c) RK3 stage weights: Gint = a*G0 + b*Gint + (c*dt)*R
     stages = ((1.0, 0.0, 1.0), (0.75, 0.25, 0.25), (1.0/3.0, 2.0/3.0, 2.0/3.0))
