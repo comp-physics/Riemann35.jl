@@ -84,5 +84,6 @@ const TOL = 1e-10
     # Integration tests (Julia vs MATLAB golden files)
     # The test file handles its own skip logic if golden files are missing
     # or if TEST_INTEGRATION=false
+    include("wick5_test.jl")          # optional Wick/Grad degree-5 blend; default must be OFF
     include("test_integration.jl")
 end
