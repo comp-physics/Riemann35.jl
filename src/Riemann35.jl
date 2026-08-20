@@ -171,6 +171,13 @@ include("numerics/recon_dev.jl")
 using .ReconDev: granular_drain_tup, to_recon_vars_dev, from_recon_vars_dev,
                  to_recon_vars_tup, from_recon_vars_tup,
                  pressurize_recon_tup, depressurize_recon_tup, bgk_relax_tup
+# One relaxation rate per irreducible moment group, so the operator can carry the exact
+# Maxwell-molecule spectrum instead of the one rate BGK or the two ES-BGK can express.
+include("numerics/multirate35.jl")
+using .MultiRate35: MR_RATES_EXACT, MR_RATES_BGK, MR_RATES_ESBGK, MR_RATES_QONLY,
+                    multirate_matrices, multirate_relax_tup
+export MR_RATES_EXACT, MR_RATES_BGK, MR_RATES_ESBGK, MR_RATES_QONLY,
+       multirate_matrices, multirate_relax_tup
 # The CPU realizable_3D_M4 (realizability.jl -> realize_M4_projection.jl) delegates to
 # realizable_3D_M4_dev. RealizeDev references ReconDev via `using ..ReconDev`.
 include("realizability/realize_dev.jl")
