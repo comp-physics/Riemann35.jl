@@ -46,6 +46,7 @@ export reduce26_S, reduce26_residual, S_INDEX, DROPPED_KEYS
 # as the name here because it is what the probes import and what the notes cite, but
 # it is now an alias, so there is exactly one ordering in the package.
 using ..MomentIndices: IJK_INDEX
+using ..Riemann35: nt35
 const S_INDEX = IJK_INDEX
 
 "The nine odd fourth-order cross-moments the reduction drops."
@@ -87,7 +88,7 @@ function reduce26_S(S::AbstractVector{Float64})
         k3   = _scale(_e(a),3)
         out[S_INDEX[k211]] = _S(S,k11) + _S(S,k3)*S111
     end
-    NTuple{35,Float64}(out)
+    nt35(out)
 end
 
 """

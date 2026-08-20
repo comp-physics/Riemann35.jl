@@ -49,6 +49,7 @@ export kfvs_wall_flux, halfline_gauss_moments, IJK35_KFVS
 # so test_wall_tangential_convention.jl can demonstrate what delegating fixed.
 
 using ..MomentIndices: IJK
+using ..Riemann35: nt35
 using ..KfvsWallDev
 # Canonical table, imported not copied (issue #61). It was a local transcription; the
 # table has been mis-transcribed once before -- positions 31-33 permuted, three moments
@@ -131,7 +132,7 @@ function kfvs_wall_flux(M::AbstractVector{Float64}, axis::Int, outward::Float64,
     # directly. So every wall assertion in the suite was guarding a model that no run used,
     # while the model that every run used had no host-side test at all. Delegating costs no
     # production number and puts the tests back onto the code that actually executes.
-    F, rho_w = KfvsWallDev.kfvs_wall_flux_full_dev(NTuple{35,Float64}(M), axis, outward,
+    F, rho_w = KfvsWallDev.kfvs_wall_flux_full_dev(nt35(M), axis, outward,
                                                   Tw, uw1, uw2)
     return (F, rho_w, F[1])                # F[1] is the net mass flux: must be ~0
 end
