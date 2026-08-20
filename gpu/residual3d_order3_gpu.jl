@@ -102,7 +102,7 @@ end
 @inline _theta_star(use_closed::Bool, Mlo::NTuple{35,Float64}, dM::NTuple{35,Float64}) =
     use_closed ? theta_star_update_closed(Mlo, dM) : theta_star_update_dev(Mlo, dM)
 
-export residual3d_order3_box_gpu!, residual3d_order3_gpu
+export residual3d_order3_box_gpu!, residual3d_order3_gpu, Order3Scratch
 
 @inline _cellG(M, i::Int, j::Int, k::Int) =
     ntuple(m -> @inbounds(M[m, i, j, k]), Val(35))
@@ -875,6 +875,55 @@ end
 # Driver.  G is the FULLY-HALOED cube (35, nfx, nfy, nfz), nfx=nx+2g etc.
 # R is the interior residual (35, nx, ny, nz).
 # ===========================================================================
+"""
+    Order3Scratch(nx, ny, nz, g)
+
+Per-call scratch for [`residual3d_order3_box_gpu!`](@ref), hoisted so a caller can allocate it
+ONCE instead of once per residual call.
+
+WHY THIS EXISTS. The residual allocates two full `(35, nf, nf, nf)` cubes (`P`, `V`) plus six
+face arrays and `Th` on every call, and CUDA.jl's pool does not release them between the three
+RK stages of a step. The peak is therefore ~3x the scratch of a single call on top of the
+resident state: measured 1208 MB at 48^3 against a 134 MB resident cube, and 2.6 GB at 64^3.
+`residual3d_gpu!` (order 1/2) already takes an `Fbuf` from its caller for exactly this reason;
+the order-3 path never got the equivalent.
+
+BIT-IDENTITY IS PRESERVED BY ZEROING ON ENTRY, not by arguing that every element is written
+before it is read. Fresh `CUDA.zeros` hands the kernels zeros; a reused buffer must therefore be
+handed zeros too. That argument would be delicate to make element-wise -- `Th` is explicitly
+relied upon to be zero in the first-order path, and the pass-1 reconstruction kernels were
+restricted to a sub-box (1bbaa67) so parts of `P`/`V` are deliberately never written -- and a
+`fill!` costs a memset against a residual that reads the same arrays many times over.
+"""
+struct Order3Scratch
+    P::CuArray{Float64,4}
+    V::CuArray{Float64,4}
+    FHOx::CuArray{Float64,4}; FLOx::CuArray{Float64,4}
+    FHOy::CuArray{Float64,4}; FLOy::CuArray{Float64,4}
+    FHOz::CuArray{Float64,4}; FLOz::CuArray{Float64,4}
+    Th::CuArray{Float64,4}
+    dims::NTuple{4,Int}          # (nx, ny, nz, g) -- guards against reuse at the wrong size
+end
+
+function Order3Scratch(nx::Int, ny::Int, nz::Int, g::Int)
+    nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
+    Order3Scratch(CUDA.zeros(Float64, 35, nfx, nfy, nfz),
+                  CUDA.zeros(Float64, 35, nfx, nfy, nfz),
+                  CUDA.zeros(Float64, 35, nx+1, ny, nz), CUDA.zeros(Float64, 35, nx+1, ny, nz),
+                  CUDA.zeros(Float64, 35, nx, ny+1, nz), CUDA.zeros(Float64, 35, nx, ny+1, nz),
+                  CUDA.zeros(Float64, 35, nx, ny, nz+1), CUDA.zeros(Float64, 35, nx, ny, nz+1),
+                  CUDA.zeros(Float64, 6, nx, ny, nz),
+                  (nx, ny, nz, g))
+end
+
+"""Zero every buffer, so a reused scratch is indistinguishable from a freshly allocated one."""
+function _reset!(w::Order3Scratch)
+    for a in (w.P, w.V, w.FHOx, w.FLOx, w.FHOy, w.FLOy, w.FHOz, w.FLOz, w.Th)
+        fill!(a, 0.0)
+    end
+    return w
+end
+
 function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4},
                                     nx::Int, ny::Int, nz::Int, g::Int,
                                     dx::Real, dy::Real, dz::Real, Ma::Real, dt::Real;
@@ -901,7 +950,8 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
                                     idp::Bool = true,
                                     rank_bnd = (xlo=false, xhi=false, ylo=false, yhi=false,
                                                 zlo=false, zhi=false),
-                                     active::NTuple{3,Bool} = (true, true, true))
+                                     active::NTuple{3,Bool} = (true, true, true),
+                                    ws::Union{Nothing,Order3Scratch} = nothing)
     nfx = nx + 2g; nfy = ny + 2g; nfz = nz + 2g
     @assert g >= 4 "order-3 residual requires halo g ≥ 4; got g=$g"
     @assert size(G) == (35, nfx, nfy, nfz) "G must be (35,nx+2g,ny+2g,nz+2g)"
@@ -910,12 +960,26 @@ function residual3d_order3_box_gpu!(R::CuArray{Float64,4}, G::CuArray{Float64,4}
     dxf = Float64(dx); dyf = Float64(dy); dzf = Float64(dz)
     λx = Float64(dt) / dxf; λy = Float64(dt) / dyf; λz = Float64(dt) / dzf
 
-    P = CUDA.zeros(Float64, 35, nfx, nfy, nfz)   # recon-var point scratch (reused per axis)
-    V = CUDA.zeros(Float64, 35, nfx, nfy, nfz)   # recon-var average scratch (reused per axis)
-    FHOx = CUDA.zeros(Float64, 35, nx+1, ny, nz); FLOx = CUDA.zeros(Float64, 35, nx+1, ny, nz)
-    FHOy = CUDA.zeros(Float64, 35, nx, ny+1, nz); FLOy = CUDA.zeros(Float64, 35, nx, ny+1, nz)
-    FHOz = CUDA.zeros(Float64, 35, nx, ny, nz+1); FLOz = CUDA.zeros(Float64, 35, nx, ny, nz+1)
-    Th   = CUDA.zeros(Float64, 6, nx, ny, nz)
+    # ws === nothing keeps the original per-call allocation, so every existing caller is
+    # byte-identical and unchanged. With a scratch supplied the same buffers are reused, zeroed
+    # on entry so the kernels see exactly what CUDA.zeros would have handed them.
+    if ws === nothing
+        P = CUDA.zeros(Float64, 35, nfx, nfy, nfz)   # recon-var point scratch (reused per axis)
+        V = CUDA.zeros(Float64, 35, nfx, nfy, nfz)   # recon-var average scratch (reused per axis)
+        FHOx = CUDA.zeros(Float64, 35, nx+1, ny, nz); FLOx = CUDA.zeros(Float64, 35, nx+1, ny, nz)
+        FHOy = CUDA.zeros(Float64, 35, nx, ny+1, nz); FLOy = CUDA.zeros(Float64, 35, nx, ny+1, nz)
+        FHOz = CUDA.zeros(Float64, 35, nx, ny, nz+1); FLOz = CUDA.zeros(Float64, 35, nx, ny, nz+1)
+        Th   = CUDA.zeros(Float64, 6, nx, ny, nz)
+    else
+        ws.dims == (nx, ny, nz, g) ||
+            error("Order3Scratch was built for $(ws.dims), called with $((nx, ny, nz, g))")
+        _reset!(ws)
+        P = ws.P; V = ws.V
+        FHOx = ws.FHOx; FLOx = ws.FLOx
+        FHOy = ws.FHOy; FLOy = ws.FLOy
+        FHOz = ws.FHOz; FLOz = ws.FLOz
+        Th   = ws.Th
+    end
 
     ncube = nfx * nfy * nfz
     bcube = cld(ncube, threads)

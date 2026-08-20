@@ -41,7 +41,7 @@ using CUDA, MPI
 using Random: randn!          # CUDA.jl extends randn! for CuArrays (CUDA.randn! not exported)
 
 include(joinpath(@__DIR__, "residual3d_order3_gpu.jl"))
-using .Residual3DOrder3GPU: residual3d_order3_box_gpu!
+using .Residual3DOrder3GPU: residual3d_order3_box_gpu!, Order3Scratch
 # the package's single instances, not nested copies
 using Riemann35.RealizeDev: realizable_3D_M4_dev
 using Riemann35.ReconDev: bgk_relax_tup, granular_drain_tup, _recon_centrals, _c4tom4_35, _EPSF
@@ -892,6 +892,11 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
 
     R    = CUDA.zeros(Float64, 35, nx, ny, nz)
     G0   = CUDA.zeros(Float64, 35, nx, ny, nz)
+    # ONE residual scratch for the whole march, not one per RK stage per step. Without this the
+    # pool holds all three stages' worth of (35,nf,nf,nf) reconstruction cubes simultaneously and
+    # the peak runs ~9x the resident state (1208 MB at 48^3, 2.6 GB at 64^3). Zeroed on entry
+    # inside the residual, so the result is bit-identical to the per-call allocation.
+    ws3  = Order3Scratch(nx, ny, nz, g)
     svec = CUDA.zeros(Float64, nx * ny * nz)
 
     bcube = cld(nfx * nfy * nfz, threads)
@@ -943,7 +948,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
         for (a, b, c) in stages
             refill!()
             residual3d_order3_box_gpu!(R, G, nx, ny, nz, g, dxf, dxf, dxf, Maf, dt;
-                                       active=active,
+                                       ws=ws3, active=active,
                                        s3max=s3f, threads=threads, theta_closed=theta_closed, idp=idp,
                                        use_logjacobi_recon=use_logjacobi_recon,
                                        first_order=first_order,
