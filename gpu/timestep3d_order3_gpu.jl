@@ -1153,6 +1153,21 @@ function march3d_slab_order3_gpu!(Mi::CuArray{Float64,4}, dx::Real, Ma::Real, ns
         @cuda threads=threads blocks=bint _copy_interior!(G0, G, n, n, nzloc, g)
         for (a, b, c) in stages
             refresh_halos!()
+            # NO `ws=` HERE, AND THAT IS DELIBERATE. march3d_order3_gpu! hands the residual a
+            # reusable Order3Scratch, which cuts its peak memory 2.34x; this slab march does not,
+            # so it still allocates P, V and the face arrays per RK stage. The omission is not an
+            # oversight and should not be "fixed" without the check below, because this path is
+            # the one carrying the multi-GPU rank-consistency guarantee: the z-slab march is
+            # required to be bit-identical to the single-GPU march, which is why g = HALO3 = 8 is
+            # chosen here rather than the g >= 4 the residual alone needs.
+            #
+            # Adding a workspace here is very likely safe -- the buffers are zeroed on entry, so
+            # the kernels see what CUDA.zeros would have handed them, exactly as on the box path --
+            # but "very likely" is not the standard this guarantee is held to. Before enabling it,
+            # reproduce a multi-rank slab march against the single-GPU march bitwise, not merely
+            # against itself. The box path's equivalent evidence is in PR #88: five BC presets
+            # (:copy, :periodic, :channel, :crossflow, :crossflow_absorb_y) byte-identical over a
+            # full interior dump, plus periodic and wall-bounded flow cases.
             residual3d_order3_box_gpu!(R, G, n, n, nzloc, g, dxf, dxf, dxf, Maf, dt;
                                        s3max=s3f, threads=threads, rank_bnd=rb, theta_closed=theta_closed)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, n, n, nzloc, g, a, b, c * dt)
