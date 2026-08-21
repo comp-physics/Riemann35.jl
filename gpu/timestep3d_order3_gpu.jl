@@ -50,7 +50,7 @@ using Riemann35.WallGhostDev: wall_ghost_tup
 using Riemann35: body_force_shift_dev
 
 export march3d_order3_gpu!, march3d_slab_order3_gpu!, build_haloed_cube, interior_from_cube!
-export gpu_proj_counter, gpu_proj_count
+export gpu_proj_counter, gpu_proj_count, gpu_proj_capture, gpu_proj_captured
 
 """
     gpu_proj_counter() -> CuArray{Int32,1}
@@ -73,6 +73,42 @@ that control, and it exists because a counter that only ever reads zero is indis
 one that is not wired up, which is precisely the bug this replaces.
 """
 gpu_proj_counter() = CUDA.zeros(Int32, 1)
+
+"""
+    gpu_proj_capture(n) -> (buf::CuArray{Float64,2}, idx::CuArray{Int32,1})
+
+Allocate a ring buffer holding up to `n` PRE-projection states (35 raw moments each) from cells
+where the projection fired, plus its atomic fill index.
+
+WHY CAPTURE THE STATE RATHER THAN CLASSIFY ON THE DEVICE. The correction is a sequence of stages --
+univariate `H2` floors, the `s3max` clamps, the second-order cross clamp, the `S220`/`S202`/`S022`
+bounds, then `projection35_dev` in up to two passes -- and the question worth answering is which
+stage did the work and which principal minor of the 6x6 `delta2star` was negative on entry.
+Answering that on the device would mean either duplicating the stage logic in a second kernel,
+where it could drift from the real one silently, or threading diagnostics through
+`realizable_3D_M4_corr_dev` itself, which is the routine a 1200-state golden battery pins
+byte-for-byte. Capturing the input instead leaves the correction math untouched: the classifier
+runs afterwards on the host and can be checked against the shipped routine's own output, which is
+the gate that makes it trustworthy.
+
+`idx` counts ATTEMPTED writes, so it can exceed `n`; the first `min(n, idx)` rows are valid and
+`idx > n` means the sample is truncated rather than complete. Reservoir sampling would be less
+biased, but firing is bursty in space and time and a prefix is the honest thing to report as a
+prefix.
+"""
+gpu_proj_capture(n::Int) = (CUDA.zeros(Float64, 35, n), CUDA.zeros(Int32, 1))
+
+"""
+    gpu_proj_captured(buf, idx) -> (Matrix{Float64}, Int)
+
+Read back the valid rows and the ATTEMPTED count. A returned count larger than `size(buf,2)`
+means capture was truncated.
+"""
+function gpu_proj_captured(buf::CuArray{Float64,2}, idx::CuArray{Int32,1})
+    n = Int(Array(idx)[1])
+    keep = min(n, size(buf, 2))
+    return (Array(buf)[:, 1:keep], n)
+end
 
 """
     gpu_proj_count(c) -> Int
@@ -438,7 +474,7 @@ end
 # direct question anyway -- it is what "the projection fired" means operationally -- and the two
 # agree except on cells that are unrealizable by less than the projection's own tolerance.
 function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3max::Float64,
-                         ctr = nothing)
+                         ctr = nothing, cap = nothing, capidx = nothing)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         @inbounds begin
@@ -454,7 +490,10 @@ function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3ma
                 G[26,ga,gb,gc], G[27,ga,gb,gc], G[28,ga,gb,gc], G[29,ga,gb,gc], G[30,ga,gb,gc],
                 G[31,ga,gb,gc], G[32,ga,gb,gc], G[33,ga,gb,gc], G[34,ga,gb,gc], G[35,ga,gb,gc],
                 Ma, s3max)
-            if ctr === nothing
+            # EITHER diagnostic takes the instrumented path. Gating this on `ctr` alone made
+            # `proj_capture` silently record nothing when passed without a counter -- the buffer
+            # came back empty, which reads exactly like "the projection never fired".
+            if ctr === nothing && cap === nothing
                 for m in 1:35; G[m, ga, gb, gc] = P[m]; end
             else
                 fired = false
@@ -473,9 +512,20 @@ function _proj_interior!(G, nx::Int, ny::Int, nz::Int, g::Int, Ma::Float64, s3ma
                     # 1e-10 sits four orders above that noise floor and far below any genuine
                     # correction, which moves moments by O(1) relative.
                     fired |= (abs(P[m] - o) > 1e-10 * max(abs(o), abs(P[m])) + 1e-13)
-                    G[m, ga, gb, gc] = P[m]
                 end
-                if fired
+                # CAPTURE BEFORE OVERWRITING. The detection loop above deliberately does not
+                # write, because the state worth recording is the projection's INPUT and it is
+                # gone the moment P is stored. Splitting the loop costs one extra pass over 35
+                # doubles on cells that fired, in a kernel that only runs when diagnostics are on.
+                if fired && cap !== nothing
+                    w = CUDA.atomic_add!(pointer(capidx, 1), Int32(1))
+                    slot = Int(w) + 1
+                    if slot <= size(cap, 2)
+                        for m in 1:35; cap[m, slot] = G[m, ga, gb, gc]; end
+                    end
+                end
+                for m in 1:35; G[m, ga, gb, gc] = P[m]; end
+                if fired && ctr !== nothing
                     CUDA.@atomic ctr[1] += Int32(1)
                 end
             end
@@ -762,6 +812,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                              # the shipped path is unchanged. The caller owns the array and its
                              # zeroing, which is what lets a driver accumulate over many marches.
                              proj_counter = nothing,
+                             proj_capture = nothing, proj_capture_idx = nothing,
                              split::Symbol = :lie,   # :lie (shipped) or :strang
                              # ACTIVE AXES. A quasi-1D case (Couette, Poiseuille, Fourier) is
                              # uniform along two axes, and on a uniform axis the two face fluxes
@@ -955,7 +1006,7 @@ function march3d_order3_gpu!(G::CuArray{Float64,4}, dx::Real, Ma::Real, nstep::I
                                        kfvs_walls=kfvsw, wall_Tw=wTw, wall_Tw_hi=wTwH,
                                        wall_uw1=wU1, wall_uw2=wU2, wall_antisym=wAnti)
             @cuda threads=threads blocks=bint _rk_combine!(G, G0, R, nx, ny, nz, g, a, b, c * dt)
-            @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f, proj_counter)
+            @cuda threads=threads blocks=bint _proj_interior!(G, nx, ny, nz, g, Maf, s3f, proj_counter, proj_capture, proj_capture_idx)
             if stage_bgk && !strang
                 collide!(dt, sbe)
             end
